@@ -1,0 +1,166 @@
+name: Validate and release
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip "pytest>=8.0.0"
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Check source syntax
+        run: python -m compileall -q src
+
+  build:
+    name: Build and validate package
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Build source and wheel distributions
+        run: python -m build
+
+      - name: Validate package metadata and README rendering
+        run: python -m twine check dist/*
+
+      - name: Smoke-test the built wheel in a clean environment
+        run: |
+          python -m venv package-test
+          package-test/bin/python -m pip install dist/*.whl
+          package-test/bin/python -c "from evidor import Agent, OpenAIProvider; print('Built package import passed')"
+
+  release:
+    name: Version, build, and validate distribution
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    outputs:
+      released: ${{ steps.version.outputs.released }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install release tools
+        run: python -m pip install --upgrade pip build twine python-semantic-release
+
+      - name: Determine version, update release files, build, commit, and tag
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          previous_tag="$(git tag --points-at HEAD --list 'v*' | head -n 1)"
+          semantic-release version
+          tag="$(git tag --points-at HEAD --list 'v*' | head -n 1)"
+          if [ -n "$tag" ] && [ "$tag" != "$previous_tag" ]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate package metadata and README rendering
+        if: steps.version.outputs.released == 'true'
+        run: python -m twine check dist/*
+
+      - name: Smoke-test the built wheel in a clean environment
+        if: steps.version.outputs.released == 'true'
+        run: |
+          python -m venv package-test
+          package-test/bin/python -m pip install dist/*.whl
+          package-test/bin/python -c "from evidor import Agent, OpenAIProvider; print('Installed package import passed')"
+
+      - name: Upload release artifacts
+        if: steps.version.outputs.released == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-artifacts-${{ steps.version.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+
+  publish-testpypi:
+    name: Publish prerelease to TestPyPI
+    needs: release
+    if: needs.release.outputs.released == 'true' && github.ref_name == 'dev'
+    runs-on: ubuntu-latest
+    environment: testpypi
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distribution-artifacts-${{ needs.release.outputs.version }}
+          path: dist/
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Twine
+        run: python -m pip install --upgrade pip twine
+
+      - name: Upload to TestPyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: python -m twine upload --repository-url https://test.pypi.org/legacy/ dist/*
+
+  publish-pypi:
+    name: Publish stable release to PyPI
+    needs: release
+    if: needs.release.outputs.released == 'true' && github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/evidor/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distribution-artifacts-${{ needs.release.outputs.version }}
+          path: dist/
+
+      - name: Publish to PyPI with trusted publishing
+        uses: pypa/gh-action-pypi-publish@release/v1

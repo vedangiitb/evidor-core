@@ -34,7 +34,7 @@ openai = ["openai>=1.0.0"]
 anthropic = ["anthropic>=0.25.0"]
 gemini = ["google-genai>=1.0.0"]
 all = ["openai>=1.0.0", "anthropic>=0.25.0", "google-genai>=1.0.0"]
-dev = ["build>=1.2.0", "pytest>=8.0.0", "twine>=6.0.0"]
+dev = ["build>=1.2.0", "pytest>=8.0.0", "python-semantic-release>=10.7.0", "twine>=6.0.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/evidor"]
@@ -42,3 +42,17 @@ packages = ["src/evidor"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+build_command = "python -m build"
+major_on_zero = false
+
+[tool.semantic_release.branches.main]
+match = "^main$"
+prerelease = false
+
+[tool.semantic_release.branches.dev]
+match = "^dev$"
+prerelease = true
+prerelease_token = "dev"

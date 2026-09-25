@@ -31,7 +31,7 @@ Providers receive an API key explicitly or use their standard environment variab
 The `Agent` depends only on the `ModelProvider` abstraction. To support another
 provider, implement its single `generate(request)` method.
 
-## Build and publish
+## Build and release
 
 Create distributable artifacts locally:
 
@@ -42,12 +42,14 @@ python -m build
 python -m twine check dist/*
 ```
 
-To release, first create a PyPI project named `evidor` (or select an available
-distribution name), then upload with a PyPI API token:
+Releases are performed by GitHub Actions and use Conventional Commits to select
+the next version:
 
-```bash
-python -m twine upload dist/*
-```
+- `fix: ...` creates a patch release.
+- `feat: ...` creates a minor release.
+- `feat!: ...` or a `BREAKING CHANGE:` footer creates a major release.
 
-Use the `__token__` username and store the token outside this repository (for
-example, in your shell's secure environment variables or CI secret store).
+Pushes to `dev` publish `-dev.N` prereleases to TestPyPI. Pushes to `main`
+publish stable releases to PyPI. Configure `TEST_PYPI_API_TOKEN` as a repository
+or `testpypi` environment secret, and configure PyPI trusted publishing for the
+`pypi` environment before enabling the workflow.
