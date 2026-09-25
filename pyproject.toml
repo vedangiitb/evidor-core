@@ -8,19 +8,33 @@ version = "0.1.0"
 description = "A small, provider-agnostic harness for LLM input and output."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [{ name = "Evidor" }]
+license = { file = "LICENSE" }
+authors = [{ name = "Vedang Bale" }]
+keywords = ["ai", "agent", "anthropic", "gemini", "llm", "openai"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
 ]
+
+[project.urls]
+Homepage = "https://github.com/evidor/evidor-core"
+Repository = "https://github.com/evidor/evidor-core"
+Issues = "https://github.com/evidor/evidor-core/issues"
 
 [project.optional-dependencies]
 openai = ["openai>=1.0.0"]
 anthropic = ["anthropic>=0.25.0"]
 gemini = ["google-genai>=1.0.0"]
 all = ["openai>=1.0.0", "anthropic>=0.25.0", "google-genai>=1.0.0"]
-dev = ["pytest>=8.0.0"]
+dev = ["build>=1.2.0", "pytest>=8.0.0", "twine>=6.0.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/evidor"]
