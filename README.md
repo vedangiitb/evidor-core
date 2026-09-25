@@ -51,5 +51,5 @@ the next version:
 
 Pushes to `dev` publish `-dev.N` prereleases to TestPyPI. Pushes to `main`
 publish stable releases to PyPI. Configure `TEST_PYPI_API_TOKEN` as a repository
-or `testpypi` environment secret, and configure PyPI trusted publishing for the
-`pypi` environment before enabling the workflow.
+or `dev` environment secret, and configure PyPI trusted publishing for the
+`prod` environment before enabling the workflow.
