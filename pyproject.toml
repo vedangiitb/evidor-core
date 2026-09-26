@@ -42,7 +42,12 @@ packages = ["src/evidor"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "--cov=evidor --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["src/evidor"]
+
+[tool.coverage.report]
+show_missing = true
 
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
