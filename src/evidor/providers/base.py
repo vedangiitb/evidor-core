@@ -12,3 +12,7 @@ class ModelProvider(Protocol):
     def generate(self, request: GenerationRequest) -> GenerationResponse:
         """Generate a response for the request."""
         ...
+
+    def with_model(self, model: str) -> "ModelProvider":
+        """Return a copy of this provider configured with a different model."""
+        ...
