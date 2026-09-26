@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "evidor"
-version = "1.0.0-dev.1"
+version = "1.0.0-dev.2"
 description = "A small, provider-agnostic harness for LLM input and output."
 readme = "README.md"
 requires-python = ">=3.10"
