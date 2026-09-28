@@ -1,6 +1,15 @@
 import pytest
 
-from evidor import Agent, GenerationRequest, GenerationResponse, Message, ModelProvider
+from evidor import (
+    Agent,
+    GenerationRequest,
+    GenerationResponse,
+    Message,
+    ModelProvider,
+    Tool,
+    ToolCall,
+    tool,
+)
 
 
 class FakeProvider:
@@ -142,3 +151,256 @@ def test_summarization_model_validation() -> None:
 
     with pytest.raises(TypeError, match="summarization_model must be a model name string or ModelProvider"):
         Agent(provider, summarization_model=123)  # type: ignore[arg-type]
+
+
+# --- Tool Calling Tests ---
+
+
+def test_agent_automatic_tool_calling_loop() -> None:
+    @tool
+    def get_weather(location: str) -> str:
+        """Get the weather."""
+        return f"{location} is 25C and sunny"
+
+    class ToolFakeProvider:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        def with_model(self, model: str) -> "ToolFakeProvider":
+            return self
+
+        def generate(self, request: GenerationRequest) -> GenerationResponse:
+            self.turn += 1
+            if self.turn == 1:
+                # First response calls the tool
+                return GenerationResponse(
+                    text="",
+                    model="test",
+                    tool_calls=(
+                        ToolCall(id="call_1", name="get_weather", arguments={"location": "Paris"}),
+                    ),
+                )
+            # Second response receives tool output and gives answer
+            tool_msg = [m for m in request.messages if m.role == "tool"][0]
+            return GenerationResponse(
+                text=f"The weather is: {tool_msg.content}",
+                model="test",
+            )
+
+    provider = ToolFakeProvider()
+    agent = Agent(provider, tools=[get_weather])
+
+    assert len(agent.tools) == 1
+    assert agent.tools[0].name == "get_weather"
+
+    response = agent.send("What's the weather in Paris?")
+
+    assert response.text == "The weather is: Paris is 25C and sunny"
+    assert len(agent.messages) == 4
+    assert agent.messages[0].role == "user"
+    assert agent.messages[1].role == "assistant"
+    assert len(agent.messages[1].tool_calls) == 1
+    assert agent.messages[2].role == "tool"
+    assert agent.messages[2].content == "Paris is 25C and sunny"
+    assert agent.messages[2].tool_call_id == "call_1"
+    assert agent.messages[3].role == "assistant"
+
+
+def test_agent_multiple_tool_calls_in_single_turn() -> None:
+    @tool
+    def add(a: int, b: int) -> int:
+        return a + b
+
+    @tool
+    def multiply(a: int, b: int) -> int:
+        return a * b
+
+    class MultiToolProvider:
+        def __init__(self) -> None:
+            self.called = False
+
+        def with_model(self, model: str) -> "MultiToolProvider":
+            return self
+
+        def generate(self, request: GenerationRequest) -> GenerationResponse:
+            if not self.called:
+                self.called = True
+                return GenerationResponse(
+                    text="",
+                    model="test",
+                    tool_calls=(
+                        ToolCall(id="c1", name="add", arguments={"a": 2, "b": 3}),
+                        ToolCall(id="c2", name="multiply", arguments={"a": 4, "b": 5}),
+                    ),
+                )
+            return GenerationResponse(text="Both tools completed", model="test")
+
+    agent = Agent(MultiToolProvider(), tools=[add, multiply])
+    response = agent.send("Compute both")
+
+    assert response.text == "Both tools completed"
+    tool_messages = [m for m in agent.messages if m.role == "tool"]
+    assert len(tool_messages) == 2
+    assert tool_messages[0].content == "5"
+    assert tool_messages[1].content == "20"
+
+
+def test_agent_handles_unknown_tool_and_exception() -> None:
+    @tool
+    def faulty_tool(x: int) -> int:
+        raise ValueError("Something broke")
+
+    class FaultyProvider:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        def with_model(self, model: str) -> "FaultyProvider":
+            return self
+
+        def generate(self, request: GenerationRequest) -> GenerationResponse:
+            self.turn += 1
+            if self.turn == 1:
+                return GenerationResponse(
+                    text="",
+                    model="test",
+                    tool_calls=(
+                        ToolCall(id="c1", name="nonexistent", arguments={}),
+                        ToolCall(id="c2", name="faulty_tool", arguments={"x": 1}),
+                    ),
+                )
+            return GenerationResponse(text="Handled errors", model="test")
+
+    agent = Agent(FaultyProvider(), tools=[faulty_tool])
+    response = agent.send("test")
+
+    assert response.text == "Handled errors"
+    tool_messages = [m for m in agent.messages if m.role == "tool"]
+    assert "Error: Tool 'nonexistent' not found." in tool_messages[0].content
+    assert "Error executing tool 'faulty_tool': Something broke" in tool_messages[1].content
+
+
+def test_agent_max_tool_iterations() -> None:
+    @tool
+    def ping() -> str:
+        return "pong"
+
+    class InfiniteToolProvider:
+        def with_model(self, model: str) -> "InfiniteToolProvider":
+            return self
+
+        def generate(self, request: GenerationRequest) -> GenerationResponse:
+            return GenerationResponse(
+                text="",
+                model="test",
+                tool_calls=(ToolCall(id="c1", name="ping", arguments={}),),
+            )
+
+    agent = Agent(InfiniteToolProvider(), tools=[ping], max_tool_iterations=3)
+    response = agent.send("loop")
+
+    # Stopped after 3 iterations
+    tool_messages = [m for m in agent.messages if m.role == "tool"]
+    assert len(tool_messages) == 3
+
+
+def test_agent_summarization_with_tools() -> None:
+    @tool
+    def ping() -> str:
+        return "pong"
+
+    summaries = []
+
+    class SummarizeToolProvider:
+        def with_model(self, model: str) -> "SummarizeToolProvider":
+            return self
+
+        def generate(self, request: GenerationRequest) -> GenerationResponse:
+            # Check if this is a summarization request
+            if any(m.role == "system" and "Summarize the conversation" in m.content for m in request.messages):
+                summaries.append(request.messages[-1].content)
+                return GenerationResponse(text="Summary containing tool results", model="test")
+
+            # Normal turn: return text without tool call
+            return GenerationResponse(text=f"Reply to: {request.prompt}", model="test")
+
+    provider = SummarizeToolProvider()
+    agent = Agent(provider, tools=[ping], max_messages=3)
+
+    # Manually inject tool message into history to test transcript formatting in _summarize
+    agent._messages.append(Message(role="assistant", content="calling ping", tool_calls=(ToolCall(id="c", name="ping", arguments={}),)))
+    agent._messages.append(Message(role="tool", content="pong", tool_call_id="c", name="ping"))
+
+    agent.send("next message")
+    agent.send("another message")
+
+    assert len(summaries) >= 1
+    summary_input = summaries[0]
+    assert "TOOL (ping): pong" in summary_input
+    assert "ASSISTANT (called tools: ping): calling ping" in summary_input
+
+
+class SequenceProvider:
+    def __init__(self, responses: list[GenerationResponse]) -> None:
+        self.responses = list(responses)
+        self.requests: list[GenerationRequest] = []
+
+    def with_model(self, model: str) -> "SequenceProvider":
+        return self
+
+    def generate(self, request: GenerationRequest) -> GenerationResponse:
+        self.requests.append(request)
+        return self.responses.pop(0)
+
+
+def test_tool_returning_custom_object() -> None:
+    class CustomObj:
+        def __str__(self) -> str:
+            return "CustomResult"
+
+    tool = Tool(
+        name="custom_tool",
+        description="Returns custom object",
+        parameters={"type": "object", "properties": {}},
+        func=lambda: CustomObj(),
+    )
+    provider = SequenceProvider(
+        [
+            GenerationResponse(
+                text="",
+                model="test",
+                tool_calls=(ToolCall(id="c1", name="custom_tool", arguments={}),),
+            ),
+            GenerationResponse(text="final reply", model="test"),
+        ]
+    )
+    agent = Agent(provider=provider, tools=[tool])
+    agent.send("run")
+    assert agent.messages[-2].role == "tool"
+    assert agent.messages[-2].content == "CustomResult"
+
+
+def test_summarize_with_empty_content_tool_call() -> None:
+    tool = Tool(
+        name="echo",
+        description="Echo",
+        parameters={"type": "object", "properties": {}},
+        func=lambda: "done",
+    )
+    summary_provider = SequenceProvider([GenerationResponse(text="summary text", model="test")])
+    agent = Agent(
+        provider=FakeProvider(),
+        summarization_model=summary_provider,
+        tools=[tool],
+    )
+    messages = [
+        Message(role="user", content="hello"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=(ToolCall(id="c1", name="echo", arguments={}),),
+        ),
+        Message(role="tool", content="done", name="echo"),
+    ]
+    summary = agent._summarize(messages)
+    assert summary == "summary text"
+    assert "ASSISTANT (called tools: echo):" in summary_provider.requests[0].messages[1].content

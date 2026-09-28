@@ -11,6 +11,8 @@ from evidor import (
     GenerationResponse,
     Message,
     OpenAIProvider,
+    Tool,
+    ToolCall,
 )
 
 
@@ -213,3 +215,231 @@ def test_gemini_provider_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = GeminiProvider(model="gemini-2.5-flash")
     with pytest.raises(ImportError, match="Install Gemini support with: pip install 'evidor\\[gemini\\]'"):
         provider.generate(GenerationRequest(prompt="test"))
+
+
+# --- Provider Tool Calling Tests ---
+
+
+def test_openai_provider_chat_completions_with_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_openai = types.ModuleType("openai")
+    # Client without responses attribute -> triggers chat.completions fallback
+    mock_client = MagicMock(spec=["chat"])
+    mock_tc = MagicMock()
+    mock_tc.id = "call_abc"
+    mock_tc.function.name = "get_weather"
+    mock_tc.function.arguments = '{"location": "Tokyo"}'
+
+    mock_choice_msg = MagicMock(content="Checking weather", tool_calls=[mock_tc])
+    mock_choice = MagicMock(message=mock_choice_msg)
+    mock_response = MagicMock(choices=[mock_choice])
+    mock_client.chat.completions.create.return_value = mock_response
+    mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    provider = OpenAIProvider(model="gpt-4o", api_key="test-key")
+    tool_def = Tool(
+        name="get_weather",
+        description="Get weather",
+        parameters={"type": "object", "properties": {"location": {"type": "string"}}},
+        func=lambda location: "sunny",
+    )
+    request = GenerationRequest(
+        messages=[
+            Message(role="user", content="What's the weather in Tokyo?"),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(ToolCall(id="call_abc", name="get_weather", arguments={"location": "Tokyo"}),),
+            ),
+            Message(role="tool", content="sunny", tool_call_id="call_abc"),
+        ],
+        tools=(tool_def,),
+    )
+    resp = provider.generate(request)
+    assert resp.text == "Checking weather"
+    assert len(resp.tool_calls) == 1
+    assert resp.tool_calls[0] == ToolCall(id="call_abc", name="get_weather", arguments={"location": "Tokyo"})
+
+    call_args = mock_client.chat.completions.create.call_args.kwargs
+    assert call_args["model"] == "gpt-4o"
+    assert len(call_args["tools"]) == 1
+    assert call_args["tools"][0]["function"]["name"] == "get_weather"
+    assert call_args["messages"][1]["tool_calls"][0]["id"] == "call_abc"
+    assert call_args["messages"][2] == {"role": "tool", "tool_call_id": "call_abc", "content": "sunny"}
+
+
+def test_openai_provider_responses_api_with_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_openai = types.ModuleType("openai")
+    mock_client = MagicMock()
+    mock_output_item = MagicMock()
+    mock_output_item.type = "function_call"
+    mock_output_item.name = "calc"
+    mock_output_item.arguments = '{"x": 5}'
+    mock_output_item.call_id = "call_xyz"
+    mock_response = MagicMock(output_text="Calling calc", output=[mock_output_item])
+    mock_client.responses.create.return_value = mock_response
+    mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    provider = OpenAIProvider(model="gpt-4.1-mini")
+    tool_def = Tool(
+        name="calc",
+        description="calculate",
+        parameters={"type": "object"},
+        func=lambda x: x,
+    )
+    request = GenerationRequest(
+        messages=[
+            Message(role="user", content="compute"),
+            Message(
+                role="assistant",
+                content="thinking",
+                tool_calls=(ToolCall(id="call_xyz", name="calc", arguments={"x": 5}),),
+            ),
+            Message(role="tool", content="5", tool_call_id="call_xyz"),
+        ],
+        tools=(tool_def,),
+    )
+    resp = provider.generate(request)
+    assert resp.text == "Calling calc"
+    assert resp.tool_calls == (ToolCall(id="call_xyz", name="calc", arguments={"x": 5}),)
+
+
+def test_anthropic_provider_tools_and_tool_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+    mock_tool_use_block = MagicMock()
+    mock_tool_use_block.type = "tool_use"
+    mock_tool_use_block.id = "call_anthropic_1"
+    mock_tool_use_block.name = "search"
+    mock_tool_use_block.input = {"q": "python"}
+    mock_text_block = MagicMock(type="text", text="I will search")
+    mock_message = MagicMock(content=[mock_text_block, mock_tool_use_block])
+    mock_client.messages.create.return_value = mock_message
+    mock_anthropic.Anthropic = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(model="claude-3-5", api_key="key")
+    tool_def = Tool(
+        name="search",
+        description="Search web",
+        parameters={"type": "object", "properties": {"q": {"type": "string"}}},
+        func=lambda q: "results",
+    )
+    request = GenerationRequest(
+        messages=[
+            Message(role="user", content="Search python"),
+            Message(
+                role="assistant",
+                content="Searching...",
+                tool_calls=(ToolCall(id="call_anthropic_1", name="search", arguments={"q": "python"}),),
+            ),
+            Message(role="tool", content="results", tool_call_id="call_anthropic_1"),
+        ],
+        tools=(tool_def,),
+    )
+    resp = provider.generate(request)
+    assert resp.text == "I will search"
+    assert resp.tool_calls == (ToolCall(id="call_anthropic_1", name="search", arguments={"q": "python"}),)
+
+    create_kwargs = mock_client.messages.create.call_args.kwargs
+    assert len(create_kwargs["tools"]) == 1
+    assert create_kwargs["tools"][0]["name"] == "search"
+    assert create_kwargs["tools"][0]["input_schema"] == tool_def.parameters
+    assert create_kwargs["messages"][2] == {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "call_anthropic_1", "content": "results"}],
+    }
+
+
+def test_gemini_provider_tools_and_function_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_google = types.ModuleType("google")
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    mock_types.Content = MagicMock(side_effect=lambda role, parts: {"role": role, "parts": parts})  # type: ignore[attr-defined]
+    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
+    mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
+    mock_types.Part.from_function_response = MagicMock(side_effect=lambda name, response: f"resp:{name}:{response}")
+    mock_types.Part.from_function_call = MagicMock(side_effect=lambda name, args: f"fc:{name}:{args}")
+    mock_types.FunctionDeclaration = MagicMock(side_effect=lambda name, description, parameters: f"fd:{name}")  # type: ignore[attr-defined]
+    mock_types.Tool = MagicMock(side_effect=lambda function_declarations: f"tool:{function_declarations}")  # type: ignore[attr-defined]
+    mock_types.GenerateContentConfig = MagicMock(side_effect=lambda **kwargs: kwargs)  # type: ignore[attr-defined]
+
+    mock_fc = MagicMock()
+    mock_fc.id = "call_gemini_1"
+    mock_fc.name = "lookup"
+    mock_fc.args = {"id": 42}
+
+    mock_response = MagicMock(text="Looking it up", function_calls=[mock_fc])
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = mock_response
+    mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    mock_genai.types = mock_types  # type: ignore[attr-defined]
+    mock_google.genai = mock_genai  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google", mock_google)
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-2.5-flash")
+    tool_def = Tool(
+        name="lookup",
+        description="Lookup ID",
+        parameters={"type": "object"},
+        func=lambda id: "data",
+    )
+    request = GenerationRequest(
+        messages=[
+            Message(role="user", content="lookup 42"),
+            Message(
+                role="assistant",
+                content="ok",
+                tool_calls=(ToolCall(id="call_gemini_1", name="lookup", arguments={"id": 42}),),
+            ),
+            Message(role="tool", content="data", name="lookup"),
+        ],
+        tools=(tool_def,),
+    )
+    resp = provider.generate(request)
+    assert resp.text == "Looking it up"
+    assert resp.tool_calls == (ToolCall(id="call_gemini_1", name="lookup", arguments={"id": 42}),)
+
+
+def test_gemini_provider_function_call_via_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_google = types.ModuleType("google")
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    mock_types.Content = MagicMock(side_effect=lambda role, parts: {"role": role, "parts": parts})  # type: ignore[attr-defined]
+    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
+    mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
+    mock_types.GenerateContentConfig = MagicMock()  # type: ignore[attr-defined]
+
+    mock_fc = MagicMock()
+    mock_fc.id = "call_gemini_2"
+    mock_fc.name = "query"
+    mock_fc.args = {"term": "python"}
+
+    mock_part = MagicMock(function_call=mock_fc)
+    mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]))
+    mock_response = MagicMock(text=None, function_calls=None, candidates=[mock_candidate])
+
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = mock_response
+    mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    mock_genai.types = mock_types  # type: ignore[attr-defined]
+    mock_google.genai = mock_genai  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google", mock_google)
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-2.5-flash")
+    resp = provider.generate(GenerationRequest(prompt="query python"))
+    assert resp.text == ""
+    assert resp.tool_calls == (ToolCall(id="call_gemini_2", name="query", arguments={"term": "python"}),)
+

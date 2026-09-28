@@ -1,22 +1,45 @@
 """Provider-neutral data structures."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, Sequence
+from typing import Any, Literal
+
+from .tools import Tool
 
 
-MessageRole = Literal["system", "user", "assistant"]
+MessageRole = Literal["system", "user", "assistant", "tool"]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    """A tool invocation requested by a model."""
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            raise ValueError("tool call id must not be empty")
+        if not self.name:
+            raise ValueError("tool call name must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
 class Message:
-    """A single text message in a conversation."""
+    """A single text message or tool call/response in a conversation."""
 
     role: MessageRole
-    content: str
+    content: str = ""
+    tool_calls: tuple[ToolCall, ...] = ()
+    tool_call_id: str | None = None
+    name: str | None = None
     is_summary: bool = False
 
     def __post_init__(self) -> None:
-        if not self.content or not self.content.strip():
+        if isinstance(self.tool_calls, (list, tuple)):
+            object.__setattr__(self, "tool_calls", tuple(self.tool_calls))
+        if (not self.content or not self.content.strip()) and not self.tool_calls and self.role != "tool":
             raise ValueError("message content must not be empty")
 
 
@@ -25,12 +48,14 @@ class GenerationRequest:
     """The complete provider-neutral input for one model generation."""
 
     messages: tuple[Message, ...]
+    tools: tuple[Tool, ...]
 
     def __init__(
         self,
         prompt: str | None = None,
         *,
         messages: Sequence[Message] | None = None,
+        tools: Sequence[Tool] | None = None,
     ) -> None:
         if prompt is not None and messages is not None:
             raise ValueError("provide either prompt or messages, not both")
@@ -41,6 +66,7 @@ class GenerationRequest:
         if not messages:
             raise ValueError("messages must not be empty")
         object.__setattr__(self, "messages", tuple(messages))
+        object.__setattr__(self, "tools", tuple(tools or ()))
 
     @property
     def prompt(self) -> str:
@@ -54,3 +80,8 @@ class GenerationResponse:
 
     text: str
     model: str
+    tool_calls: tuple[ToolCall, ...] = ()
+
+    def __post_init__(self) -> None:
+        if isinstance(self.tool_calls, (list, tuple)):
+            object.__setattr__(self, "tool_calls", tuple(self.tool_calls))

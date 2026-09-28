@@ -130,6 +130,77 @@ simple_request = GenerationRequest(prompt="Hello!")
 response = provider.generate(simple_request)
 ```
 
+## Tools & Function Calling
+
+Evidor provides first-class primitives for defining tools and equipping agents with automatic function-calling execution loops.
+
+### Defining Tools with `@tool`
+
+Transform any Python function into a provider-neutral tool using the `@tool` decorator. Evidor automatically derives the JSON Schema for parameters from type annotations and extracts descriptions from docstrings (Google, Sphinx, or plain styles):
+
+```python
+from evidor import tool
+
+@tool
+def get_weather(location: str, unit: str = "celsius") -> str:
+    """Get the current weather forecast for a given location.
+
+    Args:
+        location: City and country or state, e.g. 'San Francisco, CA'.
+        unit: Temperature scale ('celsius' or 'fahrenheit').
+    """
+    return f"Weather in {location}: 22° {unit}, clear skies."
+
+@tool(name="calc_add", description="Add two numbers together.")
+def add(a: float, b: float) -> float:
+    return a + b
+```
+
+### Equipping Agents with Tools
+
+Pass your tools directly into `Agent(..., tools=[...])`. When a model decides to call one or more tools, the agent automatically executes them, feeds the results back to the model as `role="tool"` messages, and loops until the model generates a final response:
+
+```python
+from evidor import Agent, GeminiProvider, tool
+
+@tool
+def search_database(query: str) -> list[str]:
+    """Search internal records by keyword."""
+    return [f"Record 1 matching '{query}'", f"Record 2 matching '{query}'"]
+
+agent = Agent(
+    GeminiProvider(model="gemini-2.5-flash"),
+    tools=[search_database],
+    max_tool_iterations=10,  # Maximum tool execution turns per send() (default: 10)
+)
+
+response = agent.send("Can you check our records for 'alpha project'?")
+print(response.text)
+```
+
+### Manual Tool Definition
+
+For dynamic or programmatic tools without a standard Python function signature, instantiate `Tool` directly:
+
+```python
+from evidor import Tool
+
+custom_tool = Tool(
+    name="query_sql",
+    description="Run a read-only SQL query.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "SQL statement"}
+        },
+        "required": ["query"],
+    },
+    func=lambda query: f"Results for: {query}",
+)
+```
+
+Evidor's tool calling works consistently across **OpenAI**, **Anthropic**, and **Gemini**, adapting each provider's underlying tool schema and message format transparently.
+
 ## Providers
 
 Supported providers and their typical models:
