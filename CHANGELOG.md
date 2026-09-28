@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.0.0-dev.3 (2026-09-28)
+
+### Features
+
+- Introduced tool primitives for integrating tool calls
+  ([`9edbf58`](https://github.com/vedangiitb/evidor-core/commit/9edbf58c74b6ea3c9b6a184227353e36a794ad54))
+
+
 ## v1.0.0-dev.2 (2026-09-26)
 
 ### Bug Fixes
