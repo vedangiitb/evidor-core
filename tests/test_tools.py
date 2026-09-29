@@ -159,8 +159,7 @@ def test_tool_empty_union_and_failed_type_hints(monkeypatch: pytest.MonkeyPatch)
     assert fallback_func.parameters["properties"]["param"]["type"] == "integer"
 
 
-@pytest.mark.asyncio
-async def test_async_tool_execution() -> None:
+def test_async_tool_execution() -> None:
     import asyncio
 
     @tool
@@ -172,17 +171,21 @@ async def test_async_tool_execution() -> None:
     assert async_add.is_async is True
     # Test sync execution wrapper
     assert async_add.execute(a=3, b=4) == 7
-    # Test async execution method
-    assert await async_add.execute_async(a=10, b=20) == 30
-    # Test direct callable invocation
-    assert await async_add(5, 5) == 10
 
-    # Test sync function through execute_async
-    @tool
-    def sync_multiply(x: int, y: int) -> int:
-        return x * y
+    async def _run() -> None:
+        # Test async execution method
+        assert await async_add.execute_async(a=10, b=20) == 30
+        # Test direct callable invocation
+        assert await async_add(5, 5) == 10
 
-    assert await sync_multiply.execute_async(x=3, y=4) == 12
+        # Test sync function through execute_async
+        @tool
+        def sync_multiply(x: int, y: int) -> int:
+            return x * y
+
+        assert await sync_multiply.execute_async(x=3, y=4) == 12
+
+    asyncio.run(_run())
 
 
 def test_async_tool_execution_from_sync_context() -> None:
@@ -214,8 +217,7 @@ def test_tool_timeout_sync() -> None:
     assert fast_func.execute(delay=0.01) == "done"
 
 
-@pytest.mark.asyncio
-async def test_tool_timeout_async() -> None:
+def test_tool_timeout_async() -> None:
     import asyncio
 
     @tool(timeout=0.05)
@@ -223,12 +225,14 @@ async def test_tool_timeout_async() -> None:
         await asyncio.sleep(delay)
         return "done"
 
-    with pytest.raises(TimeoutError, match="timed out after 0.05s"):
-        await slow_async_func.execute_async(delay=0.2)
+    async def _run() -> None:
+        with pytest.raises(TimeoutError, match="timed out after 0.05s"):
+            await slow_async_func.execute_async(delay=0.2)
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_async_tool_preserves_contextvars() -> None:
+def test_async_tool_preserves_contextvars() -> None:
     import asyncio
     import contextvars
 
@@ -240,7 +244,10 @@ async def test_async_tool_preserves_contextvars() -> None:
         await asyncio.sleep(0.001)
         return test_var.get()
 
-    # When executed synchronously inside an active loop (which dispatches to worker thread with context copy)
-    assert get_token.execute() == "custom_token_123"
-    # When executed asynchronously in native loop
-    assert await get_token.execute_async() == "custom_token_123"
+    async def _run() -> None:
+        # When executed synchronously inside an active loop (which dispatches to worker thread with context copy)
+        assert get_token.execute() == "custom_token_123"
+        # When executed asynchronously in native loop
+        assert await get_token.execute_async() == "custom_token_123"
+
+    asyncio.run(_run())

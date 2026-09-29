@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 
 from evidor import (
@@ -495,19 +496,18 @@ def test_agent_tool_timeout() -> None:
     assert "Error executing tool 'slow_tool': Tool 'slow_tool' timed out after 0.03s" in tool_msg.content
 
 
-@pytest.mark.asyncio
-async def test_agent_send_async_basic() -> None:
-    provider = FakeProvider(model="test-model")
-    agent = Agent(provider, system_prompt="Sys prompt")
-    resp = await agent.send_async("hello async")
-    assert resp.text == "[test-model] hello async"
-    assert len(agent.messages) == 3
+def test_agent_send_async_basic() -> None:
+    async def _run() -> None:
+        provider = FakeProvider(model="test-model")
+        agent = Agent(provider, system_prompt="Sys prompt")
+        resp = await agent.send_async("hello async")
+        assert resp.text == "[test-model] hello async"
+        assert len(agent.messages) == 3
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_agent_send_async_with_tools() -> None:
-    import asyncio
-
+def test_agent_send_async_with_tools() -> None:
     @tool
     async def async_fetch(item: str) -> str:
         await asyncio.sleep(0.01)
@@ -525,15 +525,18 @@ async def test_agent_send_async_with_tools() -> None:
     )
 
     agent = Agent(provider, tools=[async_fetch])
-    resp = await agent.send_async("get data")
-    assert resp.text == "Here is your data: Fetched data"
-    assert len(agent.messages) == 4
-    assert agent.messages[2].role == "tool"
-    assert agent.messages[2].content == "Fetched data"
+
+    async def _run() -> None:
+        resp = await agent.send_async("get data")
+        assert resp.text == "Here is your data: Fetched data"
+        assert len(agent.messages) == 4
+        assert agent.messages[2].role == "tool"
+        assert agent.messages[2].content == "Fetched data"
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_agent_send_async_errors_and_expiry() -> None:
+def test_agent_send_async_errors_and_expiry() -> None:
     @tool
     def faulty_func() -> str:
         raise ValueError("broken")
@@ -573,10 +576,14 @@ async def test_agent_send_async_errors_and_expiry() -> None:
             return GenerationResponse(text="", model="test")
 
     agent = Agent(ExpiryProvider(), tools=[faulty_func], max_tool_iterations=3)
-    resp = await agent.send_async("trigger errors")
-    assert "Reached maximum tool iterations (3)" in resp.text
-    tool_messages = [m for m in agent.messages if m.role == "tool"]
-    assert len(tool_messages) == 3
-    assert "Malformed JSON arguments" in tool_messages[0].content
-    assert "Tool 'missing_tool' not found" in tool_messages[1].content
-    assert "Error executing tool 'faulty_func': broken" in tool_messages[2].content
+
+    async def _run() -> None:
+        resp = await agent.send_async("trigger errors")
+        assert "Reached maximum tool iterations (3)" in resp.text
+        tool_messages = [m for m in agent.messages if m.role == "tool"]
+        assert len(tool_messages) == 3
+        assert "Malformed JSON arguments" in tool_messages[0].content
+        assert "Tool 'missing_tool' not found" in tool_messages[1].content
+        assert "Error executing tool 'faulty_func': broken" in tool_messages[2].content
+
+    asyncio.run(_run())
