@@ -1,6 +1,7 @@
-"""Tool call primitives and automatic schema generation."""
-
+import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence
+import concurrent.futures
+import contextvars
 from dataclasses import dataclass
 import inspect
 import re
@@ -32,18 +33,85 @@ class Tool:
     description: str
     parameters: dict[str, Any]
     func: Callable[..., Any]
+    timeout: float | None = None
 
     @property
     def __name__(self) -> str:
         return self.name
 
+    @property
+    def is_async(self) -> bool:
+        """Return True if the underlying callable is a coroutine function."""
+        return inspect.iscoroutinefunction(self.func)
+
+    def with_timeout(self, timeout: float | None) -> "Tool":
+        """Return a copy of this Tool with an updated execution timeout in seconds."""
+        return Tool(
+            name=self.name,
+            description=self.description,
+            parameters=self.parameters,
+            func=self.func,
+            timeout=timeout,
+        )
+
     def execute(self, **kwargs: Any) -> Any:
-        """Execute the tool function with the provided keyword arguments."""
-        return self.func(**kwargs)
+        """Execute the tool function with the provided keyword arguments.
+
+        Synchronously executes both standard and coroutine functions.
+        Enforces self.timeout if configured.
+        """
+        def _invoke() -> Any:
+            if inspect.iscoroutinefunction(self.func):
+                return self._run_coroutine_factory(lambda: self.func(**kwargs))
+            return self.func(**kwargs)
+
+        if self.timeout is not None and self.timeout > 0:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(_invoke)
+                try:
+                    return future.result(timeout=self.timeout)
+                except concurrent.futures.TimeoutError as err:
+                    raise TimeoutError(f"Tool '{self.name}' timed out after {self.timeout}s") from err
+
+        return _invoke()
+
+    async def execute_async(self, **kwargs: Any) -> Any:
+        """Execute the tool function asynchronously, applying timeout if configured."""
+        async def _invoke() -> Any:
+            if inspect.iscoroutinefunction(self.func):
+                return await self.func(**kwargs)
+            return self.func(**kwargs)
+
+        if self.timeout is not None and self.timeout > 0:
+            try:
+                return await asyncio.wait_for(_invoke(), timeout=self.timeout)
+            except (asyncio.TimeoutError, TimeoutError) as err:
+                raise TimeoutError(f"Tool '{self.name}' timed out after {self.timeout}s") from err
+
+        return await _invoke()
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Invoke the underlying function directly."""
         return self.func(*args, **kwargs)
+
+    @staticmethod
+    def _run_coroutine_factory(factory: Callable[[], Any]) -> Any:
+        """Run an asyncio coroutine factory in the current thread or a worker thread with context preserved."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            ctx = contextvars.copy_context()
+
+            def _worker() -> Any:
+                return ctx.run(asyncio.run, factory())
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(_worker).result()
+
+        return asyncio.run(factory())
 
 
 def _parse_docstring(doc: str | None) -> tuple[str, dict[str, str]]:
@@ -152,6 +220,7 @@ def tool(
     *,
     name: str | None = None,
     description: str | None = None,
+    timeout: float | None = None,
 ) -> Any:
     """Decorator to transform a Python function into an Evidor Tool.
 
@@ -160,7 +229,7 @@ def tool(
         def my_func(a: int) -> int: ...
 
     Or with options:
-        @tool(name="custom_name", description="custom description")
+        @tool(name="custom_name", description="custom description", timeout=5.0)
         def my_func(a: int) -> int: ...
     """
     def decorator(fn: Callable[..., Any]) -> Tool:
@@ -174,6 +243,7 @@ def tool(
             description=tool_desc,
             parameters=params_schema,
             func=fn,
+            timeout=timeout,
         )
 
     if func is not None:

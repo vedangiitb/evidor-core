@@ -178,6 +178,52 @@ response = agent.send("Can you check our records for 'alpha project'?")
 print(response.text)
 ```
 
+### Async Tools & Execution Timeouts
+
+Evidor seamlessly supports asynchronous functions and execution timeouts:
+
+```python
+import asyncio
+from evidor import Agent, GeminiProvider, tool
+
+# Async functions are automatically executed without blocking or crashing
+@tool(timeout=5.0)  # Timeout in seconds
+async def fetch_webpage(url: str) -> str:
+    """Fetch content from a URL."""
+    await asyncio.sleep(0.1)
+    return f"Contents of {url}"
+
+# Configure an agent with a default timeout for all its tools
+agent = Agent(
+    GeminiProvider(model="gemini-2.5-flash"),
+    tools=[fetch_webpage],
+    tool_timeout=10.0,      # Default tool timeout in seconds
+    max_tool_iterations=10, # Max tool turns before forcing final synthesis
+)
+```
+
+If a tool times out, raises an error, or if the model emits malformed JSON arguments, Evidor safely captures the error and feeds it back to the model as a `role="tool"` message so the LLM can self-correct.
+
+### Native Asynchronous Conversations (`send_async`)
+
+In async environments (like FastAPI, Tornado, or asynchronous data pipelines), use `await agent.send_async(...)`. When called, all async tools execute natively on the caller's event loop without thread transitions, cleanly preserving shared connection pools, locks, and `contextvars`:
+
+```python
+import asyncio
+from evidor import Agent, OpenAIProvider, tool
+
+@tool
+async def lookup_account(account_id: str) -> dict:
+    return {"id": account_id, "status": "active"}
+
+async def main() -> None:
+    agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), tools=[lookup_account])
+    response = await agent.send_async("Check status for account 1234")
+    print(response.text)
+
+asyncio.run(main())
+```
+
 ### Manual Tool Definition
 
 For dynamic or programmatic tools without a standard Python function signature, instantiate `Tool` directly:
@@ -196,6 +242,7 @@ custom_tool = Tool(
         "required": ["query"],
     },
     func=lambda query: f"Results for: {query}",
+    timeout=5.0,
 )
 ```
 

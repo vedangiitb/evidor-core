@@ -6,6 +6,20 @@ from typing import Any
 from evidor.models import GenerationRequest, GenerationResponse, ToolCall
 
 
+def _safe_parse_tool_arguments(raw_args: Any) -> dict[str, Any]:
+    if isinstance(raw_args, dict):
+        return raw_args
+    if not isinstance(raw_args, str):
+        return {}
+    try:
+        parsed = json.loads(raw_args)
+        if isinstance(parsed, dict):
+            return parsed
+        return {"__raw_args__": parsed}
+    except Exception as err:
+        return {"__raw_args__": raw_args, "__decode_error__": str(err)}
+
+
 class OpenAIProvider:
     def __init__(self, model: str, api_key: str | None = None) -> None:
         self._model = model
@@ -82,9 +96,7 @@ class OpenAIProvider:
             output_list = getattr(response, "output", None) or []
             for item in output_list:
                 if getattr(item, "type", None) == "function_call":
-                    args = item.arguments
-                    if isinstance(args, str):
-                        args = json.loads(args)
+                    args = _safe_parse_tool_arguments(item.arguments)
                     call_id = getattr(item, "call_id", None) or getattr(item, "id", f"call_{len(tool_calls)+1}")
                     tool_calls.append(ToolCall(id=call_id, name=item.name, arguments=args))
             return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls))
@@ -126,9 +138,7 @@ class OpenAIProvider:
         tool_calls = []
         if getattr(choice_msg, "tool_calls", None):
             for tc in choice_msg.tool_calls:
-                tc_args = tc.function.arguments
-                if isinstance(tc_args, str):
-                    tc_args = json.loads(tc_args)
+                tc_args = _safe_parse_tool_arguments(tc.function.arguments)
                 tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=tc_args))
 
         return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls))

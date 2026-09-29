@@ -1,11 +1,10 @@
-"""Stateful, provider-independent conversational agent."""
-
+import asyncio
 from collections.abc import Callable, Sequence
 import json
 from typing import Any
 
 from .context import DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_MESSAGES, ConversationContext
-from .models import GenerationRequest, GenerationResponse, Message
+from .models import GenerationRequest, GenerationResponse, Message, ToolCall
 from .providers.base import ModelProvider
 from .tools import Tool, tool
 
@@ -25,6 +24,7 @@ class Agent:
         *,
         tools: Sequence[Tool | Callable[..., Any]] | None = None,
         max_tool_iterations: int = 10,
+        tool_timeout: float | None = None,
         system_prompt: str | None = None,
         context_window: int = DEFAULT_CONTEXT_WINDOW,
         max_messages: int = DEFAULT_MAX_MESSAGES,
@@ -34,9 +34,18 @@ class Agent:
         self._summary_provider = self._resolve_summary_provider(provider, summarization_model)
         self._context = ConversationContext(context_window, max_messages)
         self._messages: list[Message] = []
-        self._tools: tuple[Tool, ...] = tuple(t if isinstance(t, Tool) else tool(t) for t in (tools or ()))
-        self._tool_map: dict[str, Tool] = {t.name: t for t in self._tools}
         self._max_tool_iterations = max_tool_iterations
+        self._tool_timeout = tool_timeout
+
+        configured_tools: list[Tool] = []
+        for t in (tools or ()):
+            tool_obj = t if isinstance(t, Tool) else tool(t)
+            if tool_timeout is not None and tool_obj.timeout is None:
+                tool_obj = tool_obj.with_timeout(tool_timeout)
+            configured_tools.append(tool_obj)
+        self._tools: tuple[Tool, ...] = tuple(configured_tools)
+        self._tool_map: dict[str, Tool] = {t.name: t for t in self._tools}
+
         if system_prompt:
             self._messages.append(Message(role="system", content=system_prompt))
 
@@ -51,9 +60,82 @@ class Agent:
         return self._tools
 
     @property
+    def tool_timeout(self) -> float | None:
+        """Default per-tool execution timeout in seconds, if configured."""
+        return self._tool_timeout
+
+    @property
     def summary_provider(self) -> ModelProvider:
         """The provider used for compacting and summarizing conversations."""
         return self._summary_provider
+
+    @staticmethod
+    def _serialize_tool_result(result: Any) -> str:
+        if isinstance(result, str):
+            return result
+        if isinstance(result, (dict, list, int, float, bool)):
+            return json.dumps(result)
+        return str(result)
+
+    def _execute_tool_call(self, call: ToolCall) -> str:
+        if "__decode_error__" in call.arguments:
+            decode_err = call.arguments["__decode_error__"]
+            raw_input = call.arguments.get("__raw_args__", "")
+            return (
+                f"Error: Malformed JSON arguments for tool '{call.name}': {decode_err}. "
+                f"Received input: {raw_input}"
+            )
+        target_tool = self._tool_map.get(call.name)
+        if target_tool is None:
+            return f"Error: Tool '{call.name}' not found."
+        try:
+            result = target_tool.execute(**call.arguments)
+            return self._serialize_tool_result(result)
+        except Exception as err:
+            return f"Error executing tool '{call.name}': {err}"
+
+    async def _execute_tool_call_async(self, call: ToolCall) -> str:
+        if "__decode_error__" in call.arguments:
+            decode_err = call.arguments["__decode_error__"]
+            raw_input = call.arguments.get("__raw_args__", "")
+            return (
+                f"Error: Malformed JSON arguments for tool '{call.name}': {decode_err}. "
+                f"Received input: {raw_input}"
+            )
+        target_tool = self._tool_map.get(call.name)
+        if target_tool is None:
+            return f"Error: Tool '{call.name}' not found."
+        try:
+            result = await target_tool.execute_async(**call.arguments)
+            return self._serialize_tool_result(result)
+        except Exception as err:
+            return f"Error executing tool '{call.name}': {err}"
+
+    async def _generate_provider_response_async(self, request: GenerationRequest) -> GenerationResponse:
+        return await asyncio.to_thread(self._provider.generate, request)
+
+    async def _compact_async(self) -> None:
+        self._messages = await asyncio.to_thread(self._context.compact, self._messages, self._summarize)
+
+    def _finalize_loop_expiry(
+        self,
+        final_response: GenerationResponse,
+        last_response: GenerationResponse,
+    ) -> GenerationResponse:
+        """Handle final synthesis and record the closing assistant message when max iterations is reached."""
+        final_text = (final_response.text or "").strip()
+        if not final_text:
+            final_text = (
+                (last_response.text or "").strip()
+                or f"Reached maximum tool iterations ({self._max_tool_iterations}) without a final response."
+            )
+
+        final_msg = Message(role="assistant", content=final_text)
+        self._messages.append(final_msg)
+        return GenerationResponse(
+            text=final_text,
+            model=final_response.model or last_response.model,
+        )
 
     def send(self, message: str) -> GenerationResponse:
         """Advance the conversation by one user turn and any resulting tool execution loops."""
@@ -76,21 +158,7 @@ class Agent:
                 return response
 
             for call in response.tool_calls:
-                target_tool = self._tool_map.get(call.name)
-                if target_tool is None:
-                    result_str = f"Error: Tool '{call.name}' not found."
-                else:
-                    try:
-                        result = target_tool.execute(**call.arguments)
-                        if isinstance(result, str):
-                            result_str = result
-                        elif isinstance(result, (dict, list, int, float, bool)):
-                            result_str = json.dumps(result)
-                        else:
-                            result_str = str(result)
-                    except Exception as err:
-                        result_str = f"Error executing tool '{call.name}': {err}"
-
+                result_str = self._execute_tool_call(call)
                 self._messages.append(
                     Message(
                         role="tool",
@@ -100,7 +168,48 @@ class Agent:
                     )
                 )
 
-        return response
+        # If loop reached max iterations and the last turn was still requesting tool calls:
+        self._messages = self._context.compact(self._messages, self._summarize)
+        final_response = self._provider.generate(GenerationRequest(messages=self._messages, tools=()))
+        return self._finalize_loop_expiry(final_response, response)
+
+    async def send_async(self, message: str) -> GenerationResponse:
+        """Advance the conversation asynchronously by one user turn and any resulting tool execution loops."""
+        self._messages.append(Message(role="user", content=message))
+
+        for _ in range(self._max_tool_iterations):
+            await self._compact_async()
+            response = await self._generate_provider_response_async(
+                GenerationRequest(messages=self._messages, tools=self._tools)
+            )
+            self._messages.append(
+                Message(
+                    role="assistant",
+                    content=response.text,
+                    tool_calls=response.tool_calls,
+                )
+            )
+
+            if not response.tool_calls:
+                return response
+
+            for call in response.tool_calls:
+                result_str = await self._execute_tool_call_async(call)
+                self._messages.append(
+                    Message(
+                        role="tool",
+                        content=result_str,
+                        tool_call_id=call.id,
+                        name=call.name,
+                    )
+                )
+
+        # If loop reached max iterations and the last turn was still requesting tool calls:
+        await self._compact_async()
+        final_response = await self._generate_provider_response_async(
+            GenerationRequest(messages=self._messages, tools=())
+        )
+        return self._finalize_loop_expiry(final_response, response)
 
     def clear_history(self) -> None:
         """Clear the conversation while retaining the optional system prompt."""

@@ -443,3 +443,36 @@ def test_gemini_provider_function_call_via_candidates(monkeypatch: pytest.Monkey
     assert resp.text == ""
     assert resp.tool_calls == (ToolCall(id="call_gemini_2", name="query", arguments={"term": "python"}),)
 
+
+def test_openai_provider_handles_malformed_tool_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    from evidor.providers.openai import _safe_parse_tool_arguments
+
+    assert _safe_parse_tool_arguments(None) == {}
+    assert _safe_parse_tool_arguments({"already": "dict"}) == {"already": "dict"}
+    assert _safe_parse_tool_arguments('{"valid": 123}') == {"valid": 123}
+    assert _safe_parse_tool_arguments('"string"') == {"__raw_args__": "string"}
+    
+    malformed = _safe_parse_tool_arguments("{bad json")
+    assert "__decode_error__" in malformed
+    assert malformed["__raw_args__"] == "{bad json"
+
+    # Test through chat.completions.create
+    mock_openai = types.ModuleType("openai")
+    mock_client = MagicMock(spec=["chat"])
+    mock_tc = MagicMock()
+    mock_tc.id = "c_bad"
+    mock_tc.function.name = "broken"
+    mock_tc.function.arguments = "{unclosed json"
+
+    mock_choice = MagicMock(message=MagicMock(content="test", tool_calls=[mock_tc]))
+    mock_client.chat.completions.create.return_value = MagicMock(choices=[mock_choice])
+    mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    provider = OpenAIProvider(model="gpt-4o")
+    resp = provider.generate(GenerationRequest(prompt="call broken"))
+    assert len(resp.tool_calls) == 1
+    assert "__decode_error__" in resp.tool_calls[0].arguments
+    assert resp.tool_calls[0].arguments["__raw_args__"] == "{unclosed json"
+

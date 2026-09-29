@@ -404,3 +404,179 @@ def test_summarize_with_empty_content_tool_call() -> None:
     summary = agent._summarize(messages)
     assert summary == "summary text"
     assert "ASSISTANT (called tools: echo):" in summary_provider.requests[0].messages[1].content
+
+
+def test_agent_handles_malformed_json_arguments() -> None:
+    @tool
+    def add(a: int, b: int) -> int:
+        return a + b
+
+    provider = SequenceProvider(
+        [
+            GenerationResponse(
+                text="",
+                model="test",
+                tool_calls=(
+                    ToolCall(
+                        id="call_err",
+                        name="add",
+                        arguments={"__decode_error__": "Invalid JSON syntax", "__raw_args__": "{a: 1,"},
+                    ),
+                ),
+            ),
+            GenerationResponse(text="Recovered from malformed JSON", model="test"),
+        ]
+    )
+
+    agent = Agent(provider=provider, tools=[add])
+    resp = agent.send("add numbers")
+
+    assert resp.text == "Recovered from malformed JSON"
+    tool_msg = [m for m in agent.messages if m.role == "tool"][0]
+    assert "Error: Malformed JSON arguments for tool 'add': Invalid JSON syntax." in tool_msg.content
+    assert "Received input: {a: 1," in tool_msg.content
+
+
+def test_agent_max_iterations_final_synthesis() -> None:
+    @tool
+    def search(q: str) -> str:
+        return f"result for {q}"
+
+    class SynthesisProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def with_model(self, model: str) -> "SynthesisProvider":
+            return self
+
+        def generate(self, request: GenerationRequest) -> GenerationResponse:
+            self.calls += 1
+            if request.tools:
+                # Still in tool loop
+                return GenerationResponse(
+                    text="",
+                    model="test",
+                    tool_calls=(ToolCall(id=f"c{self.calls}", name="search", arguments={"q": f"step {self.calls}"}),),
+                )
+            # Final synthesis called with tools=()
+            return GenerationResponse(text="Final synthesized answer from all tools", model="test")
+
+    agent = Agent(SynthesisProvider(), tools=[search], max_tool_iterations=2)
+    response = agent.send("find answer")
+
+    assert response.text == "Final synthesized answer from all tools"
+    assert agent.messages[-1].content == "Final synthesized answer from all tools"
+
+
+def test_agent_tool_timeout() -> None:
+    import time
+
+    @tool
+    def slow_tool() -> str:
+        time.sleep(0.1)
+        return "finished"
+
+    provider = SequenceProvider(
+        [
+            GenerationResponse(
+                text="",
+                model="test",
+                tool_calls=(ToolCall(id="c1", name="slow_tool", arguments={}),),
+            ),
+            GenerationResponse(text="Tool timed out", model="test"),
+        ]
+    )
+
+    agent = Agent(provider, tools=[slow_tool], tool_timeout=0.03)
+    assert agent.tool_timeout == 0.03
+    agent.send("run slow")
+
+    tool_msg = [m for m in agent.messages if m.role == "tool"][0]
+    assert "Error executing tool 'slow_tool': Tool 'slow_tool' timed out after 0.03s" in tool_msg.content
+
+
+@pytest.mark.asyncio
+async def test_agent_send_async_basic() -> None:
+    provider = FakeProvider(model="test-model")
+    agent = Agent(provider, system_prompt="Sys prompt")
+    resp = await agent.send_async("hello async")
+    assert resp.text == "[test-model] hello async"
+    assert len(agent.messages) == 3
+
+
+@pytest.mark.asyncio
+async def test_agent_send_async_with_tools() -> None:
+    import asyncio
+
+    @tool
+    async def async_fetch(item: str) -> str:
+        await asyncio.sleep(0.01)
+        return f"Fetched {item}"
+
+    provider = SequenceProvider(
+        [
+            GenerationResponse(
+                text="Looking up...",
+                model="test",
+                tool_calls=(ToolCall(id="c1", name="async_fetch", arguments={"item": "data"}),),
+            ),
+            GenerationResponse(text="Here is your data: Fetched data", model="test"),
+        ]
+    )
+
+    agent = Agent(provider, tools=[async_fetch])
+    resp = await agent.send_async("get data")
+    assert resp.text == "Here is your data: Fetched data"
+    assert len(agent.messages) == 4
+    assert agent.messages[2].role == "tool"
+    assert agent.messages[2].content == "Fetched data"
+
+
+@pytest.mark.asyncio
+async def test_agent_send_async_errors_and_expiry() -> None:
+    @tool
+    def faulty_func() -> str:
+        raise ValueError("broken")
+
+    class ExpiryProvider:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        def with_model(self, model: str) -> "ExpiryProvider":
+            return self
+
+        def generate(self, request: GenerationRequest) -> GenerationResponse:
+            self.turn += 1
+            if request.tools:
+                if self.turn == 1:
+                    # Malformed JSON
+                    return GenerationResponse(
+                        text="",
+                        model="test",
+                        tool_calls=(
+                            ToolCall(id="c1", name="faulty_func", arguments={"__decode_error__": "bad syntax"}),
+                        ),
+                    )
+                elif self.turn == 2:
+                    # Unknown tool
+                    return GenerationResponse(
+                        text="",
+                        model="test",
+                        tool_calls=(ToolCall(id="c2", name="missing_tool", arguments={}),),
+                    )
+                # Exception in tool
+                return GenerationResponse(
+                    text="",
+                    model="test",
+                    tool_calls=(ToolCall(id="c3", name="faulty_func", arguments={}),),
+                )
+            return GenerationResponse(text="", model="test")
+
+    agent = Agent(ExpiryProvider(), tools=[faulty_func], max_tool_iterations=3)
+    resp = await agent.send_async("trigger errors")
+    assert "Reached maximum tool iterations (3)" in resp.text
+    tool_messages = [m for m in agent.messages if m.role == "tool"]
+    assert len(tool_messages) == 3
+    assert "Malformed JSON arguments" in tool_messages[0].content
+    assert "Tool 'missing_tool' not found" in tool_messages[1].content
+    assert "Error executing tool 'faulty_func': broken" in tool_messages[2].content
