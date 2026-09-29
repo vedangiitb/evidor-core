@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v1.0.0-dev.4 (2026-09-29)
+
+### Bug Fixes
+
+- Adding pytest asyncio to fix ci failure
+  ([`1c83baa`](https://github.com/vedangiitb/evidor-core/commit/1c83baa0655eea18442492d80c531eca61bb8e50))
+
+### Chores
+
+- Python 3.13 in yml
+  ([`d749ca3`](https://github.com/vedangiitb/evidor-core/commit/d749ca30dd5a99b4dc5bc5a0f224efa2370456a4))
+
+### Features
+
+- Async agent and tool executions
+  ([`5ad1759`](https://github.com/vedangiitb/evidor-core/commit/5ad1759bd66198db6d34ef7742b300e0ff582cfd))
+
+
 ## v1.0.0-dev.3 (2026-09-28)
 
 ### Features
