@@ -327,7 +327,7 @@ def test_agent_summarization_with_tools() -> None:
     provider = SummarizeToolProvider()
     agent = Agent(provider, tools=[ping], max_messages=3)
 
-    # Manually inject tool message into history to test transcript formatting in _summarize
+    # Manually inject tool messages to test transcript formatting during compaction.
     agent._messages.append(Message(role="assistant", content="calling ping", tool_calls=(ToolCall(id="c", name="ping", arguments={}),)))
     agent._messages.append(Message(role="tool", content="pong", tool_call_id="c", name="ping"))
 
@@ -402,7 +402,7 @@ def test_summarize_with_empty_content_tool_call() -> None:
         ),
         Message(role="tool", content="done", name="echo"),
     ]
-    summary = agent._summarize(messages)
+    summary = agent._summarizer.summarize(messages)
     assert summary == "summary text"
     assert "ASSISTANT (called tools: echo):" in summary_provider.requests[0].messages[1].content
 
