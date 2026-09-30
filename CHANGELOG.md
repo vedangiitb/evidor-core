@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.1.0-dev.1 (2026-09-30)
+
+### Features
+
+- Adding built in tools
+  ([`6fb96c2`](https://github.com/vedangiitb/evidor-core/commit/6fb96c2c83fc50eb51728d7811b671f05ea32382))
+
+
 ## v1.0.0 (2026-09-30)
 
 ### Features
