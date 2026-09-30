@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.0.0 (2026-09-30)
+
+### Features
+
+- Stable release with tool primitives
+  ([`ccb21cb`](https://github.com/vedangiitb/evidor-core/commit/ccb21cbc821b2f65ea8eedfae7de556c8c8f4073))
+
+
 ## v1.0.0-dev.4 (2026-09-29)
 
 ### Bug Fixes
