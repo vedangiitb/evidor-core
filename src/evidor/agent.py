@@ -1,12 +1,12 @@
 import asyncio
 from collections.abc import Callable, Sequence
-import json
 from typing import Any
 
 from .context import DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_MESSAGES, ConversationContext
 from .models import GenerationRequest, GenerationResponse, Message, ToolCall
 from .providers.base import ModelProvider
 from .tools import Tool, tool
+from .utils import format_tool_error, serialize_tool_result
 
 
 _SUMMARY_INSTRUCTION = (
@@ -69,53 +69,72 @@ class Agent:
         """The provider used for compacting and summarizing conversations."""
         return self._summary_provider
 
-    @staticmethod
-    def _serialize_tool_result(result: Any) -> str:
-        if isinstance(result, str):
-            return result
-        if isinstance(result, (dict, list, int, float, bool)):
-            return json.dumps(result)
-        return str(result)
+    def _resolve_tool(self, call: ToolCall) -> Tool | str:
+        if "__decode_error__" in call.arguments:
+            decode_err = call.arguments["__decode_error__"]
+            raw_input = call.arguments.get("__raw_args__", "")
+            return (
+                f"Error: Malformed JSON arguments for tool '{call.name}': {decode_err}. "
+                f"Received input: {raw_input}"
+            )
+        target_tool = self._tool_map.get(call.name)
+        if target_tool is None:
+            return f"Error: Tool '{call.name}' not found."
+        return target_tool
 
     def _execute_tool_call(self, call: ToolCall) -> str:
-        if "__decode_error__" in call.arguments:
-            decode_err = call.arguments["__decode_error__"]
-            raw_input = call.arguments.get("__raw_args__", "")
-            return (
-                f"Error: Malformed JSON arguments for tool '{call.name}': {decode_err}. "
-                f"Received input: {raw_input}"
-            )
-        target_tool = self._tool_map.get(call.name)
-        if target_tool is None:
-            return f"Error: Tool '{call.name}' not found."
+        target = self._resolve_tool(call)
+        if isinstance(target, str):
+            return target
         try:
-            result = target_tool.execute(**call.arguments)
-            return self._serialize_tool_result(result)
+            return serialize_tool_result(target.execute(**call.arguments))
         except Exception as err:
-            return f"Error executing tool '{call.name}': {err}"
+            return format_tool_error(call.name, err)
 
     async def _execute_tool_call_async(self, call: ToolCall) -> str:
-        if "__decode_error__" in call.arguments:
-            decode_err = call.arguments["__decode_error__"]
-            raw_input = call.arguments.get("__raw_args__", "")
-            return (
-                f"Error: Malformed JSON arguments for tool '{call.name}': {decode_err}. "
-                f"Received input: {raw_input}"
-            )
-        target_tool = self._tool_map.get(call.name)
-        if target_tool is None:
-            return f"Error: Tool '{call.name}' not found."
+        target = self._resolve_tool(call)
+        if isinstance(target, str):
+            return target
         try:
-            result = await target_tool.execute_async(**call.arguments)
-            return self._serialize_tool_result(result)
+            return serialize_tool_result(await target.execute_async(**call.arguments))
         except Exception as err:
-            return f"Error executing tool '{call.name}': {err}"
+            return format_tool_error(call.name, err)
 
-    async def _generate_provider_response_async(self, request: GenerationRequest) -> GenerationResponse:
-        return await asyncio.to_thread(self._provider.generate, request)
+    def _record_assistant(self, response: GenerationResponse) -> None:
+        self._messages.append(
+            Message(
+                role="assistant",
+                content=response.text,
+                tool_calls=response.tool_calls,
+            )
+        )
+
+    def _record_tool_result(self, call: ToolCall, result_str: str) -> None:
+        self._messages.append(
+            Message(
+                role="tool",
+                content=result_str,
+                tool_call_id=call.id,
+                name=call.name,
+            )
+        )
+
+    def _execute_tool_calls(self, calls: Sequence[ToolCall]) -> None:
+        for call in calls:
+            self._record_tool_result(call, self._execute_tool_call(call))
+
+    async def _execute_tool_calls_async(self, calls: Sequence[ToolCall]) -> None:
+        for call in calls:
+            self._record_tool_result(call, await self._execute_tool_call_async(call))
+
+    def _compact(self) -> None:
+        self._messages = self._context.compact(self._messages, self._summarize)
 
     async def _compact_async(self) -> None:
         self._messages = await asyncio.to_thread(self._context.compact, self._messages, self._summarize)
+
+    async def _generate_provider_response_async(self, request: GenerationRequest) -> GenerationResponse:
+        return await asyncio.to_thread(self._provider.generate, request)
 
     def _finalize_loop_expiry(
         self,
@@ -142,34 +161,17 @@ class Agent:
         self._messages.append(Message(role="user", content=message))
 
         for _ in range(self._max_tool_iterations):
-            self._messages = self._context.compact(self._messages, self._summarize)
+            self._compact()
             response = self._provider.generate(
                 GenerationRequest(messages=self._messages, tools=self._tools)
             )
-            self._messages.append(
-                Message(
-                    role="assistant",
-                    content=response.text,
-                    tool_calls=response.tool_calls,
-                )
-            )
-
+            self._record_assistant(response)
             if not response.tool_calls:
                 return response
-
-            for call in response.tool_calls:
-                result_str = self._execute_tool_call(call)
-                self._messages.append(
-                    Message(
-                        role="tool",
-                        content=result_str,
-                        tool_call_id=call.id,
-                        name=call.name,
-                    )
-                )
+            self._execute_tool_calls(response.tool_calls)
 
         # If loop reached max iterations and the last turn was still requesting tool calls:
-        self._messages = self._context.compact(self._messages, self._summarize)
+        self._compact()
         final_response = self._provider.generate(GenerationRequest(messages=self._messages, tools=()))
         return self._finalize_loop_expiry(final_response, response)
 
@@ -182,27 +184,10 @@ class Agent:
             response = await self._generate_provider_response_async(
                 GenerationRequest(messages=self._messages, tools=self._tools)
             )
-            self._messages.append(
-                Message(
-                    role="assistant",
-                    content=response.text,
-                    tool_calls=response.tool_calls,
-                )
-            )
-
+            self._record_assistant(response)
             if not response.tool_calls:
                 return response
-
-            for call in response.tool_calls:
-                result_str = await self._execute_tool_call_async(call)
-                self._messages.append(
-                    Message(
-                        role="tool",
-                        content=result_str,
-                        tool_call_id=call.id,
-                        name=call.name,
-                    )
-                )
+            await self._execute_tool_calls_async(response.tool_calls)
 
         # If loop reached max iterations and the last turn was still requesting tool calls:
         await self._compact_async()

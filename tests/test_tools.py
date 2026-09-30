@@ -142,14 +142,14 @@ def test_tool_empty_union_and_failed_type_hints(monkeypatch: pytest.MonkeyPatch)
     from evidor.tools import _python_type_to_json_type
 
     # Test Union with only NoneType args
-    monkeypatch.setattr("evidor.tools.get_origin", lambda _: Union)
-    monkeypatch.setattr("evidor.tools.get_args", lambda _: (type(None),))
+    monkeypatch.setattr("evidor.utils.get_origin", lambda _: Union)
+    monkeypatch.setattr("evidor.utils.get_args", lambda _: (type(None),))
     assert _python_type_to_json_type(object) == "string"
 
     # Test get_type_hints exception fallback
-    monkeypatch.setattr("evidor.tools.get_origin", get_origin)
-    monkeypatch.setattr("evidor.tools.get_args", get_args)
-    monkeypatch.setattr("evidor.tools.get_type_hints", lambda f: (_ for _ in ()).throw(NameError("Cannot resolve type")))
+    monkeypatch.setattr("evidor.utils.get_origin", get_origin)
+    monkeypatch.setattr("evidor.utils.get_args", get_args)
+    monkeypatch.setattr("evidor.utils.get_type_hints", lambda f: (_ for _ in ()).throw(NameError("Cannot resolve type")))
 
     @tool
     def fallback_func(param: int) -> int:
