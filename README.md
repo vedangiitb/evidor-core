@@ -248,6 +248,38 @@ custom_tool = Tool(
 
 Evidor's tool calling works consistently across **OpenAI**, **Anthropic**, and **Gemini**, adapting each provider's underlying tool schema and message format transparently.
 
+### Built-in Tools
+
+Evidor includes a couple of dependency-free tools you can opt into. They are not attached to agents automatically:
+
+```python
+from evidor import Agent, OpenAIProvider, calculator, get_current_time
+
+agent = Agent(
+    OpenAIProvider(model="gpt-4.1-mini"),
+    tools=[calculator, get_current_time],
+)
+```
+
+`get_current_time` returns an ISO 8601 timestamp and accepts an IANA timezone name (UTC by default). `calculator` evaluates basic arithmetic without executing Python code.
+
+For read-only file access, create filesystem tools scoped to an existing directory. Paths supplied by the model are resolved under that root, and file reads and result counts have configurable limits:
+
+```python
+from evidor import Agent, OpenAIProvider, calculator, filesystem_tools, get_current_time
+
+agent = Agent(
+    OpenAIProvider(model="gpt-4.1-mini"),
+    tools=[
+        calculator,
+        get_current_time,
+        *filesystem_tools("./project", max_file_bytes=100_000, max_results=100),
+    ],
+)
+```
+
+`filesystem_tools` returns `list_files`, `read_file`, and `search_files`. It does not provide file writing or deletion.
+
 ## Providers
 
 Supported providers and their typical models:
