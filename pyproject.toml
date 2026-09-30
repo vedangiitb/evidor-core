@@ -61,5 +61,5 @@ prerelease = false
 
 [tool.semantic_release.branches.dev]
 match = "^dev$"
-prerelease = true
+prerelease = false
 prerelease_token = "dev"
