@@ -263,7 +263,7 @@ agent = Agent(
 
 `get_current_time` returns an ISO 8601 timestamp and accepts an IANA timezone name (UTC by default). `calculator` evaluates basic arithmetic without executing Python code.
 
-For read-only file access, create filesystem tools scoped to an existing directory. Paths supplied by the model are resolved under that root, and file reads and result counts have configurable limits:
+Create filesystem tools scoped to an existing directory for listing, searching, reading, creating, updating, and deleting files. Paths supplied by the model are resolved under that root, and file reads and writes and result counts have configurable limits:
 
 ```python
 from evidor import Agent, OpenAIProvider, calculator, filesystem_tools, get_current_time
@@ -278,7 +278,16 @@ agent = Agent(
 )
 ```
 
-`filesystem_tools` returns `list_files`, `read_file`, and `search_files`. It does not provide file writing or deletion.
+`filesystem_tools` returns six tools:
+
+- `list_files` lists files in the root or a subdirectory.
+- `read_file` reads a UTF-8 text file.
+- `search_files` searches UTF-8 text files for a literal string.
+- `create_file` creates a new UTF-8 text file; it fails if the path already exists. Its parent directory must already exist.
+- `write_file` replaces the contents of an existing UTF-8 text file.
+- `delete_file` deletes an existing file (directories cannot be deleted).
+
+All paths stay within the configured root. `max_file_bytes` limits the size of a file read or written (including initial content passed to `create_file`); `max_results` bounds listing and search results, and `max_files_scanned` bounds recursive search work.
 
 ## Providers
 
