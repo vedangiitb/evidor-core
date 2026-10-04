@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.1.0 (2026-10-04)
+
+### Chores
+
+- Readme updates for fs tools
+  ([`2da0bfd`](https://github.com/vedangiitb/evidor-core/commit/2da0bfdd1600ddf9ba8ae5eb8c5eb740dbaa7e84))
+
+### Features
+
+- Adding fs tools
+  ([`ccc0ef9`](https://github.com/vedangiitb/evidor-core/commit/ccc0ef94e14c0f1dd1f89db14aefd21d1a658a5d))
+
+
 ## v1.1.0-dev.1 (2026-09-30)
 
 ### Features
