@@ -3,8 +3,8 @@
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from ..models import ToolCall
-from ..tools import Tool, tool
+from ...models import ToolCall
+from .tools import Tool, tool
 from .utils import format_tool_error, serialize_tool_result
 
 

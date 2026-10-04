@@ -1,6 +1,6 @@
 import pytest
 
-from evidor.context import ConversationContext
+from evidor.agent.context.context import ConversationContext
 from evidor.models import Message
 
 

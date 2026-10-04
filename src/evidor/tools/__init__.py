@@ -1,6 +1,16 @@
 """Tool definitions and opt-in built-in tools."""
 
-from .native import calculator, filesystem_tools, get_current_time
+from .native import (
+    BraveSearchProvider,
+    calculator,
+    ExaSearchProvider,
+    filesystem_tools,
+    get_current_time,
+    SearchResult,
+    TavilySearchProvider,
+    WebSearchProvider,
+    web_search,
+)
 from .core.tools import (
     Tool,
     _generate_parameters_schema,
@@ -12,8 +22,14 @@ from .core.tools import (
 
 __all__ = [
     "Tool",
+    "BraveSearchProvider",
     "calculator",
+    "ExaSearchProvider",
     "filesystem_tools",
     "get_current_time",
+    "SearchResult",
+    "TavilySearchProvider",
     "tool",
+    "WebSearchProvider",
+    "web_search",
 ]

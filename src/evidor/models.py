@@ -1,13 +1,25 @@
 """Provider-neutral data structures."""
 
+from __future__ import annotations
+
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from .tools import Tool
+if TYPE_CHECKING:
+    from .tools import Tool
 
 
 MessageRole = Literal["system", "user", "assistant", "tool"]
+
+
+@dataclass(frozen=True, slots=True)
+class SearchResult:
+    """A provider-neutral result returned by a web search provider."""
+
+    title: str
+    url: str
+    snippet: str = ""
 
 
 @dataclass(frozen=True, slots=True)

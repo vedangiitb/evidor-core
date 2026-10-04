@@ -1,4 +1,4 @@
-"""Utilities used exclusively by agent-runtime components."""
+"""Utilities used by core tool execution components."""
 
 import json
 from typing import Any

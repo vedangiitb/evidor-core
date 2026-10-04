@@ -2,7 +2,7 @@
 
 from collections.abc import Callable, Sequence
 
-from .models import Message
+from ...models import Message
 
 DEFAULT_CONTEXT_WINDOW = 16_000
 DEFAULT_MAX_MESSAGES = 50

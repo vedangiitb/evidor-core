@@ -445,7 +445,7 @@ def test_gemini_provider_function_call_via_candidates(monkeypatch: pytest.Monkey
 
 
 def test_openai_provider_handles_malformed_tool_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
-    from evidor.providers.openai import _safe_parse_tool_arguments
+    from evidor.agent.providers.openai import _safe_parse_tool_arguments
 
     assert _safe_parse_tool_arguments(None) == {}
     assert _safe_parse_tool_arguments({"already": "dict"}) == {"already": "dict"}

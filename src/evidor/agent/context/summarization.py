@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 
-from ..models import GenerationRequest, Message
+from ...models import GenerationRequest, Message
 from ..providers.base import ModelProvider
 
 
