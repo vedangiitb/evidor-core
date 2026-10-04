@@ -1,9 +1,10 @@
-"""Factory for read-only tools scoped to one filesystem root."""
+"""Factory for filesystem tools scoped to one root."""
 
 from pathlib import Path
 
 from ...core.tools import Tool
 from .list_files import build_list_files
+from .mutate_files import build_create_file, build_delete_file, build_write_file
 from .read_file import build_read_file
 from .search_files import build_search_files
 
@@ -14,8 +15,8 @@ def filesystem_tools(
     max_file_bytes: int = 100_000,
     max_results: int = 100,
     max_files_scanned: int = 1_000,
-) -> tuple[Tool, Tool, Tool]:
-    """Create read-only filesystem tools scoped to ``root_dir``.
+) -> tuple[Tool, ...]:
+    """Create filesystem tools scoped to ``root_dir``.
 
     File reads are bounded by ``max_file_bytes``. Listing and search output are
     bounded by ``max_results``; recursive searches inspect at most
@@ -30,6 +31,9 @@ def filesystem_tools(
         build_list_files(root, max_results),
         build_read_file(root, max_file_bytes),
         build_search_files(root, max_results, max_file_bytes, max_files_scanned),
+        build_create_file(root, max_file_bytes),
+        build_write_file(root, max_file_bytes),
+        build_delete_file(root),
     )
 
 

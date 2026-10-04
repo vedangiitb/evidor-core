@@ -13,6 +13,16 @@ def resolve_scoped_path(root: Path, user_path: str) -> Path:
     return candidate
 
 
+def resolve_scoped_destination(root: Path, user_path: str) -> Path:
+    """Resolve a possibly new destination while keeping it inside ``root``."""
+    candidate = (root / user_path).resolve(strict=False)
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Path is outside the configured filesystem root") from exc
+    return candidate
+
+
 def bounded_limit(requested: int, maximum: int) -> int:
     """Clamp a requested result count to a safe positive upper bound."""
     if requested < 1:
