@@ -1,6 +1,6 @@
 # Evidor
 
-Evidor is a minimal, provider-agnostic LLM harness. It provides a clean, unified interface for conversational agents across multiple model providers, with built-in context window management and automatic summarization.
+Evidor is an open-source, provider-agnostic runtime for building AI agents. It provides a clean, unified interface for conversational agents across multiple model providers, with built-in context window management and automatic summarization.
 
 ## Install
 
@@ -288,6 +288,27 @@ agent = Agent(
 - `delete_file` deletes an existing file (directories cannot be deleted).
 
 All paths stay within the configured root. `max_file_bytes` limits the size of a file read or written (including initial content passed to `create_file`); `max_results` bounds listing and search results, and `max_files_scanned` bounds recursive search work.
+
+### Web Search
+
+Use `web_search()` to create a provider-neutral agent tool. The tool depends only on the `WebSearchProvider` interface, so the selected search service can be changed without changing the agent setup. The bundled Tavily, Exa, and Brave adapters use only Python's standard library; set the provider's API key environment variable (or pass `api_key=` explicitly).
+
+```bash
+export TAVILY_API_KEY="..."
+# or EXA_API_KEY="..." / BRAVE_SEARCH_API_KEY="..."
+```
+
+```python
+from evidor import Agent, OpenAIProvider, TavilySearchProvider, web_search
+
+search = web_search(TavilySearchProvider(), max_results=5)
+agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), tools=[search])
+
+response = agent.send("Find the current Python release notes and cite the sources.")
+print(response.text)
+```
+
+Switch providers by replacing `TavilySearchProvider()` with `ExaSearchProvider()` or `BraveSearchProvider()`. To use another service, implement the small `WebSearchProvider` contract: `search(query: str, *, max_results: int) -> list[SearchResult]`; both types are exported from `evidor`.
 
 ## Providers
 
