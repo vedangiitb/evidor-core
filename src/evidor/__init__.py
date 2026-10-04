@@ -1,17 +1,30 @@
 """Minimal, provider-agnostic LLM harness."""
 
 from .agent import Agent
-from .context import DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_MESSAGES
-from .models import GenerationRequest, GenerationResponse, Message, ToolCall
-from .providers import AnthropicProvider, GeminiProvider, ModelProvider, OpenAIProvider
-from .tools import Tool, calculator, filesystem_tools, get_current_time, tool
+from .agent.context.context import DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_MESSAGES
+from .agent.providers import AnthropicProvider, GeminiProvider, ModelProvider, OpenAIProvider
+from .models import GenerationRequest, GenerationResponse, Message, SearchResult, ToolCall
+from .tools import (
+    BraveSearchProvider,
+    ExaSearchProvider,
+    TavilySearchProvider,
+    Tool,
+    calculator,
+    filesystem_tools,
+    get_current_time,
+    tool,
+    web_search,
+    WebSearchProvider,
+)
 
 __all__ = [
     "Agent",
     "AnthropicProvider",
+    "BraveSearchProvider",
     "calculator",
     "DEFAULT_CONTEXT_WINDOW",
     "DEFAULT_MAX_MESSAGES",
+    "ExaSearchProvider",
     "GeminiProvider",
     "GenerationRequest",
     "GenerationResponse",
@@ -20,7 +33,11 @@ __all__ = [
     "Message",
     "ModelProvider",
     "OpenAIProvider",
+    "SearchResult",
     "Tool",
     "ToolCall",
+    "TavilySearchProvider",
     "tool",
+    "WebSearchProvider",
+    "web_search",
 ]

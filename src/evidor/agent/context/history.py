@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 
-from ..models import GenerationResponse, Message, ToolCall
+from ...models import GenerationResponse, Message, ToolCall
 
 
 class ConversationHistory:
