@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.1.0-dev.3 (2026-10-04)
+
+### Documentation
+
+- **tools**: Doc updates for web search tool
+  ([`f07d47f`](https://github.com/vedangiitb/evidor-core/commit/f07d47f7f988d2e0751fd4981ef94160d09f48da))
+
+### Features
+
+- **tools**: Web search tool
+  ([`e5f051b`](https://github.com/vedangiitb/evidor-core/commit/e5f051b6b53ba14237f9aab4254715c36a68dcf8))
+
+
 ## v1.1.0-dev.2 (2026-10-04)
 
 ### Chores
