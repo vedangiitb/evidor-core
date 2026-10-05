@@ -21,6 +21,8 @@ class Agent:
         provider: ModelProvider,
         *,
         tools: Sequence[Tool | Callable[..., Any]] | None = None,
+        mcp_servers: Any = None,
+        mcp_client: Any = None,
         max_tool_iterations: int = 10,
         tool_timeout: float | None = None,
         system_prompt: str | None = None,
@@ -37,8 +39,19 @@ class Agent:
         self._messages = self._history.messages
         self._max_tool_iterations = max_tool_iterations
         self._tool_timeout = tool_timeout
-        self._tool_executor = ToolExecutor(tools, tool_timeout)
+
+        if mcp_client is not None:
+            self._mcp_client = mcp_client
+        elif mcp_servers is not None:
+            from ..mcp import MCPClient
+            self._mcp_client = MCPClient(mcp_servers)
+        else:
+            self._mcp_client = None
+
+        self._user_tools = list(tools) if tools is not None else []
+        self._tool_executor = ToolExecutor(self._user_tools, tool_timeout)
         self._tools = self._tool_executor.tools
+        self._mcp_tools_synced = False
 
     @property
     def messages(self) -> tuple[Message, ...]:
@@ -48,7 +61,35 @@ class Agent:
     @property
     def tools(self) -> tuple[Tool, ...]:
         """The tools configured on this agent."""
+        self._sync_mcp_tools()
         return self._tools
+
+    @property
+    def mcp_client(self) -> Any:
+        """The MCPClient associated with this agent, if configured."""
+        return self._mcp_client
+
+    def _sync_mcp_tools(self, force: bool = False) -> None:
+        """Synchronize tools from any configured MCP client into the executor."""
+        if self._mcp_client is None:
+            return
+        if self._mcp_tools_synced and not force:
+            return
+        mcp_tools = self._mcp_client.get_tools()
+        self._tool_executor = ToolExecutor([*self._user_tools, *mcp_tools], self._tool_timeout)
+        self._tools = self._tool_executor.tools
+        self._mcp_tools_synced = True
+
+    async def _sync_mcp_tools_async(self, force: bool = False) -> None:
+        """Asynchronously synchronize tools from any configured MCP client into the executor."""
+        if self._mcp_client is None:
+            return
+        if self._mcp_tools_synced and not force:
+            return
+        mcp_tools = await self._mcp_client.get_tools_async()
+        self._tool_executor = ToolExecutor([*self._user_tools, *mcp_tools], self._tool_timeout)
+        self._tools = self._tool_executor.tools
+        self._mcp_tools_synced = True
 
     @property
     def tool_timeout(self) -> float | None:
@@ -62,6 +103,7 @@ class Agent:
 
     def send(self, message: str) -> GenerationResponse:
         """Advance one user turn and execute any requested tool calls."""
+        self._sync_mcp_tools()
         self._history.add_user(message)
         for _ in range(self._max_tool_iterations):
             self._compact()
@@ -76,6 +118,7 @@ class Agent:
 
     async def send_async(self, message: str) -> GenerationResponse:
         """Asynchronously advance one user turn and execute requested tool calls."""
+        await self._sync_mcp_tools_async()
         self._history.add_user(message)
         for _ in range(self._max_tool_iterations):
             await self._compact_async()
@@ -91,6 +134,30 @@ class Agent:
             self._provider.generate, GenerationRequest(messages=self._messages, tools=())
         )
         return self._finalize_loop_expiry(final_response, response)
+
+    def close(self) -> None:
+        """Close any associated MCP client connections."""
+        if self._mcp_client is not None:
+            self._mcp_client.close()
+            self._mcp_tools_synced = False
+
+    async def close_async(self) -> None:
+        """Asynchronously close any associated MCP client connections."""
+        if self._mcp_client is not None:
+            await self._mcp_client.close_async()
+            self._mcp_tools_synced = False
+
+    def __enter__(self) -> "Agent":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
+    async def __aenter__(self) -> "Agent":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.close_async()
 
     def clear_history(self) -> None:
         """Clear the conversation while retaining the optional system prompt."""
