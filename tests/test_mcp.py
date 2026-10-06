@@ -90,6 +90,31 @@ class FakeAgentProvider:
         )
 
 
+mcp_available = False
+try:
+    import mcp  # noqa: F401
+    mcp_available = True
+except ImportError:
+    pass
+
+requires_mcp = pytest.mark.skipif(
+    not mcp_available,
+    reason="The 'mcp' package is required for live MCP tests. Install with: pip install 'evidor[mcp]'",
+)
+
+uvicorn_available = False
+try:
+    import uvicorn  # noqa: F401
+    uvicorn_available = True
+except ImportError:
+    pass
+
+requires_uvicorn = pytest.mark.skipif(
+    not uvicorn_available,
+    reason="The 'uvicorn' package is required for hosted MCP tests.",
+)
+
+
 def test_mcp_server_config_validation() -> None:
     with pytest.raises(ValueError, match="'name' must be a non-empty string"):
         MCPServerConfig(name="")
@@ -150,6 +175,30 @@ def test_mcp_server_config_from_dict_and_file(tmp_path: Path) -> None:
     assert weather_cfg.url == "http://localhost:8080/sse"
 
 
+def test_mcp_missing_dependency_raises_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure MCPSession raises a clear, actionable ImportError when 'mcp' is not installed."""
+    monkeypatch.setitem(sys.modules, "mcp", None)
+    monkeypatch.setitem(sys.modules, "mcp.client", None)
+    monkeypatch.setitem(sys.modules, "mcp.client.session", None)
+    config = MCPServerConfig.stdio("mock", command="python")
+    session = MCPSession(config)
+    with pytest.raises(ImportError, match="The 'mcp' package is required for MCP support"):
+        session.connect()
+
+
+@pytest.mark.asyncio
+async def test_mcp_missing_dependency_raises_import_error_async(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure MCPSession raises a clear, actionable ImportError when 'mcp' is not installed (async)."""
+    monkeypatch.setitem(sys.modules, "mcp", None)
+    monkeypatch.setitem(sys.modules, "mcp.client", None)
+    monkeypatch.setitem(sys.modules, "mcp.client.session", None)
+    config = MCPServerConfig.stdio("mock", command="python")
+    session = MCPSession(config)
+    with pytest.raises(ImportError, match="The 'mcp' package is required for MCP support"):
+        await session.connect_async()
+
+
+@requires_mcp
 def test_mcp_session_stdio_lifecycle() -> None:
     config = MCPServerConfig.stdio(
         name="amazon",
@@ -194,6 +243,7 @@ def test_mcp_session_stdio_lifecycle() -> None:
     assert not session.is_connected
 
 
+@requires_mcp
 @pytest.mark.asyncio
 async def test_mcp_session_async_lifecycle() -> None:
     config = MCPServerConfig.stdio(
@@ -222,6 +272,7 @@ async def test_mcp_session_async_lifecycle() -> None:
     assert not session.is_connected
 
 
+@requires_mcp
 def test_mcp_client_multi_server_collision_handling() -> None:
     amazon_cfg = MCPServerConfig.stdio(
         name="amazon",
@@ -255,6 +306,7 @@ def test_mcp_client_multi_server_collision_handling() -> None:
         assert "Google Shopping results for 'shoes'" in goog_tool.execute(query="shoes")
 
 
+@requires_mcp
 def test_agent_sync_send_with_amazon_mcp() -> None:
     provider = FakeAgentProvider(
         tool_to_call="search_products",
@@ -289,6 +341,7 @@ def test_agent_sync_send_with_amazon_mcp() -> None:
         assert agent.messages[3].role == "assistant"
 
 
+@requires_mcp
 @pytest.mark.asyncio
 async def test_agent_async_send_with_amazon_mcp() -> None:
     provider = FakeAgentProvider(
@@ -311,6 +364,7 @@ async def test_agent_async_send_with_amazon_mcp() -> None:
         assert "Order ORD-12345 is shipped" in response.text
 
 
+@requires_mcp
 def test_agent_with_mcp_client_in_tools_list() -> None:
     client = MCPClient.from_stdio(
         command=sys.executable,
@@ -333,6 +387,7 @@ def test_agent_with_mcp_client_in_tools_list() -> None:
         assert "Amazon results for 'coffee maker'" in response.text
 
 
+@requires_mcp
 def test_mcp_tool_error_handling() -> None:
     config = MCPServerConfig.stdio(
         name="amazon",
@@ -349,6 +404,8 @@ def test_mcp_tool_error_handling() -> None:
         assert "get_order_status" in str(exc_info.value)
 
 
+@requires_mcp
+@requires_uvicorn
 def test_remote_hosted_mcp_server_streamable_http() -> None:
     import socket
     import threading
@@ -397,6 +454,8 @@ def test_remote_hosted_mcp_server_streamable_http() -> None:
         assert "anthropic.claude-3-5-sonnet' status: ACTIVE" in response.text
 
 
+@requires_mcp
+@requires_uvicorn
 def test_remote_hosted_mcp_server_sse() -> None:
     import socket
     import threading
