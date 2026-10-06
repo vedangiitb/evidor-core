@@ -189,7 +189,7 @@ class MCPClient:
         return self.session(name)
 
     def connect(self, timeout: float = 60.0) -> None:
-        """Connect to all configured MCP servers synchronously."""
+        """Connect to all configured MCP servers in parallel synchronously."""
         with self._lock:
             if self._connected:
                 return
@@ -198,20 +198,17 @@ class MCPClient:
                 if name not in self._sessions:
                     self._sessions[name] = MCPSession(cfg, loop=loop)
 
-            # Connect sessions in parallel
-            errors: list[Exception] = []
-            for name, session in self._sessions.items():
-                try:
-                    session.connect(timeout=timeout)
-                except Exception as err:
-                    errors.append(err)
+            async def _connect_all() -> None:
+                tasks = [session.connect_async(timeout=timeout) for session in self._sessions.values()]
+                if tasks:
+                    await asyncio.gather(*tasks)
 
-            if errors:
-                raise RuntimeError(f"Failed to connect MCP servers: {errors}")
+            future = asyncio.run_coroutine_threadsafe(_connect_all(), loop)
+            future.result(timeout=timeout)
             self._connected = True
 
     async def connect_async(self, timeout: float = 60.0) -> None:
-        """Connect to all configured MCP servers asynchronously."""
+        """Connect to all configured MCP servers in parallel asynchronously."""
         with self._lock:
             if self._connected:
                 return
@@ -227,18 +224,23 @@ class MCPClient:
         self._connected = True
 
     def get_tools(self, force_refresh: bool = False) -> tuple[Tool, ...]:
-        """Retrieve all Evidor Tool objects from all connected MCP servers."""
+        """Retrieve all Evidor Tool objects from all connected MCP servers in parallel."""
         if not self._connected:
             self.connect()
 
         tools: list[Tool] = []
         tool_counts: dict[str, int] = {}
 
-        # First pass: collect tools and check for name collisions
-        all_server_tools: list[tuple[str, tuple[Tool, ...]]] = []
-        for server_name, session in self._sessions.items():
-            st = session.get_evidor_tools(force_refresh=force_refresh)
-            all_server_tools.append((server_name, st))
+        # Fetch tools from all sessions in parallel
+        async def _fetch_all_tools() -> list[tuple[Tool, ...]]:
+            tasks = [session.get_evidor_tools_async(force_refresh=force_refresh) for session in self._sessions.values()]
+            return await asyncio.gather(*tasks) if tasks else []
+
+        future = asyncio.run_coroutine_threadsafe(_fetch_all_tools(), self._ensure_loop())
+        results = future.result(timeout=60.0)
+        all_server_tools = list(zip(self._sessions.keys(), results))
+
+        for _, st in all_server_tools:
             for t in st:
                 tool_counts[t.name] = tool_counts.get(t.name, 0) + 1
 
