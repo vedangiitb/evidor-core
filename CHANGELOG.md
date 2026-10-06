@@ -2,6 +2,35 @@
 
 <!-- version list -->
 
+## v1.3.0-dev.1 (2026-10-06)
+
+### Bug Fixes
+
+- Yml updates for fixing ci failure
+  ([`e76d123`](https://github.com/vedangiitb/evidor-core/commit/e76d123b3282fd4a3dda51b91ac71dc25e9c50af))
+
+### Chores
+
+- Config and requirement updates for mcp integration
+  ([`83e419e`](https://github.com/vedangiitb/evidor-core/commit/83e419e4564e746f16295183179f6661a2fc8978))
+
+### Documentation
+
+- **mcp**: Mcp updates for readme
+  ([`83c8f96`](https://github.com/vedangiitb/evidor-core/commit/83c8f96bbc64f4026701ab9f17dc0a2348d9c075))
+
+### Features
+
+- Agent updates for mcp integration
+  ([`843ab00`](https://github.com/vedangiitb/evidor-core/commit/843ab00f54f5d95c235f86abbde328bd6523b542))
+
+- **mcp**: Mcp integration
+  ([`44ad88d`](https://github.com/vedangiitb/evidor-core/commit/44ad88d1b03e0923fc0f7a47fd1ec9d1ec3ff7c0))
+
+- **mcp**: Tool executor updates for mcp integration
+  ([`532c5ac`](https://github.com/vedangiitb/evidor-core/commit/532c5acbb5ddb719b42fbd61bd41f1bb65e929aa))
+
+
 ## v1.2.0 (2026-10-04)
 
 
