@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.3.0-dev.2 (2026-10-06)
+
+### Bug Fixes
+
+- Adding parallel connectivity to mcp for sync process
+  ([`83a4173`](https://github.com/vedangiitb/evidor-core/commit/83a417343721f6e1a9da73cdb5dd3290b91a7392))
+
+
 ## v1.3.0-dev.1 (2026-10-06)
 
 ### Bug Fixes
