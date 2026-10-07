@@ -228,18 +228,6 @@ def test_mcp_session_stdio_lifecycle() -> None:
         prompt = session.get_prompt("deal_finder", {"category": "electronics"})
         assert prompt.description == "Find daily deals in a category."
 
-        # Convert to Evidor tools
-        evidor_tools = session.get_evidor_tools()
-        assert len(evidor_tools) == 2
-        search_tool = next(t for t in evidor_tools if t.name == "search_products")
-        assert isinstance(search_tool, Tool)
-        assert search_tool.description == "Search for products on Amazon."
-        assert "query" in search_tool.parameters["properties"]
-
-        # Execute Evidor tool directly
-        exec_res = search_tool.execute(query="headphones")
-        assert "Amazon results for 'headphones'" in exec_res
-
     assert not session.is_connected
 
 
@@ -264,7 +252,7 @@ async def test_mcp_session_async_lifecycle() -> None:
         assert "Amazon results for 'tablet'" in result
 
         # Convert to Evidor tools and execute async
-        evidor_tools = await session.get_evidor_tools_async()
+        evidor_tools = await session.get_evidor_tools()
         search_tool = next(t for t in evidor_tools if t.name == "search_products")
         async_res = await search_tool.execute_async(query="tablet")
         assert "Amazon results for 'tablet'" in async_res
@@ -389,13 +377,13 @@ def test_agent_with_mcp_client_in_tools_list() -> None:
 
 @requires_mcp
 def test_mcp_tool_error_handling() -> None:
-    config = MCPServerConfig.stdio(
+    client = MCPClient.from_stdio(
         name="amazon",
         command=sys.executable,
         args=["-c", AMAZON_MOCK_SERVER_SCRIPT],
     )
-    with MCPSession(config) as session:
-        tools = session.get_evidor_tools()
+    with client:
+        tools = client.get_tools()
         order_tool = next(t for t in tools if t.name == "get_order_status")
 
         # Calling with invalid argument that raises an exception in the MCP server

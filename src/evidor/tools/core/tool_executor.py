@@ -16,8 +16,6 @@ class ToolExecutor:
         for candidate in tools or ():
             if hasattr(candidate, "get_tools") and callable(candidate.get_tools):
                 candidates = candidate.get_tools()
-            elif hasattr(candidate, "get_evidor_tools") and callable(candidate.get_evidor_tools):
-                candidates = candidate.get_evidor_tools()
             else:
                 candidates = [candidate]
 

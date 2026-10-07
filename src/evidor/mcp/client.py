@@ -233,7 +233,7 @@ class MCPClient:
 
         # Fetch tools from all sessions in parallel
         async def _fetch_all_tools() -> list[tuple[Tool, ...]]:
-            tasks = [session.get_evidor_tools_async(force_refresh=force_refresh) for session in self._sessions.values()]
+            tasks = [session.get_evidor_tools(force_refresh=force_refresh) for session in self._sessions.values()]
             return await asyncio.gather(*tasks) if tasks else []
 
         future = asyncio.run_coroutine_threadsafe(_fetch_all_tools(), self._ensure_loop())
@@ -268,7 +268,7 @@ class MCPClient:
         tools: list[Tool] = []
         tool_counts: dict[str, int] = {}
 
-        tasks = [session.get_evidor_tools_async(force_refresh=force_refresh) for session in self._sessions.values()]
+        tasks = [session.get_evidor_tools(force_refresh=force_refresh) for session in self._sessions.values()]
         results = await asyncio.gather(*tasks) if tasks else []
 
         all_server_tools = list(zip(self._sessions.keys(), results))

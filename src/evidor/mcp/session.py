@@ -297,23 +297,8 @@ class MCPSession:
         """Retrieve a rendered prompt from the MCP server asynchronously."""
         return await self._send_cmd_async("get_prompt", name, arguments=arguments or {}, timeout=timeout)
 
-    def get_evidor_tools(self, force_refresh: bool = False) -> tuple[Tool, ...]:
+    async def get_evidor_tools(self, force_refresh: bool = False) -> tuple[Tool, ...]:
         """Convert all MCP tools exposed by this server into Evidor Tool objects."""
-        if self._cached_tools is not None and not force_refresh:
-            return self._cached_tools
-
-        raw_tools_result = self.list_tools()
-        tools_list = getattr(raw_tools_result, "tools", raw_tools_result) or []
-        evidor_tools: list[Tool] = []
-
-        for mcp_tool in tools_list:
-            evidor_tools.append(self._create_tool_adapter(mcp_tool))
-
-        self._cached_tools = tuple(evidor_tools)
-        return self._cached_tools
-
-    async def get_evidor_tools_async(self, force_refresh: bool = False) -> tuple[Tool, ...]:
-        """Asynchronously convert all MCP tools exposed by this server into Evidor Tool objects."""
         if self._cached_tools is not None and not force_refresh:
             return self._cached_tools
 
