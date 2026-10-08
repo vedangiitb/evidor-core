@@ -8,7 +8,7 @@ Install the provider adapter(s) you need:
 
 ```bash
 pip install "evidor[openai]"
-# or: evidor[anthropic], evidor[gemini], evidor[all]
+# or: evidor[anthropic], evidor[gemini], evidor[mcp], evidor[all]
 ```
 
 ## Quickstart
@@ -309,6 +309,189 @@ print(response.text)
 ```
 
 Switch providers by replacing `TavilySearchProvider()` with `ExaSearchProvider()` or `BraveSearchProvider()`. To use another service, implement the small `WebSearchProvider` contract: `search(query: str, *, max_results: int) -> list[SearchResult]`; both types are exported from `evidor`.
+
+## Model Context Protocol (MCP)
+
+Evidor includes first-class support for the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Agents can connect to any MCP server (over local **stdio**, modern **Streamable HTTP**, or legacy **SSE**), automatically discover tools, execute them, and feed responses back into the model.
+
+Install MCP support:
+
+```bash
+pip install "evidor[mcp]"
+```
+
+### Quickstart: Connecting an Agent to an MCP Server
+
+You can pass `mcp_servers` directly when instantiating an `Agent`. For example, integrating an **Amazon MCP server** (e.g. AWS Bedrock, Amazon search, or a custom store MCP server):
+
+```python
+from evidor import Agent, OpenAIProvider
+
+agent = Agent(
+    OpenAIProvider(model="gpt-4.1-mini"),
+    mcp_servers={
+        "amazon": {
+            "command": "uvx",
+            "args": ["amazon-mcp-server"],
+            "env": {"AWS_PROFILE": "default"},
+        }
+    },
+)
+
+# Tools exposed by the Amazon MCP server are automatically discovered and made available
+response = agent.send("Search for Kindle Paperwhite on Amazon and give me a summary.")
+print(response.text)
+
+# Cleanly close subprocesses when done
+agent.close()
+```
+
+Or using a context manager:
+
+```python
+with Agent(provider, mcp_servers={"amazon": {"command": "uvx", "args": ["amazon-mcp-server"]}}) as agent:
+    response = agent.send("Find top noise-cancelling headphones on Amazon.")
+    print(response.text)
+```
+
+### Async MCP with `send_async`
+
+In asynchronous applications, use `send_async()` and `async with`:
+
+```python
+import asyncio
+from evidor import Agent, AnthropicProvider
+
+async def main():
+    async with Agent(
+        AnthropicProvider(model="claude-3-5-sonnet-20241022"),
+        mcp_servers={
+            "amazon": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-amazon"],
+            }
+        },
+    ) as agent:
+        response = await agent.send_async("Check the status of order ORD-12345.")
+        print(response.text)
+
+asyncio.run(main())
+```
+
+### Remote & Hosted MCP Servers (Streamable HTTP & SSE)
+
+Evidor natively supports connecting to remote, hosted MCP servers. In modern MCP specifications, **Streamable HTTP** (`streamable-http` or `http`) is the primary standard for HTTP-based communication, while legacy **SSE** is supported for backwards compatibility:
+
+```python
+from evidor import Agent, OpenAIProvider, MCPServerConfig
+
+# Modern Streamable HTTP (recommended for hosted MCP servers)
+agent = Agent(
+    OpenAIProvider("gpt-4.1-mini"),
+    mcp_servers={
+        "hosted-aws": {
+            "url": "https://mcp.my-hosted-aws.com/mcp",
+            "transport": "streamable-http",  # default for non-/sse URLs
+            "headers": {"Authorization": "Bearer YOUR_API_KEY"},
+        }
+    },
+)
+
+# Or explicitly using factory methods:
+config = MCPServerConfig.http(
+    name="hosted-service",
+    url="https://mcp.service.internal/mcp",
+    headers={"x-api-key": "..."},
+)
+```
+
+### Connecting Multiple MCP Servers
+
+Connect multiple MCP servers simultaneously. Evidor automatically prevents tool naming collisions across servers:
+
+```python
+from evidor import Agent, GeminiProvider, MCPServerConfig
+
+agent = Agent(
+    GeminiProvider(model="gemini-2.5-flash"),
+    mcp_servers=[
+        # Stdio server
+        MCPServerConfig.stdio(
+            name="amazon",
+            command="uvx",
+            args=["amazon-mcp-server"],
+        ),
+        # Remote Streamable HTTP server
+        MCPServerConfig.http(
+            name="remote-inventory",
+            url="https://inventory.internal/mcp",
+            headers={"Authorization": "Bearer secret-token"},
+        ),
+        # Legacy SSE server
+        MCPServerConfig.sse(
+            name="weather",
+            url="http://localhost:8080/sse",
+        ),
+    ],
+)
+
+response = agent.send("What is the weather in Seattle and recommend waterproof hiking boots on Amazon?")
+print(response.text)
+```
+
+### `mcp_servers` vs `mcp_client`: When to Use Which
+
+An `Agent` supports two parameters for MCP integration depending on whether the agent manages the connection lifecycle:
+
+| Parameter | What You Pass | Best For |
+| :--- | :--- | :--- |
+| **`mcp_servers`** | Raw configuration (dicts, commands, URLs, or config files) | **Standard applications** where the agent owns the server processes. The agent automatically boots the client, connects to servers, and terminates subprocesses when closed. |
+| **`mcp_client`** | An already-instantiated `MCPClient` instance | **Shared connections / multi-agent systems** (e.g. FastAPI backends) where a single client is kept open and shared across multiple agents without spawning duplicate subprocesses. |
+
+#### Using `mcp_client` to Share Connections Across Agents
+
+```python
+from evidor import Agent, MCPClient, OpenAIProvider
+
+# Boot a single shared client for your application
+shared_mcp = MCPClient.from_file("claude_desktop_config.json")
+shared_mcp.connect()
+
+# Both agents reuse the exact same client without duplicating subprocesses:
+researcher = Agent(OpenAIProvider("gpt-4.1-mini"), mcp_client=shared_mcp)
+assistant = Agent(OpenAIProvider("gpt-4.1-mini"), mcp_client=shared_mcp)
+
+response1 = researcher.send("Search records for client ABC.")
+response2 = assistant.send("Verify credentials for client ABC.")
+
+# Clean up once when the application terminates
+shared_mcp.close()
+```
+
+### Advanced: Standalone `MCPClient` and Tool Composition
+
+You can also use `MCPClient` standalone to inspect tools, retrieve resources, or mix MCP tools with standard Python tools:
+
+```python
+import asyncio
+from evidor import Agent, MCPClient, OpenAIProvider, tool
+
+@tool
+def internal_calculator(x: int, y: int) -> int:
+    return x * y
+
+async def main():
+    async with MCPClient({"amazon": {"command": "uvx", "args": ["amazon-mcp-server"]}}) as mcp:
+        # Retrieve all Evidor Tool objects from the MCP server
+        mcp_tools = await mcp.get_tools_async()
+
+        # Combine MCP tools with local tools
+        agent = Agent(OpenAIProvider("gpt-4.1-mini"), tools=[*mcp_tools, internal_calculator])
+        response = await agent.send_async("Calculate total price for 3 units of item B08N5WRWNW.")
+        print(response.text)
+
+asyncio.run(main())
+```
 
 ## Providers
 

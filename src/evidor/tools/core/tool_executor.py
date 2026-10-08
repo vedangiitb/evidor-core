@@ -11,13 +11,19 @@ from .utils import format_tool_error, serialize_tool_result
 class ToolExecutor:
     """Normalizes configured tools and executes calls requested by a provider."""
 
-    def __init__(self, tools: Sequence[Tool | Callable[..., Any]] | None, default_timeout: float | None) -> None:
+    def __init__(self, tools: Sequence[Any] | None, default_timeout: float | None) -> None:
         configured_tools: list[Tool] = []
         for candidate in tools or ():
-            configured = candidate if isinstance(candidate, Tool) else tool(candidate)
-            if default_timeout is not None and configured.timeout is None:
-                configured = configured.with_timeout(default_timeout)
-            configured_tools.append(configured)
+            if hasattr(candidate, "get_tools") and callable(candidate.get_tools):
+                candidates = candidate.get_tools()
+            else:
+                candidates = [candidate]
+
+            for item in candidates:
+                configured = item if isinstance(item, Tool) else tool(item)
+                if default_timeout is not None and configured.timeout is None:
+                    configured = configured.with_timeout(default_timeout)
+                configured_tools.append(configured)
         self.tools = tuple(configured_tools)
         self._by_name = {configured.name: configured for configured in self.tools}
 
