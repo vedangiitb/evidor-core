@@ -499,18 +499,22 @@ Evidor includes a first-class, decoupled telemetry subsystem built on an asynchr
 
 > **Zero Extra Dependencies for Custom Telemetry:**  
 > Custom telemetry implementations and built-in sinks (`ConsoleSink`, `InMemorySink`) require **no external packages** (`pip install evidor`).  
-> If you want to export spans to an OpenTelemetry collector or OpenInference backend, install the optional adapter: `pip install "evidor[otel]"`.
+> Optional adapters are available for industry-standard backends:
+> * OpenTelemetry: `pip install "evidor[otel]"`
+> * Langfuse: `pip install "evidor[langfuse]"`
+> * Arize Phoenix: `pip install "evidor[phoenix]"`
+> * Prometheus: `pip install "evidor[prometheus]"`
 
 ### Design Principles
 
-- **Zero-Dependency Core**: Evidor core defines framework-neutral domain events and lifecycle operations. Telemetry adapters own the protocol and export.
+- **Zero-Dependency Core**: Evidor core defines framework-neutral domain events and lifecycle operations. Telemetry adapters own protocol conversions and client exports.
 - **Non-Blocking Emission**: Event emission on the agent thread takes under 1 microsecond via an in-memory bounded queue. Formatting, batching, and network transport happen on a dedicated background worker thread (`Evidor-Telemetry-Worker`).
 - **Trace Context Propagation**: Automatically tracks parent-child span hierarchy across synchronous and asynchronous operations using `contextvars`.
 - **Fault-Isolated**: Downstream observability backend timeouts, outages, or serialization errors never crash the agent.
 
 ---
 
-### Built-in Sinks
+### Built-in Sinks (Zero Dependencies)
 
 Evidor includes built-in sinks that require zero external dependencies:
 
@@ -526,7 +530,7 @@ agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=sink)
 agent.send("What is the speed of light?")
 ```
 
-#### 2. `InMemorySink`: Testing & Offline Evaluation
+#### 2. `InMemorySink`: Testing & Offline Assertions
 Capture all events in memory to assert on token counts, latency, and tool invocations:
 
 ```python
@@ -544,17 +548,17 @@ print(f"Total tokens used: {llm_events[0].token_usage.total_tokens}")
 
 ---
 
-### OpenTelemetry & OpenInference Integration
+### Observability Adapters
 
-Currently, Evidor provides official adapter support for **OpenTelemetry** via `OpenTelemetrySink`. It converts domain events into distributed trace spans compliant with **OpenTelemetry GenAI** and **OpenInference** semantic conventions.
+Evidor provides official adapters for industry-leading observability platforms:
 
-#### Install Extra
+#### 1. OpenTelemetry & OpenInference (`evidor[otel]`)
+
+Convert domain events into distributed trace spans compliant with **OpenTelemetry GenAI** and **OpenInference** semantic conventions:
 
 ```bash
 pip install "evidor[otel]"
 ```
-
-#### Usage with OpenTelemetry
 
 ```python
 from opentelemetry import trace
@@ -562,18 +566,78 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from evidor import Agent, OpenAIProvider, OpenTelemetrySink
 
-# Configure your OpenTelemetry TracerProvider
 provider = TracerProvider()
 provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
 trace.set_tracer_provider(provider)
 
-# Attach the OpenTelemetrySink to your agent
 otel_sink = OpenTelemetrySink(tracer_provider=provider)
 agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=otel_sink)
-
 response = agent.send("Search the documentation for vector embeddings.")
-agent.close()  # Flushes telemetry and cleanly closes background workers
+agent.close()
 ```
+
+#### 2. Langfuse (`evidor[langfuse]`)
+
+Trace agent executions, evaluate responses, monitor token usage, and track latency on the open-source [Langfuse](https://langfuse.com) platform:
+
+```bash
+pip install "evidor[langfuse]"
+```
+
+```python
+from evidor import Agent, OpenAIProvider, LangfuseSink
+
+# Reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, and LANGFUSE_HOST from env
+langfuse_sink = LangfuseSink()
+
+agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=langfuse_sink)
+response = agent.send("Summarize the quarterly earnings report.")
+agent.close()  # Automatically flushes pending events and shuts down Langfuse client
+```
+
+#### 3. Arize Phoenix (`evidor[phoenix]`)
+
+Send traces directly to [Arize Phoenix](https://phoenix.arize.com/) (local or cloud) formatted with native **OpenInference** metadata (`input.value`, `output.value`, `tool.parameters`, token breakdowns):
+
+```bash
+pip install "evidor[phoenix]"
+```
+
+```python
+from evidor import Agent, OpenAIProvider, PhoenixSink
+
+# Connects to Phoenix at http://localhost:6006/v1/traces by default
+phoenix_sink = PhoenixSink(
+    endpoint="http://localhost:6006/v1/traces",
+    project_name="my-evidor-agent",
+)
+
+agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=phoenix_sink)
+response = agent.send("Analyze customer sentiment from survey data.")
+agent.close()
+```
+
+#### 4. Prometheus Metrics (`evidor[prometheus]`)
+
+Export operational agent metrics (`evidor_agent_runs_total`, `evidor_llm_calls_total`, `evidor_tokens_total`, `evidor_tool_calls_total`, `evidor_errors_total`, and latency histograms) to Prometheus:
+
+```bash
+pip install "evidor[prometheus]"
+```
+
+```python
+from evidor import Agent, OpenAIProvider, PrometheusSink
+
+prom_sink = PrometheusSink()
+agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=prom_sink)
+agent.send("Calculate total revenue.")
+
+# Export metrics exposition text (e.g., in a FastAPI /metrics endpoint):
+metrics_text = prom_sink.export_text()
+print(metrics_text)
+```
+
+---
 
 #### Span Tree & Semantic Attributes
 
@@ -587,12 +651,11 @@ agent.run                           [openinference.span.kind = "AGENT"]
 
 Standard attributes automatically populated:
 * `openinference.span.kind`: `AGENT`, `LLM`, or `TOOL`
+* `input.value`, `output.value`, `tool.parameters`
 * `gen_ai.system`, `gen_ai.request.model`, `gen_ai.response.model`
 * `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.total_tokens`
 * `llm.input_prompt`, `llm.input_messages`, `llm.output_text`, `llm.output_tool_calls`
 * `evidor.agent.run_id`, `evidor.tool.name`, `evidor.mcp.server_name`
-
-Compatible out of the box with **Phoenix**, **Arize**, **Langfuse**, **Datadog**, **Jaeger**, and the **OpenTelemetry Collector**.
 
 ---
 
