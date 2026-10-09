@@ -44,7 +44,7 @@ from .semconv import (
     SPAN_KIND_LLM,
     SPAN_KIND_TOOL,
 )
-from .adapters import OpenTelemetrySink
+from .adapters import LangfuseSink, OpenTelemetrySink, PhoenixSink, PrometheusSink
 from .sink import ConsoleSink, InMemorySink, TelemetrySink
 
 __all__ = [
@@ -67,6 +67,9 @@ __all__ = [
     "InMemorySink",
     "ConsoleSink",
     "OpenTelemetrySink",
+    "LangfuseSink",
+    "PhoenixSink",
+    "PrometheusSink",
     # Agent Run
     "AgentRunStartEvent",
     "AgentRunEndEvent",

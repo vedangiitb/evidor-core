@@ -18,6 +18,7 @@ dist/
 
 # Test and type-checker artifacts
 .pytest_cache/
+.pytest_temp/
 .coverage
 .coverage.*
 htmlcov/
