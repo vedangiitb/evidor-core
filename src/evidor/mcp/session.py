@@ -6,9 +6,18 @@ import concurrent.futures
 import json
 from pathlib import Path
 import threading
+import time
 from typing import Any
 
 from evidor.tools import Tool
+from ..telemetry import (
+    ErrorEvent,
+    MCPCallEndEvent,
+    MCPCallStartEvent,
+    create_child_trace_context,
+    emit_event,
+    trace_scope,
+)
 
 from .config import MCPServerConfig
 
@@ -253,15 +262,101 @@ class MCPSession:
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None, timeout: float | None = 60.0) -> str:
         """Execute a tool on the MCP server synchronously and return serialized text output."""
-        result = self._send_cmd("call_tool", name, arguments=arguments or {}, timeout=timeout)
-        return _serialize_mcp_result(result)
+        ctx = create_child_trace_context()
+        emit_event(
+            MCPCallStartEvent(
+                trace_context=ctx,
+                server_name=self.config.name,
+                tool_name=name,
+                arguments=arguments or {},
+            )
+        )
+        t0 = time.perf_counter()
+        with trace_scope(ctx):
+            try:
+                result = self._send_cmd("call_tool", name, arguments=arguments or {}, timeout=timeout)
+                duration_ms = (time.perf_counter() - t0) * 1000
+                emit_event(
+                    MCPCallEndEvent(
+                        trace_context=ctx,
+                        server_name=self.config.name,
+                        tool_name=name,
+                        status="ok",
+                        duration_ms=duration_ms,
+                    )
+                )
+                return _serialize_mcp_result(result)
+            except Exception as err:
+                duration_ms = (time.perf_counter() - t0) * 1000
+                err_msg = str(err)
+                emit_event(
+                    MCPCallEndEvent(
+                        trace_context=ctx,
+                        server_name=self.config.name,
+                        tool_name=name,
+                        status="error",
+                        duration_ms=duration_ms,
+                        error=err_msg,
+                    )
+                )
+                emit_event(
+                    ErrorEvent(
+                        trace_context=ctx,
+                        error_type=type(err).__name__,
+                        message=err_msg,
+                    )
+                )
+                raise
 
     async def call_tool_async(
         self, name: str, arguments: dict[str, Any] | None = None, timeout: float | None = 60.0
     ) -> str:
         """Execute a tool on the MCP server asynchronously and return serialized text output."""
-        result = await self._send_cmd_async("call_tool", name, arguments=arguments or {}, timeout=timeout)
-        return _serialize_mcp_result(result)
+        ctx = create_child_trace_context()
+        emit_event(
+            MCPCallStartEvent(
+                trace_context=ctx,
+                server_name=self.config.name,
+                tool_name=name,
+                arguments=arguments or {},
+            )
+        )
+        t0 = time.perf_counter()
+        with trace_scope(ctx):
+            try:
+                result = await self._send_cmd_async("call_tool", name, arguments=arguments or {}, timeout=timeout)
+                duration_ms = (time.perf_counter() - t0) * 1000
+                emit_event(
+                    MCPCallEndEvent(
+                        trace_context=ctx,
+                        server_name=self.config.name,
+                        tool_name=name,
+                        status="ok",
+                        duration_ms=duration_ms,
+                    )
+                )
+                return _serialize_mcp_result(result)
+            except Exception as err:
+                duration_ms = (time.perf_counter() - t0) * 1000
+                err_msg = str(err)
+                emit_event(
+                    MCPCallEndEvent(
+                        trace_context=ctx,
+                        server_name=self.config.name,
+                        tool_name=name,
+                        status="error",
+                        duration_ms=duration_ms,
+                        error=err_msg,
+                    )
+                )
+                emit_event(
+                    ErrorEvent(
+                        trace_context=ctx,
+                        error_type=type(err).__name__,
+                        message=err_msg,
+                    )
+                )
+                raise
 
     def list_resources(self, timeout: float | None = 30.0) -> Any:
         """List available resources on the MCP server synchronously."""
