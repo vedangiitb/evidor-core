@@ -126,3 +126,4 @@ class PhoenixSink(OpenTelemetrySink):
                 span.set_attribute("output.value", str(event.status))
 
         super()._end_span(event)
+

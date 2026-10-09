@@ -193,3 +193,4 @@ def test_langfuse_end_to_end_agent() -> None:
         assert mock_client.start_observation.call_count >= 2
     finally:
         runtime.close()
+

@@ -172,3 +172,4 @@ def test_phoenix_end_to_end_agent_execution() -> None:
         assert "llm.mock-gpt-4o" in names
     finally:
         runtime.close()
+
