@@ -8,7 +8,7 @@ Install the provider adapter(s) you need:
 
 ```bash
 pip install "evidor[openai]"
-# or: evidor[anthropic], evidor[gemini], evidor[mcp], evidor[otel], evidor[all]
+# or: evidor[anthropic], evidor[gemini], evidor[mcp], evidor[otel], evidor[langfuse], evidor[phoenix], evidor[prometheus], evidor[all]
 ```
 
 ## Quickstart
@@ -550,7 +550,14 @@ print(f"Total tokens used: {llm_events[0].token_usage.total_tokens}")
 
 ### Observability Adapters
 
-Evidor provides official adapters for industry-leading observability platforms:
+Evidor provides official, ultra-compact adapters for industry-leading observability platforms. Because Evidor's core runtime manages all context propagation, queuing, and background dispatch, each adapter requires **under ~100 lines of logic**:
+
+| Adapter | Platform | Extra Install | Typical Use Case |
+| :--- | :--- | :--- | :--- |
+| **`OpenTelemetrySink`** | OpenTelemetry, Datadog, Jaeger | `evidor[otel]` | Enterprise distributed tracing & OTel collectors |
+| **`LangfuseSink`** | Langfuse (Cloud or self-hosted) | `evidor[langfuse]` | LLM engineering, prompt tracking & cost evaluation |
+| **`PhoenixSink`** | Arize Phoenix | `evidor[phoenix]` | Local agent inspection with native OpenInference UI |
+| **`PrometheusSink`** | Prometheus, Grafana | `evidor[prometheus]` | Operational counters, gauges & latency histograms |
 
 #### 1. OpenTelemetry & OpenInference (`evidor[otel]`)
 
@@ -732,6 +739,20 @@ class CustomProvider:
         # or iterate over request.messages
         return GenerationResponse(text="Custom response", model=self.model)
 ```
+
+### Optional Extras Summary
+
+| Extra | Purpose | Included Packages |
+| :--- | :--- | :--- |
+| `evidor[openai]` | OpenAI models (`gpt-4.1-mini`, `gpt-4o`) | `openai` |
+| `evidor[anthropic]` | Anthropic Claude models (`claude-3-5-sonnet`) | `anthropic` |
+| `evidor[gemini]` | Google Gemini models (`gemini-2.5-flash`) | `google-genai` |
+| `evidor[mcp]` | Model Context Protocol servers | `mcp` |
+| `evidor[otel]` | OpenTelemetry distributed tracing | `opentelemetry-api`, `opentelemetry-sdk` |
+| `evidor[langfuse]` | Langfuse traces, generations & evaluation | `langfuse` |
+| `evidor[phoenix]` | Arize Phoenix with OpenInference semantics | `arize-phoenix-otel`, `openinference-semantic-conventions` |
+| `evidor[prometheus]` | Prometheus metrics and `/metrics` exposition | `prometheus-client` |
+| `evidor[all]` | All model providers, MCP, and telemetry adapters | All optional extras |
 
 ## Build and release
 
