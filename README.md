@@ -8,7 +8,7 @@ Install the provider adapter(s) you need:
 
 ```bash
 pip install "evidor[openai]"
-# or: evidor[anthropic], evidor[gemini], evidor[mcp], evidor[all]
+# or: evidor[anthropic], evidor[gemini], evidor[mcp], evidor[otel], evidor[all]
 ```
 
 ## Quickstart
@@ -491,6 +491,151 @@ async def main():
         print(response.text)
 
 asyncio.run(main())
+```
+
+## Telemetry & Observability
+
+Evidor includes a first-class, decoupled telemetry subsystem built on an asynchronous **actor-like producer-consumer runtime**. It captures distributed trace trees across agent turns, model generations, tool executions, and external MCP server invocations with zero overhead on the agent's critical path.
+
+> **Zero Extra Dependencies for Custom Telemetry:**  
+> Custom telemetry implementations and built-in sinks (`ConsoleSink`, `InMemorySink`) require **no external packages** (`pip install evidor`).  
+> If you want to export spans to an OpenTelemetry collector or OpenInference backend, install the optional adapter: `pip install "evidor[otel]"`.
+
+### Design Principles
+
+- **Zero-Dependency Core**: Evidor core defines framework-neutral domain events and lifecycle operations. Telemetry adapters own the protocol and export.
+- **Non-Blocking Emission**: Event emission on the agent thread takes under 1 microsecond via an in-memory bounded queue. Formatting, batching, and network transport happen on a dedicated background worker thread (`Evidor-Telemetry-Worker`).
+- **Trace Context Propagation**: Automatically tracks parent-child span hierarchy across synchronous and asynchronous operations using `contextvars`.
+- **Fault-Isolated**: Downstream observability backend timeouts, outages, or serialization errors never crash the agent.
+
+---
+
+### Built-in Sinks
+
+Evidor includes built-in sinks that require zero external dependencies:
+
+#### 1. `ConsoleSink`: Real-Time Developer Visibility
+Stream structured events directly to `sys.stderr` or `sys.stdout`:
+
+```python
+from evidor import Agent, OpenAIProvider
+from evidor.telemetry import ConsoleSink
+
+sink = ConsoleSink()
+agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=sink)
+agent.send("What is the speed of light?")
+```
+
+#### 2. `InMemorySink`: Testing & Offline Evaluation
+Capture all events in memory to assert on token counts, latency, and tool invocations:
+
+```python
+from evidor import Agent, OpenAIProvider
+from evidor.telemetry import InMemorySink, LLMCallEndEvent
+
+sink = InMemorySink()
+agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=sink)
+agent.send("Hello agent!")
+
+# Inspect recorded events
+llm_events = sink.filter(LLMCallEndEvent)
+print(f"Total tokens used: {llm_events[0].token_usage.total_tokens}")
+```
+
+---
+
+### OpenTelemetry & OpenInference Integration
+
+Currently, Evidor provides official adapter support for **OpenTelemetry** via `OpenTelemetrySink`. It converts domain events into distributed trace spans compliant with **OpenTelemetry GenAI** and **OpenInference** semantic conventions.
+
+#### Install Extra
+
+```bash
+pip install "evidor[otel]"
+```
+
+#### Usage with OpenTelemetry
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+from evidor import Agent, OpenAIProvider, OpenTelemetrySink
+
+# Configure your OpenTelemetry TracerProvider
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+trace.set_tracer_provider(provider)
+
+# Attach the OpenTelemetrySink to your agent
+otel_sink = OpenTelemetrySink(tracer_provider=provider)
+agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=otel_sink)
+
+response = agent.send("Search the documentation for vector embeddings.")
+agent.close()  # Flushes telemetry and cleanly closes background workers
+```
+
+#### Span Tree & Semantic Attributes
+
+Evidor automatically builds the full execution tree:
+```
+agent.run                           [openinference.span.kind = "AGENT"]
+  ├── llm.gpt-4.1-mini              [openinference.span.kind = "LLM"]
+  └── tool.search_docs              [openinference.span.kind = "TOOL"]
+        └── mcp.docs_server.search  [openinference.span.kind = "TOOL"]
+```
+
+Standard attributes automatically populated:
+* `openinference.span.kind`: `AGENT`, `LLM`, or `TOOL`
+* `gen_ai.system`, `gen_ai.request.model`, `gen_ai.response.model`
+* `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.total_tokens`
+* `llm.input_prompt`, `llm.input_messages`, `llm.output_text`, `llm.output_tool_calls`
+* `evidor.agent.run_id`, `evidor.tool.name`, `evidor.mcp.server_name`
+
+Compatible out of the box with **Phoenix**, **Arize**, **Langfuse**, **Datadog**, **Jaeger**, and the **OpenTelemetry Collector**.
+
+---
+
+### Advanced: Custom Sinks & Runtime Tuning
+
+#### Implementing a Custom Sink
+Implement the `TelemetrySink` protocol to send events to any custom database, webhook, or logging system:
+
+```python
+from collections.abc import Sequence
+from evidor.telemetry import TelemetryEvent, TelemetrySink
+
+class WebhookSink(TelemetrySink):
+    def write(self, events: Sequence[TelemetryEvent]) -> None:
+        for event in events:
+            # Send batch payload over HTTP or write to database
+            attrs = event.to_attributes()
+            ...
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+```
+
+#### Tuning the `TelemetryRuntime`
+Configure queue capacity, batching thresholds, and overflow strategies:
+
+```python
+from evidor import Agent, OpenAIProvider
+from evidor.telemetry import TelemetryRuntime, ConsoleSink
+
+# Actor runtime with custom batching and bounded buffer
+runtime = TelemetryRuntime(
+    sinks=[ConsoleSink()],
+    queue_size=2000,                # Max buffered events
+    batch_size=100,                 # Batch size dispatched to sinks
+    flush_interval_seconds=0.5,     # Max wait before flushing available events
+    overflow_strategy="drop_oldest" # "drop_newest" (default) or "drop_oldest"
+)
+
+agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=runtime)
 ```
 
 ## Providers
