@@ -261,3 +261,75 @@ def test_mcp_call_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
     assert mcp_ends[0].server_name == "test_server"
     assert mcp_ends[0].status == "ok"
     assert mcp_ends[0].duration_ms >= 0
+
+
+def test_runtime_close_drains_remaining_queue() -> None:
+    from collections.abc import Sequence
+    from evidor.telemetry import TelemetryEvent, TelemetrySink
+
+    class DelayedSink(TelemetrySink):
+        def __init__(self) -> None:
+            self.events: list[TelemetryEvent] = []
+
+        def write(self, batch: Sequence[TelemetryEvent]) -> None:
+            time.sleep(0.02)
+            self.events.extend(batch)
+
+        def flush(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    sink = DelayedSink()
+    runtime = TelemetryRuntime([sink], batch_size=5, flush_interval_seconds=0.01)
+    ctx = TraceContext.new_root()
+
+    # Emit 20 events in rapid succession
+    for i in range(20):
+        runtime.emit(AgentRunStartEvent(trace_context=ctx, run_id=f"drain_{i}"))
+
+    # Immediately close without prior flush
+    runtime.close(timeout=3.0)
+
+    # All 20 events must have been drained and written to the sink
+    assert len(sink.events) == 20
+    assert [e.run_id for e in sink.events] == [f"drain_{i}" for i in range(20)]  # type: ignore[attr-defined]
+
+
+def test_runtime_flush_synchronizes_with_in_flight_writes() -> None:
+    from collections.abc import Sequence
+    from evidor.telemetry import TelemetryEvent, TelemetrySink
+
+    class TrackingSlowSink(TelemetrySink):
+        def __init__(self) -> None:
+            self.write_in_progress = False
+            self.write_completed = False
+
+        def write(self, batch: Sequence[TelemetryEvent]) -> None:
+            self.write_in_progress = True
+            time.sleep(0.1)
+            self.write_in_progress = False
+            self.write_completed = True
+
+        def flush(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    sink = TrackingSlowSink()
+    runtime = TelemetryRuntime([sink], batch_size=5, flush_interval_seconds=0.01)
+    ctx = TraceContext.new_root()
+
+    runtime.emit(AgentRunStartEvent(trace_context=ctx, run_id="in_flight_1"))
+    # Allow worker a tiny slice to pick up the batch from the queue
+    time.sleep(0.02)
+
+    # Flush should block until the slow write has finished
+    runtime.flush(timeout=1.0)
+
+    assert sink.write_completed is True
+    assert sink.write_in_progress is False
+    runtime.close()
+

@@ -36,8 +36,11 @@ class TelemetryRuntime:
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=queue_size)
         self._worker_thread: threading.Thread | None = None
         self._started = False
+        self._stopping = False
         self._closed = False
         self._lock = threading.Lock()
+        self._condition = threading.Condition()
+        self._pending_count = 0
         self._dropped_count = 0
 
     @property
@@ -57,10 +60,10 @@ class TelemetryRuntime:
                 self._sinks.append(sink)
 
     def _ensure_worker_started(self) -> None:
-        if self._started or self._closed:
+        if self._started or self._closed or self._stopping:
             return
         with self._lock:
-            if self._started or self._closed:
+            if self._started or self._closed or self._stopping:
                 return
             self._started = True
             self._worker_thread = threading.Thread(
@@ -72,52 +75,62 @@ class TelemetryRuntime:
 
     def emit(self, event: TelemetryEvent) -> None:
         """Enqueue an event non-blockingly (< 1µs)."""
-        if self._closed or not self._sinks:
+        if self._closed or self._stopping or not self._sinks:
             return
 
         self._ensure_worker_started()
 
         try:
             self._queue.put_nowait(event)
+            with self._condition:
+                self._pending_count += 1
         except queue.Full:
             self._dropped_count += 1
             if self._overflow_strategy == "drop_oldest":
                 try:
                     self._queue.get_nowait()
-                    self._queue.task_done()
+                    with self._condition:
+                        self._pending_count -= 1
                 except queue.Empty:
                     pass
                 try:
                     self._queue.put_nowait(event)
+                    with self._condition:
+                        self._pending_count += 1
                 except queue.Full:
                     pass
 
     def _worker_loop(self) -> None:
-        while not self._closed:
+        stop_seen = False
+        while not stop_seen:
             batch: list[TelemetryEvent] = []
             try:
                 item = self._queue.get(timeout=self._flush_interval)
                 if item is _STOP_SENTINEL:
-                    self._queue.task_done()
                     break
                 batch.append(item)
                 while len(batch) < self._batch_size:
                     try:
                         next_item = self._queue.get_nowait()
                         if next_item is _STOP_SENTINEL:
-                            self._queue.task_done()
-                            self._closed = True
+                            stop_seen = True
                             break
                         batch.append(next_item)
                     except queue.Empty:
                         break
             except queue.Empty:
-                pass
+                if self._stopping and self._queue.empty():
+                    break
 
             if batch:
-                self._dispatch_batch(batch)
-                for _ in batch:
-                    self._queue.task_done()
+                try:
+                    self._dispatch_batch(batch)
+                finally:
+                    with self._condition:
+                        self._pending_count -= len(batch)
+                        if self._pending_count <= 0:
+                            self._pending_count = 0
+                            self._condition.notify_all()
 
     def _dispatch_batch(self, batch: Sequence[TelemetryEvent]) -> None:
         for sink in list(self._sinks):
@@ -128,12 +141,14 @@ class TelemetryRuntime:
                 pass
 
     def flush(self, timeout: float = 2.0) -> None:
-        """Block until the queue is fully drained and flush all sinks."""
+        """Block until all queued and in-flight events are dispatched and flush all sinks."""
         deadline = time.time() + timeout
-
-        # Process any pending items if worker hasn't processed them yet
-        while not self._queue.empty() and time.time() < deadline:
-            time.sleep(0.01)
+        with self._condition:
+            while self._pending_count > 0:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                self._condition.wait(remaining)
 
         with self._lock:
             for sink in self._sinks:
@@ -143,27 +158,25 @@ class TelemetryRuntime:
                     pass
 
     def close(self, timeout: float = 2.0) -> None:
-        """Stop the background consumer and release sink resources."""
+        """Stop the background consumer, drain remaining events, and release sink resources."""
         with self._lock:
-            if self._closed:
+            if self._closed or self._stopping:
                 return
-            self._closed = True
+            self._stopping = True
 
         if self._started:
             try:
                 self._queue.put_nowait(_STOP_SENTINEL)
             except queue.Full:
-                try:
-                    self._queue.get_nowait()
-                    self._queue.put_nowait(_STOP_SENTINEL)
-                except Exception:
-                    pass
+                # Queue is full; stopping flag ensures worker drains all events and terminates
+                pass
 
             if self._worker_thread and self._worker_thread.is_alive():
                 self._worker_thread.join(timeout=timeout)
 
-        # Final flush & close sinks
+        # Final state transition and resource release
         with self._lock:
+            self._closed = True
             for sink in self._sinks:
                 try:
                     sink.flush()
