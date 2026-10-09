@@ -7,7 +7,7 @@ import threading
 from collections.abc import Sequence
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
-from .events import TelemetryEvent
+from .events import TelemetryEvent, redact_event
 
 T_Event = TypeVar("T_Event", bound=TelemetryEvent)
 
@@ -32,13 +32,15 @@ class TelemetrySink(Protocol):
 class InMemorySink:
     """Thread-safe in-memory sink for testing, inspection, and local assertions."""
 
-    def __init__(self) -> None:
+    def __init__(self, capture_content: bool = True) -> None:
+        self._capture_content = capture_content
         self._events: list[TelemetryEvent] = []
         self._lock = threading.Lock()
 
     def write(self, events: Sequence[TelemetryEvent]) -> None:
         with self._lock:
-            self._events.extend(events)
+            to_store = events if self._capture_content else [redact_event(e) for e in events]
+            self._events.extend(to_store)
 
     def flush(self) -> None:
         pass
@@ -66,17 +68,19 @@ class InMemorySink:
 class ConsoleSink:
     """Simple sink printing events to stderr or stdout for local debugging."""
 
-    def __init__(self, stream: Any = None) -> None:
+    def __init__(self, stream: Any = None, capture_content: bool = True) -> None:
         self._stream = stream or sys.stderr
+        self._capture_content = capture_content
         self._lock = threading.Lock()
 
     def write(self, events: Sequence[TelemetryEvent]) -> None:
         with self._lock:
             for event in events:
-                attrs = event.to_attributes()
-                cls_name = event.__class__.__name__
-                trace_id = event.trace_context.trace_id[:8]
-                span_id = event.trace_context.span_id[:8]
+                ev = event if self._capture_content else redact_event(event)
+                attrs = ev.to_attributes()
+                cls_name = ev.__class__.__name__
+                trace_id = ev.trace_context.trace_id[:8]
+                span_id = ev.trace_context.span_id[:8]
                 print(f"[Telemetry][{trace_id}:{span_id}] {cls_name}: {attrs}", file=self._stream)
 
     def flush(self) -> None:

@@ -194,3 +194,38 @@ def test_langfuse_end_to_end_agent() -> None:
     finally:
         runtime.close()
 
+
+def test_langfuse_capture_content_false() -> None:
+    mock_client = MagicMock()
+    mock_obs = MagicMock()
+    mock_client.start_observation.return_value = mock_obs
+
+    sink = LangfuseSink(client=mock_client, capture_content=False)
+    ctx = TraceContext.new_root()
+
+    sink.write([
+        AgentRunStartEvent(
+            trace_context=ctx,
+            run_id="run-lf-redact",
+            user_prompt="Confidential prompt",
+        ),
+        AgentRunEndEvent(
+            trace_context=ctx,
+            run_id="run-lf-redact",
+            status="ok",
+            output_text="Confidential response",
+        ),
+    ])
+
+    # start_observation input must be None
+    assert mock_client.start_observation.call_count == 1
+    call_kwargs = mock_client.start_observation.call_args[1]
+    assert call_kwargs["input"] is None
+    assert call_kwargs["metadata"]["run_id"] == "run-lf-redact"
+
+    # obs.update output must not be passed or None
+    assert mock_obs.update.call_count == 1
+    update_kwargs = mock_obs.update.call_args[1]
+    assert "output" not in update_kwargs or update_kwargs["output"] is None
+
+

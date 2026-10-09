@@ -9,7 +9,7 @@ from __future__ import annotations
 import secrets
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from . import semconv
@@ -321,3 +321,23 @@ class ErrorEvent(TelemetryEvent):
         attrs[semconv.EVIDOR_RETRY_OUTCOME] = self.outcome
         attrs.update(self.details)
         return attrs
+
+
+def redact_event(event: TelemetryEvent) -> TelemetryEvent:
+    """Return a copy of the telemetry event with raw prompt, message, and tool contents stripped."""
+    if isinstance(event, AgentRunStartEvent):
+        return replace(event, user_prompt="", system_prompt=None)
+    if isinstance(event, AgentRunEndEvent):
+        return replace(event, output_text="")
+    if isinstance(event, LLMCallStartEvent):
+        return replace(event, input_prompt="", input_messages=())
+    if isinstance(event, LLMCallEndEvent):
+        return replace(event, output_text="", output_tool_calls=())
+    if isinstance(event, ToolCallStartEvent):
+        return replace(event, arguments={})
+    if isinstance(event, ToolCallEndEvent):
+        return replace(event, result=None)
+    if isinstance(event, MCPCallStartEvent):
+        return replace(event, arguments={})
+    return event
+

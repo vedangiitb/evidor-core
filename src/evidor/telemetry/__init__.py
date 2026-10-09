@@ -22,6 +22,7 @@ from .events import (
     ToolCallEndEvent,
     ToolCallStartEvent,
     TraceContext,
+    redact_event,
 )
 from .runtime import OverflowStrategy, TelemetryRuntime
 from .semconv import (
@@ -53,6 +54,7 @@ __all__ = [
     "TokenUsage",
     "SpanStatus",
     "TelemetryEvent",
+    "redact_event",
     # Context & Scoping
     "trace_scope",
     "telemetry_scope",

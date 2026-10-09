@@ -193,3 +193,37 @@ def test_opentelemetry_orphan_end_event_fallback() -> None:
     assert span.attributes["tool.output"] == "Success"
     assert span.status.status_code == StatusCode.OK
 
+
+def test_opentelemetry_capture_content_false() -> None:
+    tracer_provider, exporter = create_test_tracer()
+    sink = OpenTelemetrySink(tracer_provider=tracer_provider, capture_content=False)
+
+    ctx = TraceContext.new_root()
+    start_event = AgentRunStartEvent(
+        trace_context=ctx,
+        run_id="run_redact",
+        user_prompt="My sensitive question",
+    )
+    end_event = AgentRunEndEvent(
+        trace_context=ctx,
+        run_id="run_redact",
+        status="ok",
+        output_text="My sensitive answer",
+    )
+
+    sink.write([start_event, end_event])
+    sink.flush()
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    span = spans[0]
+
+    # Sensitive attributes should NOT be present
+    assert "agent.prompt" not in span.attributes
+    assert "agent.output" not in span.attributes
+
+    # Operational metadata SHOULD be present
+    assert span.attributes["openinference.span.kind"] == "AGENT"
+    assert span.attributes["evidor.agent.run_id"] == "run_redact"
+
+

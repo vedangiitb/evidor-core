@@ -173,3 +173,36 @@ def test_phoenix_end_to_end_agent_execution() -> None:
     finally:
         runtime.close()
 
+
+def test_phoenix_capture_content_false() -> None:
+    tp, exporter = create_phoenix_test_tracer()
+    sink = PhoenixSink(tracer_provider=tp, capture_content=False)
+
+    ctx = TraceContext.new_root()
+    sink.write([
+        AgentRunStartEvent(
+            trace_context=ctx,
+            run_id="run-phx-redact",
+            user_prompt="Secret prompt",
+        ),
+        AgentRunEndEvent(
+            trace_context=ctx,
+            run_id="run-phx-redact",
+            status="ok",
+            output_text="Secret response",
+        ),
+    ])
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    span = spans[0]
+
+    # Verify input.value and output.value are NOT present
+    assert "input.value" not in span.attributes
+    assert "output.value" not in span.attributes
+
+    # Verify OpenInference metadata IS present
+    assert span.attributes.get("openinference.span.kind") == "AGENT"
+    assert span.attributes.get("evidor.agent.run_id") == "run-phx-redact"
+
+

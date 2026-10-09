@@ -17,6 +17,7 @@ from ..events import (
     TelemetryEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    redact_event,
 )
 from ..sink import TelemetrySink
 
@@ -32,7 +33,7 @@ except ImportError:
 class LangfuseSink(TelemetrySink):
     """Translates Evidor events into Langfuse traces, generations, and tool spans."""
 
-    def __init__(self, client: Any = None, **kwargs: Any) -> None:
+    def __init__(self, client: Any = None, capture_content: bool = True, **kwargs: Any) -> None:
         if not HAS_LANGFUSE:
             raise ImportError(
                 "The 'langfuse' package is required for the Langfuse adapter. "
@@ -40,18 +41,20 @@ class LangfuseSink(TelemetrySink):
             )
 
         self._client = client if client is not None else Langfuse(**kwargs)
+        self._capture_content = capture_content
         self._active_observations: dict[str, Any] = {}
         self._lock = threading.Lock()
 
     def write(self, events: Sequence[TelemetryEvent]) -> None:
         """Process a batch of emitted events."""
         for event in events:
-            if isinstance(event, (AgentRunStartEvent, LLMCallStartEvent, ToolCallStartEvent, MCPCallStartEvent)):
-                self._start_observation(event)
-            elif isinstance(event, (AgentRunEndEvent, LLMCallEndEvent, ToolCallEndEvent, MCPCallEndEvent)):
-                self._end_observation(event)
-            elif isinstance(event, ErrorEvent):
-                self._record_error(event)
+            ev = event if self._capture_content else redact_event(event)
+            if isinstance(ev, (AgentRunStartEvent, LLMCallStartEvent, ToolCallStartEvent, MCPCallStartEvent)):
+                self._start_observation(ev)
+            elif isinstance(ev, (AgentRunEndEvent, LLMCallEndEvent, ToolCallEndEvent, MCPCallEndEvent)):
+                self._end_observation(ev)
+            elif isinstance(ev, ErrorEvent):
+                self._record_error(ev)
 
     def _trace_context(self, event: TelemetryEvent) -> dict[str, str]:
         ctx = {"trace_id": event.trace_context.trace_id}

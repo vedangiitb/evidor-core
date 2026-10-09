@@ -22,6 +22,7 @@ from ..events import (
     TelemetryEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    redact_event,
 )
 from ..sink import TelemetrySink
 
@@ -66,6 +67,7 @@ class OpenTelemetrySink(TelemetrySink):
         tracer_provider: Any = None,
         tracer: Tracer | None = None,
         tracer_name: str = "evidor",
+        capture_content: bool = True,
     ) -> None:
         if not HAS_OPENTELEMETRY:
             raise ImportError(
@@ -74,6 +76,7 @@ class OpenTelemetrySink(TelemetrySink):
             )
 
         self._tracer_provider = tracer_provider
+        self._capture_content = capture_content
         if tracer is not None:
             self._tracer: Tracer = tracer
         elif tracer_provider is not None:
@@ -87,7 +90,8 @@ class OpenTelemetrySink(TelemetrySink):
     def write(self, events: Sequence[TelemetryEvent]) -> None:
         """Process a batch of emitted events and update OpenTelemetry spans."""
         for event in events:
-            self._handle_event(event)
+            ev = event if self._capture_content else redact_event(event)
+            self._handle_event(ev)
 
     def _handle_event(self, event: TelemetryEvent) -> None:
         if isinstance(event, (AgentRunStartEvent, LLMCallStartEvent, ToolCallStartEvent, MCPCallStartEvent)):

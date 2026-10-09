@@ -29,7 +29,12 @@ except ImportError:
 class PrometheusSink(TelemetrySink):
     """Telemetry sink exporting Evidor metrics to Prometheus."""
 
-    def __init__(self, registry: Any = None, metric_prefix: str = "evidor") -> None:
+    def __init__(
+        self,
+        registry: Any = None,
+        metric_prefix: str = "evidor",
+        capture_content: bool = True,
+    ) -> None:
         if not HAS_PROMETHEUS:
             raise ImportError(
                 "The 'prometheus-client' package is required for the Prometheus adapter. "

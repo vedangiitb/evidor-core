@@ -666,6 +666,45 @@ Standard attributes automatically populated:
 
 ---
 
+### Privacy & PII Protection (Metadata-Only Mode)
+
+In privacy-sensitive or regulated environments (such as healthcare, finance, or customer data processing), you may not want to persist raw user prompts, model outputs, or tool arguments to external observability backends, while still requiring distributed trace hierarchies, token usage, latency timings, and error analytics.
+
+All Evidor telemetry sinks accept a `capture_content: bool = True` parameter. Setting `capture_content=False` strips raw text payloads before export:
+
+```python
+from evidor import Agent, OpenAIProvider
+from evidor.telemetry import OpenTelemetrySink, LangfuseSink, PhoenixSink
+
+# Sinks record span trees, token usage, and latencies, but redact all prompts and outputs
+otel_sink = OpenTelemetrySink(capture_content=False)
+langfuse_sink = LangfuseSink(capture_content=False)
+phoenix_sink = PhoenixSink(capture_content=False)
+
+agent = Agent(
+    OpenAIProvider("gpt-4.1-mini"),
+    telemetry=[otel_sink, langfuse_sink],
+)
+response = agent.send("Sensitive patient record or financial data...")
+agent.close()
+```
+
+| Field / Semantic Attribute | `capture_content=True` (default) | `capture_content=False` (metadata-only) |
+| :--- | :--- | :--- |
+| **Trace & Span IDs, Run IDs** | Preserved | Preserved |
+| **Duration & Timestamps** | Preserved | Preserved |
+| **Token Usage Counts** | Preserved | Preserved |
+| **Model & Provider Names** | Preserved | Preserved |
+| **Tool & MCP Server Names** | Preserved | Preserved |
+| **Errors & Exceptions** | Preserved | Preserved |
+| **User Prompts & Messages** | Recorded | **Omitted / Redacted** |
+| **Model Output Text** | Recorded | **Omitted / Redacted** |
+| **Tool Arguments & Results** | Recorded | **Omitted / Redacted** |
+
+For custom sinks, the pure function `redact_event(event)` is exported directly from `evidor.telemetry`.
+
+---
+
 ### Advanced: Custom Sinks & Runtime Tuning
 
 #### Implementing a Custom Sink

@@ -41,6 +41,7 @@ class PhoenixSink(OpenTelemetrySink):
         project_name: str = "evidor-agent",
         tracer_provider: Any = None,
         tracer_name: str = "evidor",
+        capture_content: bool = True,
         **register_kwargs: Any,
     ) -> None:
         if not HAS_PHOENIX:
@@ -63,6 +64,7 @@ class PhoenixSink(OpenTelemetrySink):
         super().__init__(
             tracer_provider=tracer_provider,
             tracer_name=tracer_name,
+            capture_content=capture_content,
         )
 
     def _start_span(self, event: TelemetryEvent) -> None:
@@ -75,27 +77,30 @@ class PhoenixSink(OpenTelemetrySink):
 
         # OpenInference specific enrichments
         if isinstance(event, AgentRunStartEvent):
-            if event.user_prompt:
+            if self._capture_content and event.user_prompt:
                 span.set_attribute("input.value", event.user_prompt)
 
         elif isinstance(event, LLMCallStartEvent):
             span.set_attribute("llm.model_name", event.model)
-            if event.input_prompt:
-                span.set_attribute("input.value", event.input_prompt)
-            elif event.input_messages:
-                span.set_attribute("input.value", json.dumps(list(event.input_messages)))
+            if self._capture_content:
+                if event.input_prompt:
+                    span.set_attribute("input.value", event.input_prompt)
+                elif event.input_messages:
+                    span.set_attribute("input.value", json.dumps(list(event.input_messages)))
 
         elif isinstance(event, ToolCallStartEvent):
             span.set_attribute("tool.name", event.tool_name)
-            args_str = json.dumps(event.arguments) if event.arguments else "{}"
-            span.set_attribute("tool.parameters", args_str)
-            span.set_attribute("input.value", args_str)
+            if self._capture_content:
+                args_str = json.dumps(event.arguments) if event.arguments else "{}"
+                span.set_attribute("tool.parameters", args_str)
+                span.set_attribute("input.value", args_str)
 
         elif isinstance(event, MCPCallStartEvent):
             span.set_attribute("tool.name", f"{event.server_name}.{event.tool_name}")
-            args_str = json.dumps(event.arguments) if event.arguments else "{}"
-            span.set_attribute("tool.parameters", args_str)
-            span.set_attribute("input.value", args_str)
+            if self._capture_content:
+                args_str = json.dumps(event.arguments) if event.arguments else "{}"
+                span.set_attribute("tool.parameters", args_str)
+                span.set_attribute("input.value", args_str)
 
     def _end_span(self, event: TelemetryEvent) -> None:
         with self._lock:
@@ -104,11 +109,11 @@ class PhoenixSink(OpenTelemetrySink):
         if span is not None:
             # Set OpenInference output and token attributes before span closes
             if isinstance(event, AgentRunEndEvent):
-                if event.output_text:
+                if self._capture_content and event.output_text:
                     span.set_attribute("output.value", event.output_text)
 
             elif isinstance(event, LLMCallEndEvent):
-                if event.output_text:
+                if self._capture_content and event.output_text:
                     span.set_attribute("output.value", event.output_text)
                 if event.token_usage:
                     if event.token_usage.prompt_tokens > 0:
@@ -119,11 +124,12 @@ class PhoenixSink(OpenTelemetrySink):
                         span.set_attribute("llm.token_count.total", event.token_usage.total_tokens)
 
             elif isinstance(event, ToolCallEndEvent):
-                if event.result is not None:
+                if self._capture_content and event.result is not None:
                     span.set_attribute("output.value", str(event.result))
 
             elif isinstance(event, MCPCallEndEvent):
-                span.set_attribute("output.value", str(event.status))
+                if self._capture_content:
+                    span.set_attribute("output.value", str(event.status))
 
         super()._end_span(event)
 

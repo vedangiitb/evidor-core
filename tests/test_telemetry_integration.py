@@ -333,3 +333,52 @@ def test_runtime_flush_synchronizes_with_in_flight_writes() -> None:
     assert sink.write_in_progress is False
     runtime.close()
 
+
+def test_sink_capture_content_false_redacts_pii() -> None:
+    sink = InMemorySink(capture_content=False)
+    provider = MockProvider([
+        GenerationResponse(text="Secret answer containing PII", model="mock-model"),
+    ])
+
+    agent = Agent(provider=provider, telemetry=sink)
+    response = agent.send("My password is secret")
+    assert response.text == "Secret answer containing PII"
+    agent.close()
+
+    events = sink.events
+    assert len(events) == 4
+
+    # 1. AgentRunStartEvent: user_prompt should be stripped
+    start_agent = events[0]
+    assert isinstance(start_agent, AgentRunStartEvent)
+    assert start_agent.user_prompt == ""
+    assert "agent.prompt" not in start_agent.to_attributes()
+    # Metadata preserved
+    assert start_agent.run_id != ""
+    assert start_agent.trace_context.trace_id != ""
+
+    # 2. LLMCallStartEvent: prompt and messages stripped
+    start_llm = events[1]
+    assert isinstance(start_llm, LLMCallStartEvent)
+    assert start_llm.input_prompt == ""
+    assert start_llm.input_messages == ()
+    assert "llm.input_prompt" not in start_llm.to_attributes()
+    assert "llm.input_messages" not in start_llm.to_attributes()
+    # Metadata preserved
+    assert start_llm.model == "mock-model"
+
+    # 3. LLMCallEndEvent: output text stripped
+    end_llm = events[2]
+    assert isinstance(end_llm, LLMCallEndEvent)
+    assert end_llm.output_text == ""
+    assert "llm.output_text" not in end_llm.to_attributes()
+    assert end_llm.status == "ok"
+
+    # 4. AgentRunEndEvent: output text stripped
+    end_agent = events[3]
+    assert isinstance(end_agent, AgentRunEndEvent)
+    assert end_agent.output_text == ""
+    assert "agent.output" not in end_agent.to_attributes()
+    assert end_agent.status == "ok"
+
+
