@@ -2,6 +2,33 @@
 
 <!-- version list -->
 
+## v1.4.0-dev.2 (2026-10-10)
+
+### Bug Fixes
+
+- **agent**: Fixed custom sync sleeper issue
+  ([`38aaa8a`](https://github.com/vedangiitb/evidor-core/commit/38aaa8aad45275006702ecb2eb5b7b41f613edfc))
+
+- **agent**: Fixing gemini default retries issue
+  ([`c3cd6b9`](https://github.com/vedangiitb/evidor-core/commit/c3cd6b93ff4b2b79587ae35bc03f0eeeb9aee2ce))
+
+- **retry**: Harden llm retry policies, async backoff, and telemetry coordination
+  ([`c93a8ef`](https://github.com/vedangiitb/evidor-core/commit/c93a8efd766446a2fce8e90a9a13be1c791ccb26))
+
+### Documentation
+
+- **agent**: Updated readme with agent retries info
+  ([`41bbb28`](https://github.com/vedangiitb/evidor-core/commit/41bbb28bb4669500dafd7357dabd0565f491f475))
+
+### Features
+
+- Python 3.14 support
+  ([`83cfe8e`](https://github.com/vedangiitb/evidor-core/commit/83cfe8e158a564bd950266b7f265f5d0ba0f55fe))
+
+- **agent**: Added configurable agent retries
+  ([`2ed8f12`](https://github.com/vedangiitb/evidor-core/commit/2ed8f12ee8ff8e9c44f58501a898b05c656e7325))
+
+
 ## v1.4.0-dev.1 (2026-10-09)
 
 ### Bug Fixes
