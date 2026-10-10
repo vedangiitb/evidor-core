@@ -6,8 +6,11 @@ from ..providers.base import ModelProvider
 
 
 SUMMARY_INSTRUCTION = (
-    "Summarize the conversation below for a future assistant turn. Preserve user goals, "
-    "decisions, constraints, factual details, and unresolved questions. Be concise."
+    "Summarize the conversation below for a future assistant turn. "
+    "Synthesize the existing summary (if present) and subsequent conversation turns into an updated, concise summary. "
+    "CRITICAL REQUIREMENT: You MUST preserve all established user goals, project names, credentials, keys, "
+    "constraints, decisions, and factual details from earlier turns. Do not drop previously stated facts. "
+    "Be concise but thorough regarding facts."
 )
 
 
@@ -28,7 +31,10 @@ class ConversationSummarizer:
     def _build_request(self, messages: Sequence[Message]) -> GenerationRequest:
         transcript_lines: list[str] = []
         for message in messages:
-            if message.role == "tool":
+            if message.is_summary:
+                clean_content = message.content.removeprefix("Conversation summary:").strip()
+                transcript_lines.append(f"[PREVIOUS SUMMARY OF EARLIER CONVERSATION]:\n{clean_content}")
+            elif message.role == "tool":
                 transcript_lines.append(f"TOOL ({message.name or 'unknown'}): {message.content}")
             elif message.tool_calls:
                 call_names = ", ".join(call.name for call in message.tool_calls)
