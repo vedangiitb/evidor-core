@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.4.2-dev.1 (2026-10-10)
+
+### Bug Fixes
+
+- **mcp**: Adding mcp configs property on mcp client
+  ([`5bc87e1`](https://github.com/vedangiitb/evidor-core/commit/5bc87e163488b3d87c5d2a705039f7dfcc3b362b))
+
+
 ## v1.4.1 (2026-10-10)
 
 
