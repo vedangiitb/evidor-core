@@ -24,7 +24,9 @@ from ..events import (
     ToolCallStartEvent,
     redact_event,
 )
+from .. import semconv
 from ..sink import TelemetrySink
+
 
 try:
     from opentelemetry import trace
@@ -188,15 +190,22 @@ class OpenTelemetrySink(TelemetrySink):
     def _record_error(self, event: ErrorEvent) -> None:
         with self._lock:
             span = self._active_spans.get(event.trace_context.span_id)
+            if span is None and event.trace_context.parent_span_id:
+                span = self._active_spans.get(event.trace_context.parent_span_id)
+
 
         if span is not None:
             attrs = {
                 "exception.type": event.error_type,
                 "exception.message": event.message,
+                semconv.EVIDOR_RETRY_COUNT: event.retry_count,
+                semconv.EVIDOR_RETRY_OUTCOME: event.outcome,
             }
             for k, v in event.details.items():
                 attrs[k] = _sanitize_attribute(v)
-            span.add_event("exception", attributes=attrs)
+            event_name = "retry" if event.outcome == "retrying" else "exception"
+            span.add_event(event_name, attributes=attrs)
+
 
     def flush(self) -> None:
         """Flush the underlying TracerProvider if it supports it."""

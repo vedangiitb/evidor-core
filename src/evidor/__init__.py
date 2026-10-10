@@ -13,7 +13,17 @@ from .mcp import (
     StreamableHTTPServerConfig,
 )
 from .models import GenerationRequest, GenerationResponse, Message, SearchResult, ToolCall
+from .retry import (
+    DEFAULT_RETRY_CONFIG,
+    RetryConfig,
+    calculate_backoff_delay,
+    extract_retry_after,
+    is_network_or_provider_error,
+)
+
+
 from .telemetry import (
+
     ConsoleSink,
     InMemorySink,
     LangfuseSink,
@@ -42,18 +52,24 @@ __all__ = [
     "AnthropicProvider",
     "BraveSearchProvider",
     "calculator",
+    "calculate_backoff_delay",
     "ConsoleSink",
     "DEFAULT_CONTEXT_WINDOW",
     "DEFAULT_MAX_MESSAGES",
+    "DEFAULT_RETRY_CONFIG",
     "ExaSearchProvider",
+    "extract_retry_after",
     "GeminiProvider",
+
     "GenerationRequest",
     "GenerationResponse",
     "get_current_time",
     "filesystem_tools",
     "HTTPServerConfig",
     "InMemorySink",
+    "is_network_or_provider_error",
     "LangfuseSink",
+
     "MCPClient",
     "MCPServerConfig",
     "MCPSession",
@@ -63,6 +79,8 @@ __all__ = [
     "OpenTelemetrySink",
     "PhoenixSink",
     "PrometheusSink",
+    "RetryConfig",
+
     "SearchResult",
     "SSEServerConfig",
     "StdioServerConfig",

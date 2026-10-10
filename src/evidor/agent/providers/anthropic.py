@@ -24,7 +24,7 @@ class AnthropicProvider:
         except ImportError as error:
             raise ImportError("Install Anthropic support with: pip install 'evidor[anthropic]'") from error
 
-        client = Anthropic(api_key=self._api_key)
+        client = Anthropic(api_key=self._api_key, max_retries=0)
         system_prompt = "\n\n".join(message.content for message in request.messages if message.role == "system")
 
         formatted_messages: list[dict[str, Any]] = []

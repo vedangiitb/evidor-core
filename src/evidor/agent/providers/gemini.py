@@ -74,7 +74,17 @@ class GeminiProvider:
                 config_kwargs["tools"] = gemini_tools
             config = types.GenerateContentConfig(**config_kwargs)
 
-        client = genai.Client(api_key=self._api_key)
+        http_options = None
+        http_options_cls = getattr(types, "HttpOptions", None)
+        retry_options_cls = getattr(types, "HttpRetryOptions", None)
+        if http_options_cls is not None and retry_options_cls is not None:
+            http_options = http_options_cls(retry_options=retry_options_cls(attempts=1))
+        elif http_options_cls is not None:
+            http_options = http_options_cls(retry_options={"attempts": 1})
+        else:
+            http_options = {"retry_options": {"attempts": 1}}
+
+        client = genai.Client(api_key=self._api_key, http_options=http_options)
         response = client.models.generate_content(model=self._model, contents=contents, config=config)
 
         # Parse text and tool calls

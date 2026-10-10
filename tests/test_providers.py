@@ -48,6 +48,7 @@ def test_openai_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
     response = provider.generate(request)
 
     assert response == GenerationResponse(text="OpenAI generated text", model="gpt-4.1-mini")
+    mock_openai.OpenAI.assert_called_once_with(api_key="key", max_retries=0)
     mock_client.responses.create.assert_called_once_with(
         model="gpt-4.1-mini",
         input=[
@@ -55,6 +56,8 @@ def test_openai_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
             {"role": "user", "content": "hello"},
         ],
     )
+
+
 
 
 def test_openai_provider_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,12 +103,15 @@ def test_anthropic_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
     response = provider.generate(request)
 
     assert response == GenerationResponse(text="Claude response", model="claude-3-5")
+    mock_anthropic.Anthropic.assert_called_once_with(api_key="key", max_retries=0)
     mock_client.messages.create.assert_called_once_with(
         model="claude-3-5",
         max_tokens=500,
         system="sys instruction",
         messages=[{"role": "user", "content": "hello"}],
     )
+
+
 
 
 def test_anthropic_provider_generate_no_system(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -149,6 +155,8 @@ def test_gemini_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_types.Part = MagicMock()  # type: ignore[attr-defined]
     mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
     mock_types.GenerateContentConfig = MagicMock(side_effect=lambda system_instruction: f"config:{system_instruction}")  # type: ignore[attr-defined]
+    mock_types.HttpOptions = MagicMock(side_effect=lambda **kw: {"http_options": kw})  # type: ignore[attr-defined]
+    mock_types.HttpRetryOptions = MagicMock(side_effect=lambda **kw: {"retry_options": kw})  # type: ignore[attr-defined]
 
     mock_client = MagicMock()
     mock_response = MagicMock(text="Gemini generated response")
@@ -173,6 +181,10 @@ def test_gemini_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
     response = provider.generate(request)
 
     assert response == GenerationResponse(text="Gemini generated response", model="gemini-2.5-flash")
+    mock_genai.Client.assert_called_once_with(
+        api_key="key",
+        http_options={"http_options": {"retry_options": {"retry_options": {"attempts": 1}}}},
+    )
     mock_client.models.generate_content.assert_called_once_with(
         model="gemini-2.5-flash",
         contents=[
@@ -192,6 +204,8 @@ def test_gemini_provider_generate_no_system_and_none_text(monkeypatch: pytest.Mo
     mock_types.Part = MagicMock()  # type: ignore[attr-defined]
     mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
     mock_types.GenerateContentConfig = MagicMock()  # type: ignore[attr-defined]
+    mock_types.HttpOptions = MagicMock(side_effect=lambda **kw: {"http_options": kw})  # type: ignore[attr-defined]
+    mock_types.HttpRetryOptions = MagicMock(side_effect=lambda **kw: {"retry_options": kw})  # type: ignore[attr-defined]
 
     mock_client = MagicMock()
     mock_client.models.generate_content.return_value = MagicMock(text=None)
