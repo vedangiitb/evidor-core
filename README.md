@@ -106,7 +106,67 @@ for message in agent.messages:
 agent.clear_history()
 ```
 
+### Automatic LLM Retries & Exponential Backoff
+
+When requests to an LLM provider fail due to transient network or provider issues, `Agent` automatically retries with exponential backoff and jitter.
+
+By default, an `Agent` retries up to **3 times** starting with an initial delay of **0.5 seconds** (doubling on each attempt: ~0.5s, ~1.0s, ~2.0s) when encountering network errors (e.g. `ConnectionError`, `TimeoutError`) or provider rate limits/server errors (e.g. HTTP 429, 500, 502, 503, 504). Programming errors (such as `ValueError`, `TypeError`, or 400 Bad Request) fail immediately without retrying.
+
+#### Quick Configuration
+
+You can adjust the maximum retries or disable them entirely directly on the `Agent`:
+
+```python
+from evidor import Agent, OpenAIProvider
+
+# Custom retry count
+agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), max_retries=5)
+
+# Disable retries entirely
+agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), max_retries=0)
+# or:
+agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), retry_config=None)
+agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), retry_config=False)
+```
+
+#### Fine-Grained Control with `RetryConfig`
+
+For advanced tuning, pass a `RetryConfig` object:
+
+```python
+from evidor import Agent, OpenAIProvider, RetryConfig
+
+agent = Agent(
+    OpenAIProvider(model="gpt-4.1-mini"),
+    retry_config=RetryConfig(
+        max_retries=3,              # Max retry attempts (default: 3)
+        initial_delay=0.5,          # Initial delay in seconds (default: 0.5)
+        max_delay=60.0,             # Maximum backoff cap in seconds (default: 60.0)
+        backoff_factor=2.0,         # Exponential multiplier (default: 2.0)
+        jitter=True,                # Full jitter to prevent thundering herds (default: True)
+        retryable_exceptions=None,  # None = auto-detect transient network/provider errors (default)
+    ),
+)
+```
+
+#### Custom Retryable Exceptions
+
+By default (`retryable_exceptions=None`), Evidor automatically filters for transient network and provider errors using `is_network_or_provider_error()`. You can specify exact exception types to retry if desired:
+
+```python
+from evidor import Agent, OpenAIProvider, RetryConfig
+
+agent = Agent(
+    OpenAIProvider(model="gpt-4.1-mini"),
+    retry_config=RetryConfig(
+        max_retries=3,
+        retryable_exceptions=(ConnectionError, TimeoutError),
+    ),
+)
+```
+
 ### Low-level Generation with `GenerationRequest`
+
 
 For direct provider calls without stateful session management, instantiate messages and requests directly:
 
@@ -626,7 +686,7 @@ agent.close()
 
 #### 4. Prometheus Metrics (`evidor[prometheus]`)
 
-Export operational agent metrics (`evidor_agent_runs_total`, `evidor_llm_calls_total`, `evidor_tokens_total`, `evidor_tool_calls_total`, `evidor_errors_total`, and latency histograms) to Prometheus:
+Export operational agent metrics (`evidor_agent_runs_total`, `evidor_llm_calls_total`, `evidor_llm_retries_total`, `evidor_tokens_total`, `evidor_tool_calls_total`, `evidor_errors_total`, and latency histograms) to Prometheus:
 
 ```bash
 pip install "evidor[prometheus]"
@@ -644,14 +704,18 @@ metrics_text = prom_sink.export_text()
 print(metrics_text)
 ```
 
+Key retry metrics:
+* `evidor_llm_retries_total`: Counter tracking retry attempts partitioned by `provider` and `model`.
+
 ---
 
 #### Span Tree & Semantic Attributes
 
-Evidor automatically builds the full execution tree:
+Evidor automatically builds the full execution tree, capturing intermediate retry attempts as separate spans or span events:
 ```
 agent.run                           [openinference.span.kind = "AGENT"]
-  ├── llm.gpt-4.1-mini              [openinference.span.kind = "LLM"]
+  ├── llm.gpt-4.1-mini (attempt 0)  [openinference.span.kind = "LLM", status = "error", event = "retry"]
+  ├── llm.gpt-4.1-mini (attempt 1)  [openinference.span.kind = "LLM", status = "ok", evidor.retry.count = 1]
   └── tool.search_docs              [openinference.span.kind = "TOOL"]
         └── mcp.docs_server.search  [openinference.span.kind = "TOOL"]
 ```
@@ -663,6 +727,8 @@ Standard attributes automatically populated:
 * `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.total_tokens`
 * `llm.input_prompt`, `llm.input_messages`, `llm.output_text`, `llm.output_tool_calls`
 * `evidor.agent.run_id`, `evidor.tool.name`, `evidor.mcp.server_name`
+* `evidor.retry.count`, `evidor.retry.outcome`
+
 
 ---
 
