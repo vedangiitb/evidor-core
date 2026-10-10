@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.4.1-dev.1 (2026-10-10)
+
+### Bug Fixes
+
+- **agent**: Fix summarization dropping info bug
+  ([`3223a56`](https://github.com/vedangiitb/evidor-core/commit/3223a565d4b1f39040cf60cfca6c0853c81b3469))
+
+
 ## v1.4.0 (2026-10-10)
 
 
