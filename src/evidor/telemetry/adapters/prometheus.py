@@ -64,6 +64,8 @@ class PrometheusSink(TelemetrySink):
         self.mcp_calls_total = _metric(Counter, "mcp_calls_total", "Total MCP calls", ["server_name", "tool_name", "status"])
         self.mcp_call_duration_seconds = _metric(Histogram, "mcp_call_duration_seconds", "MCP call duration (s)", ["server_name", "tool_name"])
         self.errors_total = _metric(Counter, "errors_total", "Total errors", ["error_type"])
+        self.llm_retries_total = _metric(Counter, "llm_retries_total", "Total LLM call retries", ["provider", "model"])
+
 
     @property
     def registry(self) -> Any:
@@ -111,6 +113,11 @@ class PrometheusSink(TelemetrySink):
 
         elif isinstance(event, ErrorEvent):
             self.errors_total.labels(error_type=event.error_type or "unknown").inc()
+            if event.outcome == "retrying":
+                p = event.details.get("provider", "unknown")
+                m = event.details.get("model", "unknown")
+                self.llm_retries_total.labels(provider=p, model=m).inc()
+
 
     def export_text(self) -> str:
         """Export current Prometheus metrics as exposition text format."""

@@ -125,13 +125,20 @@ class LangfuseSink(TelemetrySink):
             ctx = {"trace_id": event.trace_context.trace_id}
             if event.trace_context.span_id:
                 ctx["parent_span_id"] = event.trace_context.span_id
+            is_retry = event.outcome == "retrying"
             self._client.create_event(
                 trace_context=ctx,
-                name="error",
-                level="ERROR",
+                name="retry" if is_retry else "error",
+                level="WARNING" if is_retry else "ERROR",
                 status_message=event.message,
-                metadata={"error_type": event.error_type, **event.details},
+                metadata={
+                    "error_type": event.error_type,
+                    "retry_count": event.retry_count,
+                    "outcome": event.outcome,
+                    **event.details,
+                },
             )
+
 
     def flush(self) -> None:
         """Flush pending events to Langfuse."""

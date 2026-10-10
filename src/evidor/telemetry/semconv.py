@@ -34,3 +34,6 @@ EVIDOR_TOOL_CALL_ID: Final[str] = "evidor.tool.call_id"
 EVIDOR_MCP_SERVER_NAME: Final[str] = "evidor.mcp.server_name"
 EVIDOR_RETRY_COUNT: Final[str] = "evidor.retry.count"
 EVIDOR_RETRY_OUTCOME: Final[str] = "evidor.retry.outcome"
+EVIDOR_RETRY_DELAY_SECONDS: Final[str] = "evidor.retry.delay_seconds"
+EVIDOR_RETRY_MAX: Final[str] = "evidor.retry.max"
+

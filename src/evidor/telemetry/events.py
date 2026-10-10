@@ -151,6 +151,7 @@ class LLMCallStartEvent(TelemetryEvent):
     tools_count: int = 0
     input_messages: tuple[dict[str, Any], ...] = ()
     input_prompt: str = ""
+    retry_attempt: int = 0
 
     def __post_init__(self) -> None:
         if isinstance(self.input_messages, (list, tuple)):
@@ -163,6 +164,8 @@ class LLMCallStartEvent(TelemetryEvent):
         attrs[semconv.GEN_AI_REQUEST_MODEL] = self.model
         attrs["llm.messages_count"] = self.messages_count
         attrs["llm.tools_count"] = self.tools_count
+        if self.retry_attempt > 0:
+            attrs[semconv.EVIDOR_RETRY_COUNT] = self.retry_attempt
         if self.input_prompt:
             attrs["llm.input_prompt"] = self.input_prompt
         if self.input_messages:
@@ -183,6 +186,7 @@ class LLMCallEndEvent(TelemetryEvent):
     output_text: str = ""
     output_tool_calls: tuple[dict[str, Any], ...] = ()
     error: str | None = None
+    retry_attempt: int = 0
 
     def __post_init__(self) -> None:
         if isinstance(self.output_tool_calls, (list, tuple)):
@@ -196,6 +200,8 @@ class LLMCallEndEvent(TelemetryEvent):
         attrs["status"] = self.status
         attrs["duration_ms"] = self.duration_ms
         attrs["llm.tool_calls_count"] = self.tool_calls_count
+        if self.retry_attempt > 0:
+            attrs[semconv.EVIDOR_RETRY_COUNT] = self.retry_attempt
         if self.output_text:
             attrs["llm.output_text"] = self.output_text
         if self.output_tool_calls:
@@ -207,6 +213,7 @@ class LLMCallEndEvent(TelemetryEvent):
         if self.error:
             attrs[semconv.ERROR_MESSAGE] = self.error
         return attrs
+
 
 
 # ==============================================================================

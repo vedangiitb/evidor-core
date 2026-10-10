@@ -2,11 +2,13 @@
 
 import asyncio
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 import secrets
 import time
 from typing import Any
 
 from ..models import GenerationRequest, GenerationResponse, Message, ToolCall
+from ..retry import DEFAULT_RETRY_CONFIG, RetryConfig, calculate_backoff_delay
 from ..telemetry import (
     AgentRunEndEvent,
     AgentRunStartEvent,
@@ -47,7 +49,10 @@ class Agent:
         max_messages: int = DEFAULT_MAX_MESSAGES,
         summarization_model: str | ModelProvider | None = None,
         telemetry: TelemetryRuntime | TelemetrySink | Sequence[TelemetrySink] | None = None,
+        retry_config: RetryConfig | bool | None = DEFAULT_RETRY_CONFIG,
+        max_retries: int | None = None,
     ) -> None:
+
         self._provider = provider
         self._summary_provider = resolve_summary_provider(provider, summarization_model)
         self._summarizer = ConversationSummarizer(self._summary_provider)
@@ -86,10 +91,31 @@ class Agent:
             self._telemetry = None
             self._owns_telemetry = False
 
+        if retry_config is False:
+            self._retry_config = RetryConfig(max_retries=0)
+        elif retry_config is None and max_retries is None:
+            self._retry_config = RetryConfig(max_retries=0)
+        elif isinstance(retry_config, RetryConfig):
+            if max_retries is not None:
+                self._retry_config = replace(retry_config, max_retries=max_retries)
+            else:
+                self._retry_config = retry_config
+        elif retry_config is True or (retry_config is None and max_retries is not None):
+            mr = max_retries if max_retries is not None else 3
+            self._retry_config = RetryConfig(max_retries=mr)
+        else:
+            raise TypeError(f"Invalid retry_config: {retry_config}")
+
+    @property
+    def retry_config(self) -> RetryConfig:
+        """The retry configuration configured on this agent."""
+        return self._retry_config
+
     @property
     def telemetry(self) -> TelemetryRuntime | None:
         """The TelemetryRuntime configured on this agent, if any."""
         return self._telemetry
+
 
     @property
     def messages(self) -> tuple[Message, ...]:
@@ -140,67 +166,114 @@ class Agent:
         return self._summary_provider
 
     def _generate_with_telemetry(self, request: GenerationRequest) -> GenerationResponse:
-        llm_ctx = create_child_trace_context()
         provider_name = getattr(self._provider, "__class__", type(self._provider)).__name__
         model_name = getattr(self._provider, "model", "unknown")
         input_messages = tuple({"role": m.role, "content": m.content} for m in request.messages)
+        max_retries = self._retry_config.max_retries
+        total_attempts = 1 + max_retries
 
-        emit_event(
-            LLMCallStartEvent(
-                trace_context=llm_ctx,
-                provider=provider_name,
-                model=model_name,
-                messages_count=len(request.messages),
-                tools_count=len(request.tools),
-                input_prompt=request.prompt,
-                input_messages=input_messages,
+        for attempt in range(total_attempts):
+            llm_ctx = create_child_trace_context()
+            emit_event(
+                LLMCallStartEvent(
+                    trace_context=llm_ctx,
+                    provider=provider_name,
+                    model=model_name,
+                    messages_count=len(request.messages),
+                    tools_count=len(request.tools),
+                    input_prompt=request.prompt,
+                    input_messages=input_messages,
+                    retry_attempt=attempt,
+                )
             )
-        )
-        t0 = time.perf_counter()
-        with trace_scope(llm_ctx):
-            try:
-                response = self._provider.generate(request)
-                duration_ms = (time.perf_counter() - t0) * 1000
-                output_tool_calls = tuple(
-                    {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
-                    for tc in response.tool_calls
-                )
-                token_usage = getattr(response, "usage", None)
-                emit_event(
-                    LLMCallEndEvent(
-                        trace_context=llm_ctx,
-                        provider=provider_name,
-                        model=response.model or model_name,
-                        status="ok",
-                        duration_ms=duration_ms,
-                        token_usage=token_usage,
-                        tool_calls_count=len(response.tool_calls),
-                        output_text=response.text,
-                        output_tool_calls=output_tool_calls,
+            t0 = time.perf_counter()
+            with trace_scope(llm_ctx):
+                try:
+                    response = self._provider.generate(request)
+                    duration_ms = (time.perf_counter() - t0) * 1000
+                    output_tool_calls = tuple(
+                        {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                        for tc in response.tool_calls
                     )
-                )
-                return response
-            except Exception as err:
-                duration_ms = (time.perf_counter() - t0) * 1000
-                err_msg = str(err)
-                emit_event(
-                    LLMCallEndEvent(
-                        trace_context=llm_ctx,
-                        provider=provider_name,
-                        model=model_name,
-                        status="error",
-                        duration_ms=duration_ms,
-                        error=err_msg,
+                    token_usage = getattr(response, "usage", None)
+                    emit_event(
+                        LLMCallEndEvent(
+                            trace_context=llm_ctx,
+                            provider=provider_name,
+                            model=response.model or model_name,
+                            status="ok",
+                            duration_ms=duration_ms,
+                            token_usage=token_usage,
+                            tool_calls_count=len(response.tool_calls),
+                            output_text=response.text,
+                            output_tool_calls=output_tool_calls,
+                            retry_attempt=attempt,
+                        )
                     )
-                )
-                emit_event(
-                    ErrorEvent(
-                        trace_context=llm_ctx,
-                        error_type=type(err).__name__,
-                        message=err_msg,
-                    )
-                )
-                raise
+                    return response
+                except Exception as err:
+                    duration_ms = (time.perf_counter() - t0) * 1000
+                    err_msg = str(err)
+                    is_retryable = self._retry_config.is_retryable(err)
+                    if attempt < max_retries and is_retryable:
+
+                        delay = calculate_backoff_delay(attempt, self._retry_config)
+                        emit_event(
+                            ErrorEvent(
+                                trace_context=llm_ctx,
+                                error_type=type(err).__name__,
+                                message=err_msg,
+                                retry_count=attempt + 1,
+                                outcome="retrying",
+                                details={
+                                    "retry_delay_seconds": delay,
+                                    "max_retries": max_retries,
+                                    "provider": provider_name,
+                                    "model": model_name,
+                                },
+                            )
+                        )
+                        emit_event(
+                            LLMCallEndEvent(
+                                trace_context=llm_ctx,
+                                provider=provider_name,
+                                model=model_name,
+                                status="error",
+                                duration_ms=duration_ms,
+                                error=err_msg,
+                                retry_attempt=attempt,
+                            )
+                        )
+                        self._retry_config.sleep_fn(delay)
+                    else:
+                        emit_event(
+                            ErrorEvent(
+                                trace_context=llm_ctx,
+                                error_type=type(err).__name__,
+                                message=err_msg,
+                                retry_count=attempt,
+                                outcome="exhausted" if attempt > 0 else "failed",
+                                details={
+                                    "max_retries": max_retries,
+                                    "provider": provider_name,
+                                    "model": model_name,
+                                },
+                            )
+                        )
+                        emit_event(
+                            LLMCallEndEvent(
+                                trace_context=llm_ctx,
+                                provider=provider_name,
+                                model=model_name,
+                                status="error",
+                                duration_ms=duration_ms,
+                                error=err_msg,
+                                retry_attempt=attempt,
+                            )
+                        )
+                        raise
+
+
 
     def send(self, message: str) -> GenerationResponse:
         """Advance one user turn and execute any requested tool calls."""
