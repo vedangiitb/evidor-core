@@ -167,7 +167,7 @@ agent = Agent(
 
 #### Coordinated Retry Budget & Async Non-Blocking Backoff
 
-- **Single Coordinated Budget**: `OpenAIProvider` and `AnthropicProvider` disable underlying SDK client retries (`max_retries=0`), ensuring Evidor's `Agent` exclusively owns the unified retry budget and telemetry reflects exact attempt counts without multiplied SDK attempts.
+- **Single Coordinated Budget**: `OpenAIProvider`, `AnthropicProvider`, and `GeminiProvider` disable underlying SDK client retries (`max_retries=0` for OpenAI/Anthropic, `HttpOptions(retry_options=HttpRetryOptions(attempts=1))` for Gemini), ensuring Evidor's `Agent` exclusively owns the unified retry budget and telemetry reflects exact attempt counts without multiplied SDK attempts.
 - **Async Non-Blocking Backoff**: In `send_async()`, retry backoffs await `asyncio.sleep()` directly on the event loop rather than occupying thread pool workers, allowing clean cancellation.
 - **Summarization Retries**: Conversation compaction and transcript summarization share the configured retry policy and telemetry runtime seamlessly.
 
