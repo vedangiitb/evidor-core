@@ -146,7 +146,7 @@ class RetryConfig:
     jitter: bool = True
     retryable_exceptions: tuple[type[BaseException], ...] | None = None
     sleep_fn: Callable[[float], None] = field(default=time.sleep, repr=False, compare=False)
-    sleep_async_fn: Callable[[float], Any] | None = field(default=None, repr=False, compare=False)
+    sleep_async_fn: Callable[[float], Any] = field(default=asyncio.sleep, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         # Validate max_retries: must be int and not bool
@@ -191,14 +191,8 @@ class RetryConfig:
 
         if not callable(self.sleep_fn):
             raise TypeError(f"sleep_fn must be callable, got {type(self.sleep_fn).__name__}")
-        if self.sleep_async_fn is not None and not callable(self.sleep_async_fn):
+        if not callable(self.sleep_async_fn):
             raise TypeError(f"sleep_async_fn must be callable, got {type(self.sleep_async_fn).__name__}")
-
-        if self.sleep_async_fn is None:
-            if self.sleep_fn is not time.sleep:
-                object.__setattr__(self, "sleep_async_fn", self.sleep_fn)
-            else:
-                object.__setattr__(self, "sleep_async_fn", asyncio.sleep)
 
     @property
     def is_enabled(self) -> bool:

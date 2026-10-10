@@ -1,6 +1,7 @@
 """Tests for LLM retries, exponential backoff, configuration, and telemetry integration."""
 
 import asyncio
+import threading
 from typing import Any
 import pytest
 
@@ -454,7 +455,7 @@ def test_async_send_with_retries() -> None:
         max_retries=2,
         initial_delay=0.01,
         jitter=False,
-        sleep_fn=captured_sleeps.append,
+        sleep_async_fn=captured_sleeps.append,
     )
 
     sink = InMemorySink()
@@ -646,6 +647,65 @@ async def test_async_sleep_cancellation_during_backoff() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+def test_custom_sync_sleep_does_not_override_async_sleep() -> None:
+    # Issue 1: Custom synchronous sleep_fn must NOT become sleep_async_fn
+    custom_sync_sleep = lambda delay: None
+    config = RetryConfig(sleep_fn=custom_sync_sleep)
+    assert config.sleep_fn is custom_sync_sleep
+    assert config.sleep_async_fn is asyncio.sleep
+
+
+@pytest.mark.asyncio
+async def test_async_cancellation_during_in_flight_provider_call() -> None:
+    # Issue 2: Documents that cancelling an async turn while a synchronous provider call
+    # is in-flight unblocks the event loop promptly with asyncio.CancelledError,
+    # but the underlying worker thread continues executing until the synchronous call returns.
+    class SlowBlockingProvider:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.finished = threading.Event()
+            self.attempts = 0
+            self.model = "slow-model"
+
+        def generate(self, request: GenerationRequest) -> GenerationResponse:
+            self.attempts += 1
+            self.started.set()
+            # Blocks in worker thread until release event is signaled
+            self.release.wait(timeout=2.0)
+            self.finished.set()
+            return GenerationResponse(text="done", model=self.model)
+
+        def with_model(self, model: str) -> Any:
+            return self
+
+    provider = SlowBlockingProvider()
+    agent = Agent(provider=provider, retry_config=RetryConfig(max_retries=0))
+
+    task = asyncio.create_task(agent.send_async("Slow call"))
+
+    # Wait until provider.generate has started executing in the worker thread
+    await asyncio.to_thread(provider.started.wait, 1.0)
+    assert provider.started.is_set()
+
+    # Cancel the awaiting coroutine
+    task.cancel()
+
+    # The event loop coroutine promptly raises asyncio.CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Document actual behavior: the worker thread is NOT forcibly terminated;
+    # it continues executing in the background until the underlying call completes.
+    assert not provider.finished.is_set()
+
+    # Release the blocking provider call to let the worker thread exit cleanly
+    provider.release.set()
+    await asyncio.to_thread(provider.finished.wait, 1.0)
+    assert provider.finished.is_set()
+    assert provider.attempts == 1
 
 
 def test_summarization_retries_sync() -> None:
