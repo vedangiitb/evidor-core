@@ -1,6 +1,7 @@
 """Conversation-window management and summarization."""
 
 from collections.abc import Callable, Sequence
+from typing import Any
 
 from ...models import Message
 
@@ -49,6 +50,38 @@ class ConversationContext:
             summary = "Earlier conversation was omitted because no summary was returned."
         summary = summary[: self._summary_token_limit * _CHARS_PER_TOKEN]
         return permanent + [Message(role="system", content=f"Conversation summary:\n{summary}", is_summary=True)] + recent
+
+    async def compact_async(
+        self,
+        messages: Sequence[Message],
+        summarize_async: Callable[[Sequence[Message]], Any],
+    ) -> list[Message]:
+        """Asynchronously return messages that fit the configured input budget."""
+        if not self._requires_compaction(messages):
+            return list(messages)
+
+        permanent = [message for message in messages if message.role == "system" and not message.is_summary]
+        existing_summaries = [message for message in messages if message.is_summary]
+        conversation = [message for message in messages if message.role != "system"]
+        recent: list[Message] = list(conversation)
+        summarized: list[Message] = list(existing_summaries)
+
+        recent_limit = max(1, self._max_messages - len(permanent) - 1)
+        while len(recent) > recent_limit or self._estimated_tokens(permanent + recent) > self._input_budget:
+            if len(recent) == 1:
+                break
+            summarized.append(recent.pop(0))
+
+        if not summarized:
+            return permanent + recent
+
+        raw_summary = await summarize_async(summarized)
+        summary = raw_summary.strip() if isinstance(raw_summary, str) else str(raw_summary).strip()
+        if not summary:
+            summary = "Earlier conversation was omitted because no summary was returned."
+        summary = summary[: self._summary_token_limit * _CHARS_PER_TOKEN]
+        return permanent + [Message(role="system", content=f"Conversation summary:\n{summary}", is_summary=True)] + recent
+
 
     @property
     def _input_budget(self) -> int:

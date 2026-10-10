@@ -1,8 +1,7 @@
-"""Conversation summarization and summary-provider configuration."""
+import asyncio
+from collections.abc import Awaitable, Callable, Sequence
 
-from collections.abc import Sequence
-
-from ...models import GenerationRequest, Message
+from ...models import GenerationRequest, GenerationResponse, Message
 from ..providers.base import ModelProvider
 
 
@@ -15,10 +14,18 @@ SUMMARY_INSTRUCTION = (
 class ConversationSummarizer:
     """Formats a transcript and asks a dedicated provider to summarize it."""
 
-    def __init__(self, provider: ModelProvider) -> None:
+    def __init__(
+        self,
+        provider: ModelProvider,
+        *,
+        generate_fn: Callable[[GenerationRequest], GenerationResponse] | None = None,
+        generate_async_fn: Callable[[GenerationRequest], Awaitable[GenerationResponse]] | None = None,
+    ) -> None:
         self.provider = provider
+        self._generate_fn = generate_fn
+        self._generate_async_fn = generate_async_fn
 
-    def summarize(self, messages: Sequence[Message]) -> str:
+    def _build_request(self, messages: Sequence[Message]) -> GenerationRequest:
         transcript_lines: list[str] = []
         for message in messages:
             if message.role == "tool":
@@ -29,13 +36,29 @@ class ConversationSummarizer:
                 transcript_lines.append(f"{prefix} {message.content}" if message.content else prefix)
             else:
                 transcript_lines.append(f"{message.role.upper()}: {message.content}")
-        request = GenerationRequest(
+        return GenerationRequest(
             messages=(
                 Message(role="system", content=SUMMARY_INSTRUCTION),
                 Message(role="user", content="\n".join(transcript_lines)),
             )
         )
+
+    def summarize(self, messages: Sequence[Message]) -> str:
+        request = self._build_request(messages)
+        if self._generate_fn is not None:
+            return self._generate_fn(request).text
         return self.provider.generate(request).text
+
+    async def summarize_async(self, messages: Sequence[Message]) -> str:
+        request = self._build_request(messages)
+        if self._generate_async_fn is not None:
+            response = await self._generate_async_fn(request)
+            return response.text
+        if self._generate_fn is not None:
+            response = await asyncio.to_thread(self._generate_fn, request)
+            return response.text
+        response = await asyncio.to_thread(self.provider.generate, request)
+        return response.text
 
 
 def resolve_summary_provider(

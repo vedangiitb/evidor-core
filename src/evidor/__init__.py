@@ -17,8 +17,10 @@ from .retry import (
     DEFAULT_RETRY_CONFIG,
     RetryConfig,
     calculate_backoff_delay,
+    extract_retry_after,
     is_network_or_provider_error,
 )
+
 
 from .telemetry import (
 
@@ -56,7 +58,9 @@ __all__ = [
     "DEFAULT_MAX_MESSAGES",
     "DEFAULT_RETRY_CONFIG",
     "ExaSearchProvider",
+    "extract_retry_after",
     "GeminiProvider",
+
     "GenerationRequest",
     "GenerationResponse",
     "get_current_time",

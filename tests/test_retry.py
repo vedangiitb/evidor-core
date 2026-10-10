@@ -51,19 +51,42 @@ class FlakyProvider:
 
 
 def test_is_network_or_provider_error() -> None:
-    class MockRateLimitError(Exception):
+    class ConnectionConfigurationError(Exception):
+        """Permanent configuration error whose name contains 'Connection'."""
         pass
 
     class MockHTTPStatusError(Exception):
         def __init__(self, status_code: int) -> None:
             self.status_code = status_code
 
+    class MockOpenAIRateLimit(Exception):
+        pass
+    MockOpenAIRateLimit.__module__ = "openai"
+    MockOpenAIRateLimit.__name__ = "RateLimitError"
+
+    class MockAnthropicInternalServer(Exception):
+        pass
+    MockAnthropicInternalServer.__module__ = "anthropic"
+    MockAnthropicInternalServer.__name__ = "InternalServerError"
+
+    # Standard network & timeout errors
     assert is_network_or_provider_error(ConnectionError("lost")) is True
     assert is_network_or_provider_error(TimeoutError("timed out")) is True
-    assert is_network_or_provider_error(MockRateLimitError("too many requests")) is True
+
+    # Transient HTTP status codes
     assert is_network_or_provider_error(MockHTTPStatusError(429)) is True
     assert is_network_or_provider_error(MockHTTPStatusError(503)) is True
     assert is_network_or_provider_error(MockHTTPStatusError(500)) is True
+    assert is_network_or_provider_error(MockHTTPStatusError(502)) is True
+    assert is_network_or_provider_error(MockHTTPStatusError(504)) is True
+    assert is_network_or_provider_error(MockHTTPStatusError(408)) is True
+
+    # Provider SDK transient types
+    assert is_network_or_provider_error(MockOpenAIRateLimit("rate limited")) is True
+    assert is_network_or_provider_error(MockAnthropicInternalServer("server error")) is True
+
+    # Similarly named permanent errors must NOT be retried (Issue 2)
+    assert is_network_or_provider_error(ConnectionConfigurationError("bad config")) is False
 
     # Non-network/provider errors are NOT retryable
     assert is_network_or_provider_error(ValueError("bad value")) is False
@@ -71,6 +94,7 @@ def test_is_network_or_provider_error() -> None:
     assert is_network_or_provider_error(KeyError("missing key")) is False
     assert is_network_or_provider_error(MockHTTPStatusError(400)) is False
     assert is_network_or_provider_error(MockHTTPStatusError(401)) is False
+    assert is_network_or_provider_error(MockHTTPStatusError(403)) is False
     assert is_network_or_provider_error(MockHTTPStatusError(404)) is False
     assert is_network_or_provider_error(KeyboardInterrupt()) is False
 
@@ -524,4 +548,205 @@ def test_opentelemetry_retry_span_events() -> None:
     retry_ev = next(e for e in failed_span.events if e.name == "retry")
     assert retry_ev.attributes[semconv.EVIDOR_RETRY_COUNT] == 1
     assert retry_ev.attributes[semconv.EVIDOR_RETRY_OUTCOME] == "retrying"
+
+
+# ==============================================================================
+# Dedicated Tests for Issues 1-7
+# ==============================================================================
+
+
+def test_retry_config_strict_validation() -> None:
+    # Issue 7: Booleans rejected for max_retries
+    with pytest.raises(TypeError, match="max_retries must be an integer"):
+        RetryConfig(max_retries=True)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="max_retries must be an integer"):
+        RetryConfig(max_retries=False)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="max_retries must be an integer"):
+        RetryConfig(max_retries=3.5)  # type: ignore[arg-type]
+
+    # Non-finite numbers rejected
+    with pytest.raises(ValueError, match="initial_delay must be a finite number"):
+        RetryConfig(initial_delay=float("inf"))
+    with pytest.raises(ValueError, match="initial_delay must be a finite number"):
+        RetryConfig(initial_delay=float("nan"))
+    with pytest.raises(ValueError, match="max_delay must be a finite number"):
+        RetryConfig(max_delay=float("inf"))
+    with pytest.raises(ValueError, match="backoff_factor must be a finite number"):
+        RetryConfig(backoff_factor=float("nan"))
+
+    # max_delay must be >= initial_delay
+    with pytest.raises(ValueError, match="must be >= initial_delay"):
+        RetryConfig(initial_delay=10.0, max_delay=5.0)
+
+    # retryable_exceptions validation
+    with pytest.raises(TypeError, match="retryable_exceptions must be a tuple"):
+        RetryConfig(retryable_exceptions=[ValueError])  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="Each element in retryable_exceptions must be a subclass"):
+        RetryConfig(retryable_exceptions=("not_an_exc",))  # type: ignore[arg-type]
+
+
+def test_extract_retry_after_and_backoff_delay_honors_hint() -> None:
+    # Issue 3: Rate-limit and Retry-After delay extraction and honoring
+    from datetime import datetime, timezone, timedelta
+    import email.utils
+    from evidor.retry import extract_retry_after
+
+    class CustomRateLimit(Exception):
+        def __init__(self, retry_after: Any = None, headers: Any = None) -> None:
+            if retry_after is not None:
+                self.retry_after = retry_after
+            if headers is not None:
+                self.headers = headers
+
+    # 1. Direct attribute numeric and str
+    err1 = CustomRateLimit(retry_after=5.0)
+    assert extract_retry_after(err1) == 5.0
+
+    err2 = CustomRateLimit(retry_after="12.5")
+    assert extract_retry_after(err2) == 12.5
+
+    # 2. Header dictionary
+    err3 = CustomRateLimit(headers={"Retry-After": "3.5"})
+    assert extract_retry_after(err3) == 3.5
+
+    err4 = CustomRateLimit(headers={"retry-after": 7})
+    assert extract_retry_after(err4) == 7.0
+
+    # 3. RFC 7231 HTTP-date
+    future_time = datetime.now(timezone.utc) + timedelta(seconds=20)
+    date_str = email.utils.format_datetime(future_time)
+    err5 = CustomRateLimit(headers={"Retry-After": date_str})
+    val = extract_retry_after(err5)
+    assert val is not None
+    assert 17.0 <= val <= 23.0
+
+    # 4. calculate_backoff_delay honors retry_after hint
+    config = RetryConfig(initial_delay=0.1, max_delay=10.0, jitter=False)
+    # Without err hint: 0.1 * 2^0 = 0.1
+    assert calculate_backoff_delay(0, config) == 0.1
+    # With err hint of 3.5s:
+    assert calculate_backoff_delay(0, config, err=err3) == 3.5
+    # Capped at max_delay:
+    err_large = CustomRateLimit(retry_after=999.0)
+    assert calculate_backoff_delay(0, config, err=err_large) == 10.0
+
+
+@pytest.mark.asyncio
+async def test_async_sleep_cancellation_during_backoff() -> None:
+    # Issue 1: Non-blocking async sleep cancels cleanly without tying up thread pool
+    provider = FlakyProvider(fail_count=5)
+    config = RetryConfig(max_retries=3, initial_delay=5.0, jitter=False)
+    agent = Agent(provider=provider, retry_config=config)
+
+    task = asyncio.create_task(agent.send_async("hello"))
+    # Allow task to fail attempt 0 and enter non-blocking asyncio.sleep
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    # Cancel the task while in backoff sleep
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_summarization_retries_sync() -> None:
+    # Issue 4: Summarization retries with unified retry policy and telemetry (sync)
+    main_provider = FlakyProvider(fail_count=0)
+    flaky_summary = FlakyProvider(fail_count=1)
+
+    sink = InMemorySink()
+    config = RetryConfig(max_retries=2, initial_delay=0.001, jitter=False, sleep_fn=lambda _: None)
+    agent = Agent(
+        provider=main_provider,
+        summarization_model=flaky_summary,
+        context_window=200,
+        max_messages=3,
+        retry_config=config,
+        telemetry=sink,
+    )
+
+    try:
+        agent.send("Message 1: " + "a" * 100)
+        agent.send("Message 2: " + "b" * 100)
+        resp = agent.send("Message 3: " + "c" * 100)
+        assert resp.text
+    finally:
+        agent.close()
+
+    assert flaky_summary.attempts == 2
+    error_events = sink.filter(ErrorEvent)
+    assert any(e.outcome == "retrying" and e.details.get("provider") == "FlakyProvider" for e in error_events)
+
+
+@pytest.mark.asyncio
+async def test_summarization_retries_async() -> None:
+    # Issue 4: Summarization retries with unified retry policy and telemetry (async)
+    main_provider = FlakyProvider(fail_count=0)
+    flaky_summary = FlakyProvider(fail_count=1)
+
+    sink = InMemorySink()
+    captured_async_sleeps: list[float] = []
+    config = RetryConfig(
+        max_retries=2,
+        initial_delay=0.001,
+        jitter=False,
+        sleep_async_fn=captured_async_sleeps.append,
+    )
+    agent = Agent(
+        provider=main_provider,
+        summarization_model=flaky_summary,
+        context_window=200,
+        max_messages=3,
+        retry_config=config,
+        telemetry=sink,
+    )
+
+    try:
+        await agent.send_async("Message 1: " + "a" * 100)
+        await agent.send_async("Message 2: " + "b" * 100)
+        resp = await agent.send_async("Message 3: " + "c" * 100)
+        assert resp.text
+    finally:
+        await agent.close_async()
+
+    assert flaky_summary.attempts == 2
+    assert len(captured_async_sleeps) == 1
+    error_events = sink.filter(ErrorEvent)
+    assert any(e.outcome == "retrying" and e.details.get("provider") == "FlakyProvider" for e in error_events)
+
+
+def test_retry_boundary_narrowed_to_provider_call() -> None:
+    # Issue 5: Retry boundary narrowed strictly to provider call;
+    # response processing / telemetry errors do NOT re-trigger provider.generate!
+    class CorruptedResponse:
+        text = "Generated text"
+        model = "corrupted-model"
+
+        @property
+        def tool_calls(self) -> Any:
+            # Simulate transient network/connection error raised during response parsing
+            raise ConnectionError("Connection dropped during response parsing")
+
+    class CorruptedProvider:
+        def __init__(self) -> None:
+            self.attempts = 0
+            self.model = "corrupted-model"
+
+        def generate(self, request: GenerationRequest) -> Any:
+            self.attempts += 1
+            return CorruptedResponse()
+
+        def with_model(self, model: str) -> Any:
+            return self
+
+    provider = CorruptedProvider()
+    config = RetryConfig(max_retries=3, initial_delay=0.001, jitter=False, sleep_fn=lambda _: None)
+    agent = Agent(provider=provider, retry_config=config)  # type: ignore[arg-type]
+
+    # When response.tool_calls raises ConnectionError, it is OUTSIDE provider.generate try-block.
+    # It must raise immediately without retrying the provider.
+    with pytest.raises(ConnectionError, match="Connection dropped during response parsing"):
+        agent.send("Hello")
+
+    # Provider was called only ONCE, proving retry boundary is narrowed strictly to provider.generate!
+    assert provider.attempts == 1
 

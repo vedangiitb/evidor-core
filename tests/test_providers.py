@@ -48,6 +48,7 @@ def test_openai_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
     response = provider.generate(request)
 
     assert response == GenerationResponse(text="OpenAI generated text", model="gpt-4.1-mini")
+    mock_openai.OpenAI.assert_called_once_with(api_key="key", max_retries=0)
     mock_client.responses.create.assert_called_once_with(
         model="gpt-4.1-mini",
         input=[
@@ -55,6 +56,8 @@ def test_openai_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
             {"role": "user", "content": "hello"},
         ],
     )
+
+
 
 
 def test_openai_provider_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,12 +103,15 @@ def test_anthropic_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
     response = provider.generate(request)
 
     assert response == GenerationResponse(text="Claude response", model="claude-3-5")
+    mock_anthropic.Anthropic.assert_called_once_with(api_key="key", max_retries=0)
     mock_client.messages.create.assert_called_once_with(
         model="claude-3-5",
         max_tokens=500,
         system="sys instruction",
         messages=[{"role": "user", "content": "hello"}],
     )
+
+
 
 
 def test_anthropic_provider_generate_no_system(monkeypatch: pytest.MonkeyPatch) -> None:

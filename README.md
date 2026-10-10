@@ -149,9 +149,9 @@ agent = Agent(
 )
 ```
 
-#### Custom Retryable Exceptions
+#### Custom Retryable Exceptions & Retry-After Support
 
-By default (`retryable_exceptions=None`), Evidor automatically filters for transient network and provider errors using `is_network_or_provider_error()`. You can specify exact exception types to retry if desired:
+By default (`retryable_exceptions=None`), Evidor automatically filters for transient network and provider errors using `is_network_or_provider_error()`. When a provider returns a `Retry-After` delay header or exception attribute (such as on HTTP 429), Evidor automatically respects the requested delay up to `max_delay`. You can also specify exact exception types to retry if desired:
 
 ```python
 from evidor import Agent, OpenAIProvider, RetryConfig
@@ -164,6 +164,12 @@ agent = Agent(
     ),
 )
 ```
+
+#### Coordinated Retry Budget & Async Non-Blocking Backoff
+
+- **Single Coordinated Budget**: `OpenAIProvider` and `AnthropicProvider` disable underlying SDK client retries (`max_retries=0`), ensuring Evidor's `Agent` exclusively owns the unified retry budget and telemetry reflects exact attempt counts without multiplied SDK attempts.
+- **Async Non-Blocking Backoff**: In `send_async()`, retry backoffs await `asyncio.sleep()` directly on the event loop rather than occupying thread pool workers, allowing clean cancellation.
+- **Summarization Retries**: Conversation compaction and transcript summarization share the configured retry policy and telemetry runtime seamlessly.
 
 ### Low-level Generation with `GenerationRequest`
 
