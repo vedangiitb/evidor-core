@@ -175,6 +175,11 @@ class MCPClient:
         """Names of configured servers."""
         return tuple(self._configs.keys())
 
+    @property
+    def configs(self) -> tuple[MCPServerConfig, ...]:
+        """Configurations of all registered servers."""
+        return tuple(self._configs.values())
+
     def session(self, name: str) -> MCPSession:
         """Get the MCPSession for a specific server."""
         with self._lock:
