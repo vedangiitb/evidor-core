@@ -8,7 +8,7 @@ Install the provider adapter(s) you need:
 
 ```bash
 pip install "evidor[openai]"
-# or: evidor[anthropic], evidor[gemini], evidor[mcp], evidor[all]
+# or: evidor[anthropic], evidor[gemini], evidor[mcp], evidor[otel], evidor[langfuse], evidor[phoenix], evidor[prometheus], evidor[all]
 ```
 
 ## Quickstart
@@ -106,7 +106,73 @@ for message in agent.messages:
 agent.clear_history()
 ```
 
+### Automatic LLM Retries & Exponential Backoff
+
+When requests to an LLM provider fail due to transient network or provider issues, `Agent` automatically retries with exponential backoff and jitter.
+
+By default, an `Agent` retries up to **3 times** starting with an initial delay of **0.5 seconds** (doubling on each attempt: ~0.5s, ~1.0s, ~2.0s) when encountering network errors (e.g. `ConnectionError`, `TimeoutError`) or provider rate limits/server errors (e.g. HTTP 429, 500, 502, 503, 504). Programming errors (such as `ValueError`, `TypeError`, or 400 Bad Request) fail immediately without retrying.
+
+#### Quick Configuration
+
+You can adjust the maximum retries or disable them entirely directly on the `Agent`:
+
+```python
+from evidor import Agent, OpenAIProvider
+
+# Custom retry count
+agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), max_retries=5)
+
+# Disable retries entirely
+agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), max_retries=0)
+# or:
+agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), retry_config=None)
+agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), retry_config=False)
+```
+
+#### Fine-Grained Control with `RetryConfig`
+
+For advanced tuning, pass a `RetryConfig` object:
+
+```python
+from evidor import Agent, OpenAIProvider, RetryConfig
+
+agent = Agent(
+    OpenAIProvider(model="gpt-4.1-mini"),
+    retry_config=RetryConfig(
+        max_retries=3,              # Max retry attempts (default: 3)
+        initial_delay=0.5,          # Initial delay in seconds (default: 0.5)
+        max_delay=60.0,             # Maximum backoff cap in seconds (default: 60.0)
+        backoff_factor=2.0,         # Exponential multiplier (default: 2.0)
+        jitter=True,                # Full jitter to prevent thundering herds (default: True)
+        retryable_exceptions=None,  # None = auto-detect transient network/provider errors (default)
+    ),
+)
+```
+
+#### Custom Retryable Exceptions & Retry-After Support
+
+By default (`retryable_exceptions=None`), Evidor automatically filters for transient network and provider errors using `is_network_or_provider_error()`. When a provider returns a `Retry-After` delay header or exception attribute (such as on HTTP 429), Evidor automatically respects the requested delay up to `max_delay`. You can also specify exact exception types to retry if desired:
+
+```python
+from evidor import Agent, OpenAIProvider, RetryConfig
+
+agent = Agent(
+    OpenAIProvider(model="gpt-4.1-mini"),
+    retry_config=RetryConfig(
+        max_retries=3,
+        retryable_exceptions=(ConnectionError, TimeoutError),
+    ),
+)
+```
+
+#### Coordinated Retry Budget & Async Non-Blocking Backoff
+
+- **Single Coordinated Budget**: `OpenAIProvider`, `AnthropicProvider`, and `GeminiProvider` disable underlying SDK client retries (`max_retries=0` for OpenAI/Anthropic, `HttpOptions(retry_options=HttpRetryOptions(attempts=1))` for Gemini), ensuring Evidor's `Agent` exclusively owns the unified retry budget and telemetry reflects exact attempt counts without multiplied SDK attempts.
+- **Async Non-Blocking Backoff**: In `send_async()`, retry backoffs await `asyncio.sleep()` directly on the event loop rather than occupying thread pool workers, allowing clean cancellation.
+- **Summarization Retries**: Conversation compaction and transcript summarization share the configured retry policy and telemetry runtime seamlessly.
+
 ### Low-level Generation with `GenerationRequest`
+
 
 For direct provider calls without stateful session management, instantiate messages and requests directly:
 
@@ -493,6 +559,266 @@ async def main():
 asyncio.run(main())
 ```
 
+## Telemetry & Observability
+
+Evidor includes a first-class, decoupled telemetry subsystem built on an asynchronous **actor-like producer-consumer runtime**. It captures distributed trace trees across agent turns, model generations, tool executions, and external MCP server invocations with zero overhead on the agent's critical path.
+
+> **Zero Extra Dependencies for Custom Telemetry:**  
+> Custom telemetry implementations and built-in sinks (`ConsoleSink`, `InMemorySink`) require **no external packages** (`pip install evidor`).  
+> Optional adapters are available for industry-standard backends:
+> * OpenTelemetry: `pip install "evidor[otel]"`
+> * Langfuse: `pip install "evidor[langfuse]"`
+> * Arize Phoenix: `pip install "evidor[phoenix]"`
+> * Prometheus: `pip install "evidor[prometheus]"`
+
+### Design Principles
+
+- **Zero-Dependency Core**: Evidor core defines framework-neutral domain events and lifecycle operations. Telemetry adapters own protocol conversions and client exports.
+- **Non-Blocking Emission**: Event emission on the agent thread takes under 1 microsecond via an in-memory bounded queue. Formatting, batching, and network transport happen on a dedicated background worker thread (`Evidor-Telemetry-Worker`).
+- **Trace Context Propagation**: Automatically tracks parent-child span hierarchy across synchronous and asynchronous operations using `contextvars`.
+- **Fault-Isolated**: Downstream observability backend timeouts, outages, or serialization errors never crash the agent.
+
+---
+
+### Built-in Sinks (Zero Dependencies)
+
+Evidor includes built-in sinks that require zero external dependencies:
+
+#### 1. `ConsoleSink`: Real-Time Developer Visibility
+Stream structured events directly to `sys.stderr` or `sys.stdout`:
+
+```python
+from evidor import Agent, OpenAIProvider
+from evidor.telemetry import ConsoleSink
+
+sink = ConsoleSink()
+agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=sink)
+agent.send("What is the speed of light?")
+```
+
+#### 2. `InMemorySink`: Testing & Offline Assertions
+Capture all events in memory to assert on token counts, latency, and tool invocations:
+
+```python
+from evidor import Agent, OpenAIProvider
+from evidor.telemetry import InMemorySink, LLMCallEndEvent
+
+sink = InMemorySink()
+agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=sink)
+agent.send("Hello agent!")
+
+# Inspect recorded events
+llm_events = sink.filter(LLMCallEndEvent)
+print(f"Total tokens used: {llm_events[0].token_usage.total_tokens}")
+```
+
+---
+
+### Observability Adapters
+
+Evidor provides official, ultra-compact adapters for industry-leading observability platforms. Because Evidor's core runtime manages all context propagation, queuing, and background dispatch, each adapter requires **under ~100 lines of logic**:
+
+| Adapter | Platform | Extra Install | Typical Use Case |
+| :--- | :--- | :--- | :--- |
+| **`OpenTelemetrySink`** | OpenTelemetry, Datadog, Jaeger | `evidor[otel]` | Enterprise distributed tracing & OTel collectors |
+| **`LangfuseSink`** | Langfuse (Cloud or self-hosted) | `evidor[langfuse]` | LLM engineering, prompt tracking & cost evaluation |
+| **`PhoenixSink`** | Arize Phoenix | `evidor[phoenix]` | Local agent inspection with native OpenInference UI |
+| **`PrometheusSink`** | Prometheus, Grafana | `evidor[prometheus]` | Operational counters, gauges & latency histograms |
+
+#### 1. OpenTelemetry & OpenInference (`evidor[otel]`)
+
+Convert domain events into distributed trace spans compliant with **OpenTelemetry GenAI** and **OpenInference** semantic conventions:
+
+```bash
+pip install "evidor[otel]"
+```
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+from evidor import Agent, OpenAIProvider, OpenTelemetrySink
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+trace.set_tracer_provider(provider)
+
+otel_sink = OpenTelemetrySink(tracer_provider=provider)
+agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=otel_sink)
+response = agent.send("Search the documentation for vector embeddings.")
+agent.close()
+```
+
+#### 2. Langfuse (`evidor[langfuse]`)
+
+Trace agent executions, evaluate responses, monitor token usage, and track latency on the open-source [Langfuse](https://langfuse.com) platform:
+
+```bash
+pip install "evidor[langfuse]"
+```
+
+```python
+from evidor import Agent, OpenAIProvider, LangfuseSink
+
+# Reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, and LANGFUSE_HOST from env
+langfuse_sink = LangfuseSink()
+
+agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=langfuse_sink)
+response = agent.send("Summarize the quarterly earnings report.")
+agent.close()  # Automatically flushes pending events and shuts down Langfuse client
+```
+
+#### 3. Arize Phoenix (`evidor[phoenix]`)
+
+Send traces directly to [Arize Phoenix](https://phoenix.arize.com/) (local or cloud) formatted with native **OpenInference** metadata (`input.value`, `output.value`, `tool.parameters`, token breakdowns):
+
+```bash
+pip install "evidor[phoenix]"
+```
+
+```python
+from evidor import Agent, OpenAIProvider, PhoenixSink
+
+# Connects to Phoenix at http://localhost:6006/v1/traces by default
+phoenix_sink = PhoenixSink(
+    endpoint="http://localhost:6006/v1/traces",
+    project_name="my-evidor-agent",
+)
+
+agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=phoenix_sink)
+response = agent.send("Analyze customer sentiment from survey data.")
+agent.close()
+```
+
+#### 4. Prometheus Metrics (`evidor[prometheus]`)
+
+Export operational agent metrics (`evidor_agent_runs_total`, `evidor_llm_calls_total`, `evidor_llm_retries_total`, `evidor_tokens_total`, `evidor_tool_calls_total`, `evidor_errors_total`, and latency histograms) to Prometheus:
+
+```bash
+pip install "evidor[prometheus]"
+```
+
+```python
+from evidor import Agent, OpenAIProvider, PrometheusSink
+
+prom_sink = PrometheusSink()
+agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=prom_sink)
+agent.send("Calculate total revenue.")
+
+# Export metrics exposition text (e.g., in a FastAPI /metrics endpoint):
+metrics_text = prom_sink.export_text()
+print(metrics_text)
+```
+
+Key retry metrics:
+* `evidor_llm_retries_total`: Counter tracking retry attempts partitioned by `provider` and `model`.
+
+---
+
+#### Span Tree & Semantic Attributes
+
+Evidor automatically builds the full execution tree, capturing intermediate retry attempts as separate spans or span events:
+```
+agent.run                           [openinference.span.kind = "AGENT"]
+  ├── llm.gpt-4.1-mini (attempt 0)  [openinference.span.kind = "LLM", status = "error", event = "retry"]
+  ├── llm.gpt-4.1-mini (attempt 1)  [openinference.span.kind = "LLM", status = "ok", evidor.retry.count = 1]
+  └── tool.search_docs              [openinference.span.kind = "TOOL"]
+        └── mcp.docs_server.search  [openinference.span.kind = "TOOL"]
+```
+
+Standard attributes automatically populated:
+* `openinference.span.kind`: `AGENT`, `LLM`, or `TOOL`
+* `input.value`, `output.value`, `tool.parameters`
+* `gen_ai.system`, `gen_ai.request.model`, `gen_ai.response.model`
+* `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.total_tokens`
+* `llm.input_prompt`, `llm.input_messages`, `llm.output_text`, `llm.output_tool_calls`
+* `evidor.agent.run_id`, `evidor.tool.name`, `evidor.mcp.server_name`
+* `evidor.retry.count`, `evidor.retry.outcome`
+
+
+---
+
+### Privacy & PII Protection (Metadata-Only Mode)
+
+In privacy-sensitive or regulated environments (such as healthcare, finance, or customer data processing), you may not want to persist raw user prompts, model outputs, or tool arguments to external observability backends, while still requiring distributed trace hierarchies, token usage, latency timings, and error analytics.
+
+All Evidor telemetry sinks accept a `capture_content: bool = True` parameter. Setting `capture_content=False` strips raw text payloads before export:
+
+```python
+from evidor import Agent, OpenAIProvider
+from evidor.telemetry import OpenTelemetrySink, LangfuseSink, PhoenixSink
+
+# Sinks record span trees, token usage, and latencies, but redact all prompts and outputs
+otel_sink = OpenTelemetrySink(capture_content=False)
+langfuse_sink = LangfuseSink(capture_content=False)
+phoenix_sink = PhoenixSink(capture_content=False)
+
+agent = Agent(
+    OpenAIProvider("gpt-4.1-mini"),
+    telemetry=[otel_sink, langfuse_sink],
+)
+response = agent.send("Sensitive patient record or financial data...")
+agent.close()
+```
+
+| Field / Semantic Attribute | `capture_content=True` (default) | `capture_content=False` (metadata-only) |
+| :--- | :--- | :--- |
+| **Trace & Span IDs, Run IDs** | Preserved | Preserved |
+| **Duration & Timestamps** | Preserved | Preserved |
+| **Token Usage Counts** | Preserved | Preserved |
+| **Model & Provider Names** | Preserved | Preserved |
+| **Tool & MCP Server Names** | Preserved | Preserved |
+| **Errors & Exceptions** | Preserved | Preserved |
+| **User Prompts & Messages** | Recorded | **Omitted / Redacted** |
+| **Model Output Text** | Recorded | **Omitted / Redacted** |
+| **Tool Arguments & Results** | Recorded | **Omitted / Redacted** |
+
+For custom sinks, the pure function `redact_event(event)` is exported directly from `evidor.telemetry`.
+
+---
+
+### Advanced: Custom Sinks & Runtime Tuning
+
+#### Implementing a Custom Sink
+Implement the `TelemetrySink` protocol to send events to any custom database, webhook, or logging system:
+
+```python
+from collections.abc import Sequence
+from evidor.telemetry import TelemetryEvent, TelemetrySink
+
+class WebhookSink(TelemetrySink):
+    def write(self, events: Sequence[TelemetryEvent]) -> None:
+        for event in events:
+            # Send batch payload over HTTP or write to database
+            attrs = event.to_attributes()
+            ...
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+```
+
+#### Tuning the `TelemetryRuntime`
+Configure queue capacity, batching thresholds, and overflow strategies:
+
+```python
+from evidor import Agent, OpenAIProvider
+from evidor.telemetry import TelemetryRuntime, ConsoleSink
+
+# Actor runtime with custom batching and bounded buffer
+runtime = TelemetryRuntime(
+    sinks=[ConsoleSink()],
+    queue_size=2000,                # Max buffered events
+    batch_size=100,                 # Batch size dispatched to sinks
+    flush_interval_seconds=0.5,     # Max wait before flushing available events
+    overflow_strategy="drop_oldest" # "drop_newest" (default) or "drop_oldest"
+)
+
+agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=runtime)
+```
+
 ## Providers
 
 Supported providers and their typical models:
@@ -524,6 +850,20 @@ class CustomProvider:
         # or iterate over request.messages
         return GenerationResponse(text="Custom response", model=self.model)
 ```
+
+### Optional Extras Summary
+
+| Extra | Purpose | Included Packages |
+| :--- | :--- | :--- |
+| `evidor[openai]` | OpenAI models (`gpt-4.1-mini`, `gpt-4o`) | `openai` |
+| `evidor[anthropic]` | Anthropic Claude models (`claude-3-5-sonnet`) | `anthropic` |
+| `evidor[gemini]` | Google Gemini models (`gemini-2.5-flash`) | `google-genai` |
+| `evidor[mcp]` | Model Context Protocol servers | `mcp` |
+| `evidor[otel]` | OpenTelemetry distributed tracing | `opentelemetry-api`, `opentelemetry-sdk` |
+| `evidor[langfuse]` | Langfuse traces, generations & evaluation | `langfuse` |
+| `evidor[phoenix]` | Arize Phoenix with OpenInference semantics | `arize-phoenix-otel`, `openinference-semantic-conventions` |
+| `evidor[prometheus]` | Prometheus metrics and `/metrics` exposition | `prometheus-client` |
+| `evidor[all]` | All model providers, MCP, and telemetry adapters | All optional extras |
 
 ## Build and release
 

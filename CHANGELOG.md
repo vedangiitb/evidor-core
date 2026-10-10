@@ -2,6 +2,71 @@
 
 <!-- version list -->
 
+## v1.4.0-dev.2 (2026-10-10)
+
+### Bug Fixes
+
+- **agent**: Fixed custom sync sleeper issue
+  ([`38aaa8a`](https://github.com/vedangiitb/evidor-core/commit/38aaa8aad45275006702ecb2eb5b7b41f613edfc))
+
+- **agent**: Fixing gemini default retries issue
+  ([`c3cd6b9`](https://github.com/vedangiitb/evidor-core/commit/c3cd6b93ff4b2b79587ae35bc03f0eeeb9aee2ce))
+
+- **retry**: Harden llm retry policies, async backoff, and telemetry coordination
+  ([`c93a8ef`](https://github.com/vedangiitb/evidor-core/commit/c93a8efd766446a2fce8e90a9a13be1c791ccb26))
+
+### Documentation
+
+- **agent**: Updated readme with agent retries info
+  ([`41bbb28`](https://github.com/vedangiitb/evidor-core/commit/41bbb28bb4669500dafd7357dabd0565f491f475))
+
+### Features
+
+- Python 3.14 support
+  ([`83cfe8e`](https://github.com/vedangiitb/evidor-core/commit/83cfe8e158a564bd950266b7f265f5d0ba0f55fe))
+
+- **agent**: Added configurable agent retries
+  ([`2ed8f12`](https://github.com/vedangiitb/evidor-core/commit/2ed8f12ee8ff8e9c44f58501a898b05c656e7325))
+
+
+## v1.4.0-dev.1 (2026-10-09)
+
+### Bug Fixes
+
+- **telemetry**: Guarantee queue draining on shutdown and in-flight flush synchronization
+  ([`6d20487`](https://github.com/vedangiitb/evidor-core/commit/6d204878a24ac8f52652b4dd077c071d6154f9a8))
+
+### Documentation
+
+- **readme**: Add adapter overview table and optional extras summary
+  ([`a70fe7c`](https://github.com/vedangiitb/evidor-core/commit/a70fe7cab3f32064552ff84358b6d06611ccc107))
+
+- **telemetry**: Document Langfuse, Arize Phoenix, and Prometheus adapters
+  ([`6b687cc`](https://github.com/vedangiitb/evidor-core/commit/6b687cc0335beda4af2bbd13f9514fd5c5724c46))
+
+- **telemetry**: Document telemetry usage in readme and configure evidor[otel] packaging
+  ([`1222de0`](https://github.com/vedangiitb/evidor-core/commit/1222de027ad852842519a8cad4f02af397b91901))
+
+### Features
+
+- **telemetry**: Add Langfuse, Arize Phoenix, and Prometheus adapters
+  ([`188fa50`](https://github.com/vedangiitb/evidor-core/commit/188fa50ec176e96e30708f51149e87adf9a79e25))
+
+- **telemetry**: Add sink-level capture_content option for PII protection
+  ([`6ae868f`](https://github.com/vedangiitb/evidor-core/commit/6ae868f37c7c3916760bcdd55173b6ebbe800f61))
+
+- **telemetry**: Define domain events, trace context, and semantic conventions
+  ([`17b9730`](https://github.com/vedangiitb/evidor-core/commit/17b9730bbc2bce395a21313fd1a4f9d70276f730))
+
+- **telemetry**: Implement actor runtime, core instrumentation, and opentelemetry adapter
+  ([`124deb0`](https://github.com/vedangiitb/evidor-core/commit/124deb0531985b1a2a781c395db5db177bd38e33))
+
+### Refactoring
+
+- **telemetry**: Streamline Langfuse and Prometheus adapter implementations
+  ([`f1f0eb8`](https://github.com/vedangiitb/evidor-core/commit/f1f0eb854694c54b91c6a1e06fc18e8837bcf6f0))
+
+
 ## v1.3.0 (2026-10-08)
 
 

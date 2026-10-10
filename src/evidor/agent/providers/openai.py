@@ -38,7 +38,7 @@ class OpenAIProvider:
         except ImportError as error:
             raise ImportError("Install OpenAI support with: pip install 'evidor[openai]'") from error
 
-        client = OpenAI(api_key=self._api_key)
+        client = OpenAI(api_key=self._api_key, max_retries=0)
 
         # Build tools if provided
         openai_tools: list[dict[str, Any]] | None = None
