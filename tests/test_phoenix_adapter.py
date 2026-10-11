@@ -51,6 +51,26 @@ def test_missing_phoenix_dependency_guard(monkeypatch: pytest.MonkeyPatch) -> No
         PhoenixSink()
 
 
+def test_phoenix_falls_back_when_register_uses_removed_otlp_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Newer OTEL exporters must not prevent Phoenix telemetry from starting."""
+    from evidor.telemetry.adapters import phoenix as phoenix_module
+
+    def incompatible_register(**_kwargs: object) -> None:
+        raise AttributeError("'HTTPSpanExporter' object has no attribute '_headers'")
+
+    monkeypatch.setattr(phoenix_module.potel, "register", incompatible_register)
+
+    with pytest.warns(RuntimeWarning, match="using direct OTLP HTTP export"):
+        sink = PhoenixSink(
+            endpoint="http://localhost:6006/v1/traces",
+            project_name="fallback-project",
+        )
+
+    assert sink._tracer_provider.resource.attributes["openinference.project.name"] == "fallback-project"
+
+
 def test_phoenix_openinference_attributes_enrichment() -> None:
     tp, exporter = create_phoenix_test_tracer()
     sink = PhoenixSink(tracer_provider=tp)

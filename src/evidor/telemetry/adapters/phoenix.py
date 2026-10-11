@@ -7,6 +7,7 @@ OpenInference semantic conventions for AI Agent and LLM visualization.
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Sequence
 from typing import Any
 
@@ -51,14 +52,10 @@ class PhoenixSink(OpenTelemetrySink):
             )
 
         if tracer_provider is None:
-            # Register Arize Phoenix tracer provider
-            tracer_provider = potel.register(
+            tracer_provider = self._register_tracer_provider(
                 endpoint=endpoint or "http://localhost:6006/v1/traces",
                 project_name=project_name,
-                set_global_tracer_provider=False,
-                auto_instrument=False,
-                verbose=False,
-                **register_kwargs,
+                register_kwargs=register_kwargs,
             )
 
         super().__init__(
@@ -66,6 +63,55 @@ class PhoenixSink(OpenTelemetrySink):
             tracer_name=tracer_name,
             capture_content=capture_content,
         )
+
+    @staticmethod
+    def _register_tracer_provider(
+        *,
+        endpoint: str,
+        project_name: str,
+        register_kwargs: dict[str, Any],
+    ) -> Any:
+        """Register Phoenix tracing, tolerating incompatible OTEL private APIs.
+
+        Some Phoenix releases inspect the private ``_headers`` member on an
+        OpenTelemetry exporter. That member was removed in newer OpenTelemetry
+        releases. When this specific incompatibility is encountered, create an
+        equivalent OTLP HTTP provider directly instead.
+        """
+        try:
+            return potel.register(
+                endpoint=endpoint,
+                project_name=project_name,
+                set_global_tracer_provider=False,
+                auto_instrument=False,
+                verbose=False,
+                **register_kwargs,
+            )
+        except AttributeError as exc:
+            if "_headers" not in str(exc):
+                raise
+
+        warnings.warn(
+            "Phoenix's registration helper is incompatible with the installed "
+            "OpenTelemetry exporter; using direct OTLP HTTP export instead.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+        headers = register_kwargs.get("headers")
+        provider = TracerProvider(
+            resource=Resource.create({"openinference.project.name": project_name})
+        )
+        provider.add_span_processor(
+            SimpleSpanProcessor(OTLPSpanExporter(endpoint=endpoint, headers=headers))
+        )
+        return provider
 
     def _start_span(self, event: TelemetryEvent) -> None:
         super()._start_span(event)
