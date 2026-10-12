@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.5.0-dev.1 (2026-10-12)
+
+### Bug Fixes
+
+- Fixing test failures for python 3.10
+  ([`7ff695b`](https://github.com/vedangiitb/evidor-core/commit/7ff695b90db299461abce1d923fb1b8d4b465c24))
+
+### Features
+
+- Adding read webpage and evidence store tools
+  ([`37b2c31`](https://github.com/vedangiitb/evidor-core/commit/37b2c314ad5bbd132c69c9795c1e9f117be5aff9))
+
+
 ## v1.4.5 (2026-10-12)
 
 

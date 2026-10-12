@@ -376,6 +376,39 @@ print(response.text)
 
 Switch providers by replacing `TavilySearchProvider()` with `ExaSearchProvider()` or `BraveSearchProvider()`. To use another service, implement the small `WebSearchProvider` contract: `search(query: str, *, max_results: int) -> list[SearchResult]`; both types are exported from `evidor`.
 
+### Webpage Reader
+
+Use `read_webpage` (or `read_webpage_tool()`) to let agents fetch and read clean, token-bounded text from web pages, stripping HTML boilerplate automatically:
+
+```python
+from evidor import Agent, OpenAIProvider, read_webpage, read_webpage_tool
+
+# Ready-to-use default tool (cleans HTML boilerplate, bounded to 15,000 chars)
+agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), tools=[read_webpage])
+
+# Or customized with explicit character and timeout limits
+custom_reader = read_webpage_tool(max_chars=8_000, timeout=10.0)
+```
+
+### Structured Evidence Store (`EvidenceStore`)
+
+Prevent context pollution and hallucinations across multi-step research or analysis tasks by equipping agents with an in-memory structured evidence store:
+
+```python
+from evidor import Agent, EvidenceStore, GeminiProvider
+
+store = EvidenceStore()
+
+# store.tools provides record_evidence, list_evidence, and compare_evidence
+agent = Agent(GeminiProvider(model="gemini-2.5-flash"), tools=[*store.tools])
+agent.send("Analyze trade-offs between PostgreSQL and SQLite and record your findings.")
+
+# Inspect structured findings in Python or format as Markdown
+print(store.to_markdown())
+for item in store.items:
+    print(f"[{item.id}] {item.topic}: {item.finding}")
+```
+
 ## Model Context Protocol (MCP)
 
 Evidor includes first-class support for the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Agents can connect to any MCP server (over local **stdio**, modern **Streamable HTTP**, or legacy **SSE**), automatically discover tools, execute them, and feed responses back into the model.
