@@ -87,25 +87,47 @@ class GeminiProvider:
         client = genai.Client(api_key=self._api_key, http_options=http_options)
         response = client.models.generate_content(model=self._model, contents=contents, config=config)
 
-        # Parse text and tool calls
-        text = getattr(response, "text", None) or ""
+        # Parse text and tool calls.
+        # Extract directly from candidate parts to avoid triggering google-genai's
+        # warning when non-text parts (e.g. function calls) are present.
+        text = ""
         tool_calls: list[ToolCall] = []
 
-        # Check function_calls on response object
-        if getattr(response, "function_calls", None):
-            for i, fc in enumerate(response.function_calls):
-                call_id = getattr(fc, "id", None) or f"call_{i+1}"
-                args = dict(fc.args) if getattr(fc, "args", None) else {}
-                tool_calls.append(ToolCall(id=call_id, name=fc.name, arguments=args))
-        elif getattr(response, "candidates", None) and response.candidates:
-            candidate = response.candidates[0]
+        candidates = getattr(response, "candidates", None)
+        if isinstance(candidates, (list, tuple)) and candidates:
+            candidate = candidates[0]
             content = getattr(candidate, "content", None)
-            parts = getattr(content, "parts", []) or []
+            parts = getattr(content, "parts", None) or []
+            text_chunks: list[str] = []
             for part in parts:
+                part_text = getattr(part, "text", None)
+                is_thought = getattr(part, "thought", False)
+                if isinstance(part_text, str) and not is_thought:
+                    text_chunks.append(part_text)
+
                 fc = getattr(part, "function_call", None)
                 if fc:
                     call_id = getattr(fc, "id", None) or f"call_{len(tool_calls)+1}"
                     args = dict(fc.args) if getattr(fc, "args", None) else {}
-                    tool_calls.append(ToolCall(id=call_id, name=fc.name, arguments=args))
+                    tool_calls.append(ToolCall(id=call_id, name=fc.name or "", arguments=args))
+
+            if text_chunks:
+                text = "".join(text_chunks)
+
+        # Fallback for tool_calls if not extracted from candidates' parts
+        if not tool_calls and getattr(response, "function_calls", None):
+            raw_fc = response.function_calls
+            if isinstance(raw_fc, (list, tuple)):
+                for i, fc in enumerate(raw_fc):
+                    call_id = getattr(fc, "id", None) or f"call_{i+1}"
+                    args = dict(fc.args) if getattr(fc, "args", None) else {}
+                    tool_calls.append(ToolCall(id=call_id, name=fc.name or "", arguments=args))
+
+        # Fallback for text if response lacks candidate parts (e.g. mock objects)
+        if not text and not (isinstance(candidates, (list, tuple)) and candidates):
+            raw_text = getattr(response, "text", None)
+            if isinstance(raw_text, str):
+                text = raw_text
 
         return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls))
+

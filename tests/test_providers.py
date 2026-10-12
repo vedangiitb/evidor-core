@@ -458,6 +458,102 @@ def test_gemini_provider_function_call_via_candidates(monkeypatch: pytest.Monkey
     assert resp.tool_calls == (ToolCall(id="call_gemini_2", name="query", arguments={"term": "python"}),)
 
 
+def test_gemini_provider_multiple_function_calls_avoids_response_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_google = types.ModuleType("google")
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    mock_types.Content = MagicMock(side_effect=lambda role, parts: {"role": role, "parts": parts})  # type: ignore[attr-defined]
+    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
+    mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
+    mock_types.GenerateContentConfig = MagicMock()  # type: ignore[attr-defined]
+
+    # Create 4 function calls matching the user scenario
+    mock_fcs = []
+    for i in range(1, 5):
+        fc = MagicMock()
+        fc.id = f"fc_{i}"
+        fc.name = f"tool_{i}"
+        fc.args = {"arg": i}
+        mock_fcs.append(fc)
+    parts = [MagicMock(text=None, thought=False, function_call=fc) for fc in mock_fcs]
+    mock_candidate = MagicMock(content=MagicMock(parts=parts))
+
+    # Define a response object where accessing `.text` raises an AssertionError,
+    # proving that `.text` is never accessed when candidates are present.
+    class MockStrictResponse:
+        def __init__(self, candidates: list) -> None:
+            self.candidates = candidates
+
+        @property
+        def text(self) -> str:
+            raise AssertionError("response.text was accessed! This triggers the non-text parts warning in google-genai.")
+
+    mock_response = MockStrictResponse(candidates=[mock_candidate])
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = mock_response
+    mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    mock_genai.types = mock_types  # type: ignore[attr-defined]
+    mock_google.genai = mock_genai  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google", mock_google)
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-2.5-flash")
+    resp = provider.generate(GenerationRequest(prompt="run multiple tools"))
+    assert resp.text == ""
+    assert len(resp.tool_calls) == 4
+    for i in range(1, 5):
+        assert resp.tool_calls[i - 1] == ToolCall(id=f"fc_{i}", name=f"tool_{i}", arguments={"arg": i})
+
+
+def test_gemini_provider_text_and_tools_with_thoughts(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_google = types.ModuleType("google")
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    mock_types.Content = MagicMock(side_effect=lambda role, parts: {"role": role, "parts": parts})  # type: ignore[attr-defined]
+    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
+    mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
+    mock_types.GenerateContentConfig = MagicMock()  # type: ignore[attr-defined]
+
+    thought_part = MagicMock(text="Let me plan this step.", thought=True, function_call=None)
+    text_part = MagicMock(text="Here is what I will do.", thought=False, function_call=None)
+    fc = MagicMock()
+    fc.id = "call_99"
+    fc.name = "calculate"
+    fc.args = {"x": 10}
+    fc_part = MagicMock(text=None, thought=False, function_call=fc)
+
+    mock_candidate = MagicMock(content=MagicMock(parts=[thought_part, text_part, fc_part]))
+
+    class MockStrictResponse:
+        def __init__(self, candidates: list) -> None:
+            self.candidates = candidates
+
+        @property
+        def text(self) -> str:
+            raise AssertionError("response.text was accessed!")
+
+    mock_response = MockStrictResponse(candidates=[mock_candidate])
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = mock_response
+    mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    mock_genai.types = mock_types  # type: ignore[attr-defined]
+    mock_google.genai = mock_genai  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google", mock_google)
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-2.5-flash")
+    resp = provider.generate(GenerationRequest(prompt="do something"))
+    assert resp.text == "Here is what I will do."
+    assert resp.tool_calls == (ToolCall(id="call_99", name="calculate", arguments={"x": 10}),)
+
+
+
 def test_openai_provider_handles_malformed_tool_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
     from evidor.agent.providers.openai import _safe_parse_tool_arguments
 
