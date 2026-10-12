@@ -85,7 +85,7 @@ def test_fetch_webpage_content_success() -> None:
     mock_resp.__enter__.return_value = mock_resp
     mock_resp.__exit__.return_value = False
 
-    with patch("evidor.tools.native.read_webpage.urlopen", return_value=mock_resp):
+    with patch("urllib.request.urlopen", return_value=mock_resp):
         content = fetch_webpage_content("https://example.com/docs")
         assert "Docs" in content
         assert "Evidor is an agent framework." in content
@@ -100,7 +100,7 @@ def test_fetch_webpage_content_truncation() -> None:
     mock_resp.__enter__.return_value = mock_resp
     mock_resp.__exit__.return_value = False
 
-    with patch("evidor.tools.native.read_webpage.urlopen", return_value=mock_resp):
+    with patch("urllib.request.urlopen", return_value=mock_resp):
         content = fetch_webpage_content("https://example.com/long", max_chars=100)
         assert len(content) > 100
         assert "[Content truncated to 100 characters...]" in content
@@ -112,21 +112,21 @@ def test_fetch_webpage_content_binary_skip() -> None:
     mock_resp.__enter__.return_value = mock_resp
     mock_resp.__exit__.return_value = False
 
-    with patch("evidor.tools.native.read_webpage.urlopen", return_value=mock_resp):
+    with patch("urllib.request.urlopen", return_value=mock_resp):
         content = fetch_webpage_content("https://example.com/manual.pdf")
         assert "Cannot read binary content type 'application/pdf'" in content
 
 
 def test_fetch_webpage_content_http_error() -> None:
     http_err = HTTPError("https://example.com/404", 404, "Not Found", None, None)  # type: ignore[arg-type]
-    with patch("evidor.tools.native.read_webpage.urlopen", side_effect=http_err):
+    with patch("urllib.request.urlopen", side_effect=http_err):
         content = fetch_webpage_content("https://example.com/404")
         assert "Error reading https://example.com/404: HTTP 404 Not Found" in content
 
 
 def test_fetch_webpage_content_url_error() -> None:
     url_err = URLError("Name or service not known")
-    with patch("evidor.tools.native.read_webpage.urlopen", side_effect=url_err):
+    with patch("urllib.request.urlopen", side_effect=url_err):
         content = fetch_webpage_content("https://nonexistent.domain.xyz")
         assert "Connection error (Name or service not known)" in content
 

@@ -6,7 +6,8 @@ import re
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
+import urllib.request
 
 from ..core.tools import Tool, tool
 
@@ -84,7 +85,7 @@ def fetch_webpage_content(
     )
 
     try:
-        with urlopen(req, timeout=timeout) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             content_type = response.headers.get("Content-Type", "").lower()
             if "pdf" in content_type or "image" in content_type or "octet-stream" in content_type:
                 return f"Error: Cannot read binary content type '{content_type}' at {url}."

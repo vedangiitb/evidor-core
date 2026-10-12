@@ -22,6 +22,16 @@ class EvidenceItem:
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
+    @property
+    def claim(self) -> str:
+        """Alias for :attr:`finding`."""
+        return self.finding
+
+    @property
+    def source_url(self) -> str:
+        """Alias for :attr:`source`."""
+        return self.source
+
     def to_dict(self) -> dict[str, Any]:
         """Convert evidence item to a serializable dictionary."""
         return {
@@ -59,6 +69,11 @@ class ComparisonItem:
     analysis: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    @property
+    def topic_aspect(self) -> str:
+        """Alias for :attr:`aspect`."""
+        return self.aspect
 
     def to_dict(self) -> dict[str, Any]:
         """Convert comparison item to a serializable dictionary."""
