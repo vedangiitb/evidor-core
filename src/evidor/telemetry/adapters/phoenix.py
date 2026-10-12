@@ -132,7 +132,16 @@ class PhoenixSink(OpenTelemetrySink):
                 if event.input_prompt:
                     span.set_attribute("input.value", event.input_prompt)
                 elif event.input_messages:
-                    span.set_attribute("input.value", json.dumps(list(event.input_messages)))
+                    span.set_attribute("input.value", json.dumps(list(event.input_messages), ensure_ascii=False))
+
+                if event.input_messages:
+                    for idx, msg in enumerate(event.input_messages):
+                        if isinstance(msg, dict):
+                            prefix = f"llm.input_messages.{idx}.message"
+                            if "role" in msg and msg["role"]:
+                                span.set_attribute(f"{prefix}.role", str(msg["role"]))
+                            if "content" in msg and msg["content"]:
+                                span.set_attribute(f"{prefix}.content", str(msg["content"]))
 
         elif isinstance(event, ToolCallStartEvent):
             span.set_attribute("tool.name", event.tool_name)
@@ -159,8 +168,32 @@ class PhoenixSink(OpenTelemetrySink):
                     span.set_attribute("output.value", event.output_text)
 
             elif isinstance(event, LLMCallEndEvent):
-                if self._capture_content and event.output_text:
-                    span.set_attribute("output.value", event.output_text)
+                if self._capture_content:
+                    if event.output_text:
+                        span.set_attribute("output.value", event.output_text)
+                    elif event.output_tool_calls:
+                        span.set_attribute(
+                            "output.value",
+                            json.dumps(list(event.output_tool_calls), ensure_ascii=False),
+                        )
+
+                    # OpenInference structured output message attributes
+                    if event.output_text or event.output_tool_calls:
+                        span.set_attribute("llm.output_messages.0.message.role", "assistant")
+                        if event.output_text:
+                            span.set_attribute("llm.output_messages.0.message.content", event.output_text)
+                        for idx, tc in enumerate(event.output_tool_calls):
+                            prefix = f"llm.output_messages.0.message.tool_calls.{idx}.tool_call"
+                            if isinstance(tc, dict):
+                                if tc.get("id"):
+                                    span.set_attribute(f"{prefix}.id", str(tc["id"]))
+                                if tc.get("name"):
+                                    span.set_attribute(f"{prefix}.function.name", str(tc["name"]))
+                                if "arguments" in tc:
+                                    args = tc["arguments"]
+                                    args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
+                                    span.set_attribute(f"{prefix}.function.arguments", args_str)
+
                 if event.token_usage:
                     if event.token_usage.prompt_tokens > 0:
                         span.set_attribute("llm.token_count.prompt", event.token_usage.prompt_tokens)

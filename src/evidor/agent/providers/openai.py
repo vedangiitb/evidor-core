@@ -141,4 +141,21 @@ class OpenAIProvider:
                 tc_args = _safe_parse_tool_arguments(tc.function.arguments)
                 tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=tc_args))
 
-        return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls))
+        usage = None
+        raw_usage = getattr(chat_response, "usage", None)
+        if raw_usage is not None:
+            try:
+                from evidor.telemetry.events import TokenUsage
+
+                prompt_tokens = getattr(raw_usage, "prompt_tokens", 0) or 0
+                completion_tokens = getattr(raw_usage, "completion_tokens", 0) or 0
+                total_tokens = getattr(raw_usage, "total_tokens", 0) or (prompt_tokens + completion_tokens)
+                usage = TokenUsage(
+                    prompt_tokens=int(prompt_tokens),
+                    completion_tokens=int(completion_tokens),
+                    total_tokens=int(total_tokens),
+                )
+            except Exception:
+                pass
+
+        return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls), usage=usage)

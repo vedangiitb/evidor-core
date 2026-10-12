@@ -226,3 +226,62 @@ def test_phoenix_capture_content_false() -> None:
     assert span.attributes.get("evidor.agent.run_id") == "run-phx-redact"
 
 
+def test_phoenix_tool_call_response_enrichment() -> None:
+    """Verify PhoenixSink properly populates output.value and OpenInference output messages when LLM generates tool calls."""
+    tp, exporter = create_phoenix_test_tracer()
+    sink = PhoenixSink(tracer_provider=tp)
+
+    root_ctx = TraceContext.new_root()
+    llm_ctx = root_ctx.child()
+
+    sink.write([
+        LLMCallStartEvent(
+            trace_context=llm_ctx,
+            provider="gemini",
+            model="gemini-2.5-flash",
+            input_prompt="Research python agent frameworks",
+            input_messages=({"role": "user", "content": "Research python agent frameworks"},),
+        ),
+        LLMCallEndEvent(
+            trace_context=llm_ctx,
+            provider="gemini",
+            model="gemini-2.5-flash",
+            status="ok",
+            duration_ms=180.0,
+            token_usage=TokenUsage(prompt_tokens=150, completion_tokens=35, total_tokens=185),
+            output_text="",
+            output_tool_calls=({
+                "id": "call_1",
+                "name": "web_search",
+                "arguments": {"query": "python agent frameworks comparison"},
+            },),
+        ),
+    ])
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    llm_span = spans[0]
+
+    # Verify input messages
+    assert llm_span.attributes.get("input.value") == "Research python agent frameworks"
+    assert llm_span.attributes.get("llm.input_messages.0.message.role") == "user"
+    assert llm_span.attributes.get("llm.input_messages.0.message.content") == "Research python agent frameworks"
+
+    # Verify output.value is populated with tool calls instead of being empty or fallback model JSON
+    output_val = llm_span.attributes.get("output.value")
+    assert output_val is not None
+    assert "web_search" in output_val
+    assert "python agent frameworks comparison" in output_val
+
+    # Verify OpenInference structured tool call output message attributes
+    assert llm_span.attributes.get("llm.output_messages.0.message.role") == "assistant"
+    assert llm_span.attributes.get("llm.output_messages.0.message.tool_calls.0.tool_call.id") == "call_1"
+    assert llm_span.attributes.get("llm.output_messages.0.message.tool_calls.0.tool_call.function.name") == "web_search"
+    assert "python agent frameworks comparison" in llm_span.attributes.get("llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments")
+
+    # Verify token count metrics
+    assert llm_span.attributes.get("llm.token_count.prompt") == 150
+    assert llm_span.attributes.get("llm.token_count.completion") == 35
+    assert llm_span.attributes.get("llm.token_count.total") == 185
+
+

@@ -123,11 +123,23 @@ class GeminiProvider:
                     args = dict(fc.args) if getattr(fc, "args", None) else {}
                     tool_calls.append(ToolCall(id=call_id, name=fc.name or "", arguments=args))
 
-        # Fallback for text if response lacks candidate parts (e.g. mock objects)
-        if not text and not (isinstance(candidates, (list, tuple)) and candidates):
-            raw_text = getattr(response, "text", None)
-            if isinstance(raw_text, str):
-                text = raw_text
+        # Extract token usage metadata if available
+        usage = None
+        usage_metadata = getattr(response, "usage_metadata", None)
+        if usage_metadata is not None:
+            try:
+                from evidor.telemetry.events import TokenUsage
 
-        return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls))
+                prompt_tokens = getattr(usage_metadata, "prompt_token_count", 0) or 0
+                completion_tokens = getattr(usage_metadata, "candidates_token_count", 0) or 0
+                total_tokens = getattr(usage_metadata, "total_token_count", 0) or (prompt_tokens + completion_tokens)
+                usage = TokenUsage(
+                    prompt_tokens=int(prompt_tokens),
+                    completion_tokens=int(completion_tokens),
+                    total_tokens=int(total_tokens),
+                )
+            except Exception:
+                pass
+
+        return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls), usage=usage)
 
