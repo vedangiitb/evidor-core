@@ -587,3 +587,21 @@ def test_agent_send_async_errors_and_expiry() -> None:
         assert "Error executing tool 'faulty_func': broken" in tool_messages[2].content
 
     asyncio.run(_run())
+
+
+def test_agent_handles_empty_assistant_response_gracefully() -> None:
+    class EmptyResponseProvider:
+        def __init__(self) -> None:
+            self.model = "empty-provider"
+
+        def with_model(self, model: str) -> "EmptyResponseProvider":
+            return self
+
+        def generate(self, request: GenerationRequest) -> GenerationResponse:
+            return GenerationResponse(text="", model=self.model)
+
+    agent = Agent(EmptyResponseProvider())
+    resp = agent.send("hello")
+    assert resp.text == ""
+    assert agent.messages[-1].content == "Done."
+

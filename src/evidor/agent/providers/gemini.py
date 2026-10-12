@@ -99,11 +99,15 @@ class GeminiProvider:
             content = getattr(candidate, "content", None)
             parts = getattr(content, "parts", None) or []
             text_chunks: list[str] = []
+            thought_chunks: list[str] = []
             for part in parts:
                 part_text = getattr(part, "text", None)
                 is_thought = getattr(part, "thought", False)
-                if isinstance(part_text, str) and not is_thought:
-                    text_chunks.append(part_text)
+                if isinstance(part_text, str):
+                    if not is_thought:
+                        text_chunks.append(part_text)
+                    else:
+                        thought_chunks.append(part_text)
 
                 fc = getattr(part, "function_call", None)
                 if fc:
@@ -113,6 +117,8 @@ class GeminiProvider:
 
             if text_chunks:
                 text = "".join(text_chunks)
+            elif not tool_calls and thought_chunks:
+                text = "".join(thought_chunks)
 
         # Fallback for tool_calls if not extracted from candidates' parts
         if not tool_calls and getattr(response, "function_calls", None):
