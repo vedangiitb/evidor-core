@@ -93,6 +93,7 @@ class GenerationResponse:
     text: str
     model: str
     tool_calls: tuple[ToolCall, ...] = ()
+    usage: Any = None
 
     def __post_init__(self) -> None:
         if isinstance(self.tool_calls, (list, tuple)):

@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v1.4.4-dev.1 (2026-10-12)
+
+### Bug Fixes
+
+- Adding missing telemetry params
+  ([`e45a37e`](https://github.com/vedangiitb/evidor-core/commit/e45a37ee5ac278b10204550c57adabbc412c32db))
+
+- Fixing magicmock test failure
+  ([`865a2e7`](https://github.com/vedangiitb/evidor-core/commit/865a2e7a0b39dc27215fc9251571c6b868f5093f))
+
+- Resolve gemini warning
+  ([`ae620eb`](https://github.com/vedangiitb/evidor-core/commit/ae620ebf0f02c4ee6350dd474c4e6a233b5b2c39))
+
+
 ## v1.4.3 (2026-10-11)
 
 
