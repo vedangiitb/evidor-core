@@ -147,14 +147,18 @@ class OpenAIProvider:
             try:
                 from evidor.telemetry.events import TokenUsage
 
-                prompt_tokens = getattr(raw_usage, "prompt_tokens", 0) or 0
-                completion_tokens = getattr(raw_usage, "completion_tokens", 0) or 0
-                total_tokens = getattr(raw_usage, "total_tokens", 0) or (prompt_tokens + completion_tokens)
-                usage = TokenUsage(
-                    prompt_tokens=int(prompt_tokens),
-                    completion_tokens=int(completion_tokens),
-                    total_tokens=int(total_tokens),
-                )
+                pt = getattr(raw_usage, "prompt_tokens", None)
+                ct = getattr(raw_usage, "completion_tokens", None)
+                tt = getattr(raw_usage, "total_tokens", None)
+                if isinstance(pt, int) or isinstance(ct, int) or isinstance(tt, int):
+                    prompt_tokens = int(pt) if isinstance(pt, int) else 0
+                    completion_tokens = int(ct) if isinstance(ct, int) else 0
+                    total_tokens = int(tt) if isinstance(tt, int) else (prompt_tokens + completion_tokens)
+                    usage = TokenUsage(
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=total_tokens,
+                    )
             except Exception:
                 pass
 
