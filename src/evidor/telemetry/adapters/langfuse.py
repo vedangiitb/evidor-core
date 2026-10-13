@@ -106,6 +106,8 @@ class LangfuseSink(TelemetrySink):
         tok = getattr(event, "token_usage", None)
         if tok:
             usage = {"input": tok.prompt_tokens, "output": tok.completion_tokens, "total": tok.total_tokens}
+            if getattr(tok, "cached_tokens", 0) > 0:
+                usage["cached"] = tok.cached_tokens
 
         level = "ERROR" if getattr(event, "status", None) == "error" else "DEFAULT"
         err = getattr(event, "error", None)

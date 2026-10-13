@@ -95,7 +95,13 @@ class PrometheusSink(TelemetrySink):
                 self.llm_call_duration_seconds.labels(provider=p, model=m).observe(event.duration_ms / 1000.0)
             if event.token_usage:
                 u = event.token_usage
-                for k, count in (("prompt", u.prompt_tokens), ("completion", u.completion_tokens), ("total", u.total_tokens)):
+                for k, count in (
+                    ("prompt", u.prompt_tokens),
+                    ("completion", u.completion_tokens),
+                    ("total", u.total_tokens),
+                    ("cached", getattr(u, "cached_tokens", 0)),
+                    ("cache_creation", getattr(u, "cache_creation_tokens", 0)),
+                ):
                     if count > 0:
                         self.tokens_total.labels(provider=p, model=m, token_type=k).inc(count)
 

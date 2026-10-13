@@ -19,6 +19,8 @@ from evidor.telemetry.events import (
 from evidor.telemetry.semconv import (
     EVIDOR_AGENT_RUN_ID,
     GEN_AI_SYSTEM,
+    GEN_AI_USAGE_CACHE_READ_TOKENS,
+    GEN_AI_USAGE_CACHE_WRITE_TOKENS,
     GEN_AI_USAGE_TOTAL_TOKENS,
     OPENINFERENCE_SPAN_KIND,
     SPAN_KIND_AGENT,
@@ -49,6 +51,17 @@ def test_token_usage() -> None:
     assert usage.prompt_tokens == 100
     assert usage.completion_tokens == 50
     assert usage.total_tokens == 150
+    assert usage.cached_tokens == 0
+    assert usage.cache_creation_tokens == 0
+
+    cached_usage = TokenUsage.from_counts(
+        prompt_tokens=100,
+        completion_tokens=50,
+        cached_tokens=80,
+        cache_creation_tokens=20,
+    )
+    assert cached_usage.cached_tokens == 80
+    assert cached_usage.cache_creation_tokens == 20
 
     # Immutability
     with pytest.raises(AttributeError):
@@ -95,7 +108,7 @@ def test_llm_call_events() -> None:
     assert start_attrs["llm.input_prompt"] == "What is the weather?"
     assert start_attrs["llm.input_messages"] == [{"role": "user", "content": "What is the weather?"}]
 
-    usage = TokenUsage.from_counts(40, 60)
+    usage = TokenUsage.from_counts(40, 60, cached_tokens=30, cache_creation_tokens=10)
     end = LLMCallEndEvent(
         trace_context=ctx,
         provider="openai",
@@ -108,6 +121,8 @@ def test_llm_call_events() -> None:
     )
     end_attrs = end.to_attributes()
     assert end_attrs[GEN_AI_USAGE_TOTAL_TOKENS] == 100
+    assert end_attrs[GEN_AI_USAGE_CACHE_READ_TOKENS] == 30
+    assert end_attrs[GEN_AI_USAGE_CACHE_WRITE_TOKENS] == 10
     assert end_attrs["duration_ms"] == 500.0
     assert end_attrs["llm.output_text"] == "The weather is sunny."
     assert end_attrs["llm.output_tool_calls"] == [{"name": "get_weather", "arguments": {"city": "Paris"}}]
