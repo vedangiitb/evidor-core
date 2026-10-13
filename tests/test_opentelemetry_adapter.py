@@ -227,3 +227,35 @@ def test_opentelemetry_capture_content_false() -> None:
     assert span.attributes["evidor.agent.run_id"] == "run_redact"
 
 
+def test_opentelemetry_summarization_span_name_and_attribute() -> None:
+    tracer_provider, exporter = create_test_tracer()
+    sink = OpenTelemetrySink(tracer_provider=tracer_provider)
+
+    ctx = TraceContext.new_root()
+    start_event = LLMCallStartEvent(
+        trace_context=ctx,
+        provider="anthropic",
+        model="claude-3-5-sonnet",
+        call_type="summarization",
+        input_prompt="Summarize earlier turns",
+    )
+    end_event = LLMCallEndEvent(
+        trace_context=ctx,
+        provider="anthropic",
+        model="claude-3-5-sonnet",
+        call_type="summarization",
+        status="ok",
+        output_text="Summarized context",
+    )
+
+    sink.write([start_event, end_event])
+    sink.flush()
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.name == "llm.summarize"
+    assert span.attributes["evidor.call_type"] == "summarization"
+    assert span.attributes["gen_ai.system"] == "anthropic"
+
+

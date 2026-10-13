@@ -38,4 +38,5 @@ EVIDOR_RETRY_COUNT: Final[str] = "evidor.retry.count"
 EVIDOR_RETRY_OUTCOME: Final[str] = "evidor.retry.outcome"
 EVIDOR_RETRY_DELAY_SECONDS: Final[str] = "evidor.retry.delay_seconds"
 EVIDOR_RETRY_MAX: Final[str] = "evidor.retry.max"
+EVIDOR_CALL_TYPE: Final[str] = "evidor.call_type"
 

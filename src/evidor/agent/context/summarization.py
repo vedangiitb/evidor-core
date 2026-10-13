@@ -6,8 +6,9 @@ from ..providers.base import ModelProvider
 
 
 SUMMARY_INSTRUCTION = (
-    "Summarize the conversation below for a future assistant turn. "
-    "Synthesize the existing summary (if present) and subsequent conversation turns into an updated, concise summary. "
+    "Summarize the conversation dialog below for a future assistant turn. "
+    "Do NOT summarize or duplicate any system instructions, developer guidelines, or persona definitions. "
+    "Focus strictly on user requests, factual decisions, tool invocations, key data, and pending tasks. "
     "CRITICAL REQUIREMENT: You MUST preserve all established user goals, project names, credentials, keys, "
     "constraints, decisions, and factual details from earlier turns. Do not drop previously stated facts. "
     "Be concise but thorough regarding facts."
@@ -31,6 +32,9 @@ class ConversationSummarizer:
     def _build_request(self, messages: Sequence[Message]) -> GenerationRequest:
         transcript_lines: list[str] = []
         for message in messages:
+            if message.role == "system" and not message.is_summary:
+                # Do NOT include the agent's permanent system instructions in the summarizer's transcript
+                continue
             if message.is_summary:
                 clean_content = message.content.removeprefix("Conversation summary:").strip()
                 transcript_lines.append(f"[PREVIOUS SUMMARY OF EARLIER CONVERSATION]:\n{clean_content}")

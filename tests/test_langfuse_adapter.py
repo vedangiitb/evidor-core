@@ -229,3 +229,28 @@ def test_langfuse_capture_content_false() -> None:
     assert "output" not in update_kwargs or update_kwargs["output"] is None
 
 
+def test_langfuse_summarization_observation_name() -> None:
+    mock_client = MagicMock()
+    mock_obs = MagicMock()
+    mock_client.start_observation.return_value = mock_obs
+
+    sink = LangfuseSink(client=mock_client)
+    ctx = TraceContext.new_root()
+
+    sink.write([
+        LLMCallStartEvent(
+            trace_context=ctx,
+            provider="anthropic",
+            model="claude-3-5-sonnet",
+            call_type="summarization",
+            input_prompt="Summarize earlier dialog",
+        )
+    ])
+
+    assert mock_client.start_observation.call_count == 1
+    call = mock_client.start_observation.call_args[1]
+    assert call["name"] == "llm.summarize"
+    assert call["metadata"]["call_type"] == "summarization"
+    assert call["metadata"]["provider"] == "anthropic"
+
+

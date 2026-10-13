@@ -26,7 +26,14 @@ from ..telemetry import (
 )
 from ..tools import Tool
 from ..tools.core.tool_executor import ToolExecutor
-from .context.context import DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_MESSAGES, ConversationContext
+from .context.context import (
+    DEFAULT_CHAIN_MILESTONES,
+    DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_HIGH_WATER_RATIO,
+    DEFAULT_LOW_WATER_RATIO,
+    DEFAULT_MAX_MESSAGES,
+    ConversationContext,
+)
 from .context.history import ConversationHistory
 from .context.summarization import ConversationSummarizer, resolve_summary_provider
 from .providers.base import ModelProvider
@@ -47,6 +54,9 @@ class Agent:
         system_prompt: str | None = None,
         context_window: int = DEFAULT_CONTEXT_WINDOW,
         max_messages: int = DEFAULT_MAX_MESSAGES,
+        high_water_ratio: float = DEFAULT_HIGH_WATER_RATIO,
+        low_water_ratio: float = DEFAULT_LOW_WATER_RATIO,
+        chain_milestones: bool = DEFAULT_CHAIN_MILESTONES,
         summarization_model: str | ModelProvider | None = None,
         telemetry: TelemetryRuntime | TelemetrySink | Sequence[TelemetrySink] | None = None,
         retry_config: RetryConfig | bool | None = DEFAULT_RETRY_CONFIG,
@@ -57,10 +67,20 @@ class Agent:
         self._summary_provider = resolve_summary_provider(provider, summarization_model)
         self._summarizer = ConversationSummarizer(
             self._summary_provider,
-            generate_fn=lambda req: self._generate_with_telemetry(req, provider=self._summary_provider),
-            generate_async_fn=lambda req: self._generate_with_telemetry_async(req, provider=self._summary_provider),
+            generate_fn=lambda req: self._generate_with_telemetry(
+                req, provider=self._summary_provider, call_type="summarization"
+            ),
+            generate_async_fn=lambda req: self._generate_with_telemetry_async(
+                req, provider=self._summary_provider, call_type="summarization"
+            ),
         )
-        self._context = ConversationContext(context_window, max_messages)
+        self._context = ConversationContext(
+            context_window=context_window,
+            max_messages=max_messages,
+            high_water_ratio=high_water_ratio,
+            low_water_ratio=low_water_ratio,
+            chain_milestones=chain_milestones,
+        )
         self._system_prompt = system_prompt
         self._history = ConversationHistory(system_prompt)
         # Retained for compatibility with callers that inspect or seed test history.
@@ -176,6 +196,7 @@ class Agent:
         model_name: str,
         request: GenerationRequest,
         attempt: int,
+        call_type: str = "generation",
     ) -> None:
         input_messages = tuple({"role": m.role, "content": m.content} for m in request.messages)
         emit_event(
@@ -183,6 +204,7 @@ class Agent:
                 trace_context=llm_ctx,
                 provider=provider_name,
                 model=model_name,
+                call_type=call_type,
                 messages_count=len(request.messages),
                 tools_count=len(request.tools),
                 input_prompt=request.prompt,
@@ -199,6 +221,7 @@ class Agent:
         response: GenerationResponse,
         duration_ms: float,
         attempt: int,
+        call_type: str = "generation",
     ) -> None:
         output_tool_calls = tuple(
             {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
@@ -210,6 +233,7 @@ class Agent:
                 trace_context=llm_ctx,
                 provider=provider_name,
                 model=response.model or model_name,
+                call_type=call_type,
                 status="ok",
                 duration_ms=duration_ms,
                 token_usage=token_usage,
@@ -231,6 +255,7 @@ class Agent:
         max_retries: int,
         is_retryable: bool,
         delay: float | None = None,
+        call_type: str = "generation",
     ) -> None:
         err_msg = str(err)
         if attempt < max_retries and is_retryable and delay is not None:
@@ -269,6 +294,7 @@ class Agent:
                 trace_context=llm_ctx,
                 provider=provider_name,
                 model=model_name,
+                call_type=call_type,
                 status="error",
                 duration_ms=duration_ms,
                 error=err_msg,
@@ -280,6 +306,7 @@ class Agent:
         self,
         request: GenerationRequest,
         provider: ModelProvider | None = None,
+        call_type: str = "generation",
     ) -> GenerationResponse:
         target_provider = provider if provider is not None else self._provider
         provider_name = getattr(target_provider, "__class__", type(target_provider)).__name__
@@ -289,7 +316,7 @@ class Agent:
 
         for attempt in range(total_attempts):
             llm_ctx = create_child_trace_context()
-            self._emit_llm_start(llm_ctx, provider_name, model_name, request, attempt)
+            self._emit_llm_start(llm_ctx, provider_name, model_name, request, attempt, call_type=call_type)
             t0 = time.perf_counter()
             with trace_scope(llm_ctx):
                 # Narrow retry boundary: strictly wrap target_provider.generate
@@ -301,25 +328,45 @@ class Agent:
                     if attempt < max_retries and is_retryable:
                         delay = calculate_backoff_delay(attempt, self._retry_config, err)
                         self._emit_llm_error(
-                            llm_ctx, provider_name, model_name, err, duration_ms, attempt, max_retries, is_retryable, delay
+                            llm_ctx,
+                            provider_name,
+                            model_name,
+                            err,
+                            duration_ms,
+                            attempt,
+                            max_retries,
+                            is_retryable,
+                            delay,
+                            call_type=call_type,
                         )
                         self._retry_config.sleep_fn(delay)
                         continue
                     else:
                         self._emit_llm_error(
-                            llm_ctx, provider_name, model_name, err, duration_ms, attempt, max_retries, is_retryable
+                            llm_ctx,
+                            provider_name,
+                            model_name,
+                            err,
+                            duration_ms,
+                            attempt,
+                            max_retries,
+                            is_retryable,
+                            call_type=call_type,
                         )
                         raise
 
                 # Provider call succeeded; response processing & success telemetry are outside retry block
                 duration_ms = (time.perf_counter() - t0) * 1000
-                self._emit_llm_success(llm_ctx, provider_name, model_name, response, duration_ms, attempt)
+                self._emit_llm_success(
+                    llm_ctx, provider_name, model_name, response, duration_ms, attempt, call_type=call_type
+                )
                 return response
 
     async def _generate_with_telemetry_async(
         self,
         request: GenerationRequest,
         provider: ModelProvider | None = None,
+        call_type: str = "generation",
     ) -> GenerationResponse:
         target_provider = provider if provider is not None else self._provider
         provider_name = getattr(target_provider, "__class__", type(target_provider)).__name__
@@ -329,7 +376,7 @@ class Agent:
 
         for attempt in range(total_attempts):
             llm_ctx = create_child_trace_context()
-            self._emit_llm_start(llm_ctx, provider_name, model_name, request, attempt)
+            self._emit_llm_start(llm_ctx, provider_name, model_name, request, attempt, call_type=call_type)
             t0 = time.perf_counter()
             with trace_scope(llm_ctx):
                 # Narrow retry boundary: strictly wrap target_provider.generate
@@ -341,7 +388,16 @@ class Agent:
                     if attempt < max_retries and is_retryable:
                         delay = calculate_backoff_delay(attempt, self._retry_config, err)
                         self._emit_llm_error(
-                            llm_ctx, provider_name, model_name, err, duration_ms, attempt, max_retries, is_retryable, delay
+                            llm_ctx,
+                            provider_name,
+                            model_name,
+                            err,
+                            duration_ms,
+                            attempt,
+                            max_retries,
+                            is_retryable,
+                            delay,
+                            call_type=call_type,
                         )
                         sleep_res = self._retry_config.sleep_async_fn(delay)
                         if asyncio.iscoroutine(sleep_res) or hasattr(sleep_res, "__await__"):
@@ -349,13 +405,23 @@ class Agent:
                         continue
                     else:
                         self._emit_llm_error(
-                            llm_ctx, provider_name, model_name, err, duration_ms, attempt, max_retries, is_retryable
+                            llm_ctx,
+                            provider_name,
+                            model_name,
+                            err,
+                            duration_ms,
+                            attempt,
+                            max_retries,
+                            is_retryable,
+                            call_type=call_type,
                         )
                         raise
 
                 # Provider call succeeded; response processing & success telemetry are outside retry block
                 duration_ms = (time.perf_counter() - t0) * 1000
-                self._emit_llm_success(llm_ctx, provider_name, model_name, response, duration_ms, attempt)
+                self._emit_llm_success(
+                    llm_ctx, provider_name, model_name, response, duration_ms, attempt, call_type=call_type
+                )
                 return response
 
 

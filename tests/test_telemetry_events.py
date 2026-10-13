@@ -18,6 +18,7 @@ from evidor.telemetry.events import (
 )
 from evidor.telemetry.semconv import (
     EVIDOR_AGENT_RUN_ID,
+    EVIDOR_CALL_TYPE,
     GEN_AI_SYSTEM,
     GEN_AI_USAGE_CACHE_READ_TOKENS,
     GEN_AI_USAGE_CACHE_WRITE_TOKENS,
@@ -105,6 +106,7 @@ def test_llm_call_events() -> None:
     start_attrs = start.to_attributes()
     assert start_attrs[OPENINFERENCE_SPAN_KIND] == SPAN_KIND_LLM
     assert start_attrs[GEN_AI_SYSTEM] == "openai"
+    assert start_attrs[EVIDOR_CALL_TYPE] == "generation"
     assert start_attrs["llm.input_prompt"] == "What is the weather?"
     assert start_attrs["llm.input_messages"] == [{"role": "user", "content": "What is the weather?"}]
 
@@ -113,6 +115,7 @@ def test_llm_call_events() -> None:
         trace_context=ctx,
         provider="openai",
         model="gpt-4o",
+        call_type="summarization",
         status="ok",
         duration_ms=500.0,
         token_usage=usage,
@@ -120,6 +123,7 @@ def test_llm_call_events() -> None:
         output_tool_calls=[{"name": "get_weather", "arguments": {"city": "Paris"}}],
     )
     end_attrs = end.to_attributes()
+    assert end_attrs[EVIDOR_CALL_TYPE] == "summarization"
     assert end_attrs[GEN_AI_USAGE_TOTAL_TOKENS] == 100
     assert end_attrs[GEN_AI_USAGE_CACHE_READ_TOKENS] == 30
     assert end_attrs[GEN_AI_USAGE_CACHE_WRITE_TOKENS] == 10

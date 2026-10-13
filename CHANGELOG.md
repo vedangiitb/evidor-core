@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.6.1-dev.1 (2026-10-13)
+
+### Bug Fixes
+
+- Adding tagging for summarization llm requests
+  ([`280d36d`](https://github.com/vedangiitb/evidor-core/commit/280d36def317babcdb08b8c1edf76826e9dd3ae6))
+
+
 ## v1.6.0 (2026-10-13)
 
 

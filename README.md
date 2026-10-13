@@ -53,24 +53,30 @@ response = agent.send("How does a TCP handshake work?")
 print(response.text)
 ```
 
-### Context Window Management & Compaction
+### Context Window Management & Cache-Aware Summarization
 
 `Agent` automatically manages message history to stay within token and message limits using `ConversationContext`:
 
 ```python
-from evidor import DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_MESSAGES, Agent, OpenAIProvider
+from evidor import Agent, OpenAIProvider
 
 agent = Agent(
     OpenAIProvider(model="gpt-4.1-mini"),
-    context_window=16_000,  # Max token budget (default: 16,000)
+    context_window=32_000,  # Max token budget (default: 32,000)
     max_messages=50,        # Max messages retained before compaction (default: 50)
+    high_water_ratio=0.85,  # Trigger compaction at 85% capacity (default: 0.85)
+    low_water_ratio=0.45,   # Batch-prune down to 45% capacity (default: 0.45)
+    chain_milestones=True,  # Retain milestone summaries as immutable prefix (default: True)
 )
 ```
 
-When conversation history exceeds `max_messages` or the estimated token budget:
-- Older messages are automatically summarized using the configured model provider.
-- The summary is injected as a bounded summary message (`Message(role="system", ..., is_summary=True)`).
-- The permanent system prompt and recent conversational turns remain intact.
+#### Summarization Strategy
+
+Evidor uses a prompt-cache-friendly compaction strategy designed to sustain high cache hit rates:
+- **Generational Hysteresis (Batch Pruning)**: Rather than evicting one message per turn (which repeatedly invalidates KV prefix caches), compaction triggers only when the conversation reaches `high_water_ratio` (85%) and batch-prunes down to `low_water_ratio` (45%). This creates a wide turn buffer where subsequent turns are strictly append-only.
+- **Append-Only Milestone Chaining (`chain_milestones=True`)**: Prior milestone summaries are kept immutable at the head of the context rather than being rewritten. Because the prefix remains identical, provider prompt caching (Anthropic, Gemini, OpenAI) hits the cache for earlier conversation turns.
+- **System Isolation**: Permanent system instructions and developer guidelines are excluded from the summarizer transcript, preventing persona duplication or instruction bleed into dialog summaries.
+- **Recent Dialog Preserved**: The most recent conversational turns and tool outputs remain intact as raw messages for full fidelity.
 
 ### Configurable Summarization Model
 
@@ -916,3 +922,4 @@ Releases are performed by GitHub Actions and use Conventional Commits to select 
 - `feat!: ...` or a `BREAKING CHANGE:` footer creates a major release.
 
 Pushes to `dev` publish `-dev.N` prereleases to TestPyPI. Pushes to `main` publish stable releases to PyPI. Configure `TEST_PYPI_API_TOKEN` as a repository or `dev` environment secret, and configure PyPI trusted publishing for the `prod` environment before enabling the workflow.
+
