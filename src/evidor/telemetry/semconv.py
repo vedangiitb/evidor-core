@@ -14,6 +14,8 @@ GEN_AI_RESPONSE_MODEL: Final[str] = "gen_ai.response.model"
 GEN_AI_USAGE_INPUT_TOKENS: Final[str] = "gen_ai.usage.input_tokens"
 GEN_AI_USAGE_OUTPUT_TOKENS: Final[str] = "gen_ai.usage.output_tokens"
 GEN_AI_USAGE_TOTAL_TOKENS: Final[str] = "gen_ai.usage.total_tokens"
+GEN_AI_USAGE_CACHE_READ_TOKENS: Final[str] = "gen_ai.usage.cache_read_tokens"
+GEN_AI_USAGE_CACHE_WRITE_TOKENS: Final[str] = "gen_ai.usage.cache_creation_tokens"
 
 # --- OpenInference Semantic Conventions ---
 OPENINFERENCE_SPAN_KIND: Final[str] = "openinference.span.kind"

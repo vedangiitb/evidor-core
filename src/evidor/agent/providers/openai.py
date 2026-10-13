@@ -20,6 +20,40 @@ def _safe_parse_tool_arguments(raw_args: Any) -> dict[str, Any]:
         return {"__raw_args__": raw_args, "__decode_error__": str(err)}
 
 
+def _parse_openai_usage(raw_usage: Any) -> Any:
+    if raw_usage is None:
+        return None
+    try:
+        from evidor.telemetry.events import TokenUsage
+
+        pt = getattr(raw_usage, "prompt_tokens", None)
+        ct = getattr(raw_usage, "completion_tokens", None)
+        tt = getattr(raw_usage, "total_tokens", None)
+        if isinstance(pt, int) or isinstance(ct, int) or isinstance(tt, int):
+            prompt_tokens = int(pt) if isinstance(pt, int) else 0
+            completion_tokens = int(ct) if isinstance(ct, int) else 0
+            total_tokens = int(tt) if isinstance(tt, int) else (prompt_tokens + completion_tokens)
+
+            cached_tokens = 0
+            pt_details = getattr(raw_usage, "prompt_tokens_details", None)
+            if pt_details is not None:
+                cached_tokens = getattr(pt_details, "cached_tokens", 0) or 0
+                if not cached_tokens:
+                    cached_tokens = getattr(pt_details, "prompt_cache_hit_tokens", 0) or 0
+            if not cached_tokens:
+                cached_tokens = getattr(raw_usage, "prompt_cache_hit_tokens", 0) or 0
+
+            return TokenUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                cached_tokens=int(cached_tokens) if isinstance(cached_tokens, int) else 0,
+            )
+    except Exception:
+        pass
+    return None
+
+
 class OpenAIProvider:
     def __init__(self, model: str, api_key: str | None = None) -> None:
         self._model = model
@@ -43,6 +77,7 @@ class OpenAIProvider:
         # Build tools if provided
         openai_tools: list[dict[str, Any]] | None = None
         if request.tools:
+            sorted_tools = sorted(request.tools, key=lambda t: t.name)
             openai_tools = [
                 {
                     "type": "function",
@@ -52,7 +87,7 @@ class OpenAIProvider:
                         "parameters": t.parameters,
                     },
                 }
-                for t in request.tools
+                for t in sorted_tools
             ]
 
         # Use Responses API if available on client (e.g. experimental/mocked responses)
@@ -99,7 +134,8 @@ class OpenAIProvider:
                     args = _safe_parse_tool_arguments(item.arguments)
                     call_id = getattr(item, "call_id", None) or getattr(item, "id", f"call_{len(tool_calls)+1}")
                     tool_calls.append(ToolCall(id=call_id, name=item.name, arguments=args))
-            return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls))
+            usage = _parse_openai_usage(getattr(response, "usage", None))
+            return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls), usage=usage)
 
         # Standard Chat Completions API
         chat_messages: list[dict[str, Any]] = []
@@ -141,25 +177,6 @@ class OpenAIProvider:
                 tc_args = _safe_parse_tool_arguments(tc.function.arguments)
                 tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=tc_args))
 
-        usage = None
-        raw_usage = getattr(chat_response, "usage", None)
-        if raw_usage is not None:
-            try:
-                from evidor.telemetry.events import TokenUsage
-
-                pt = getattr(raw_usage, "prompt_tokens", None)
-                ct = getattr(raw_usage, "completion_tokens", None)
-                tt = getattr(raw_usage, "total_tokens", None)
-                if isinstance(pt, int) or isinstance(ct, int) or isinstance(tt, int):
-                    prompt_tokens = int(pt) if isinstance(pt, int) else 0
-                    completion_tokens = int(ct) if isinstance(ct, int) else 0
-                    total_tokens = int(tt) if isinstance(tt, int) else (prompt_tokens + completion_tokens)
-                    usage = TokenUsage(
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        total_tokens=total_tokens,
-                    )
-            except Exception:
-                pass
+        usage = _parse_openai_usage(getattr(chat_response, "usage", None))
 
         return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls), usage=usage)

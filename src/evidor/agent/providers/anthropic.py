@@ -6,17 +6,33 @@ from evidor.models import GenerationRequest, GenerationResponse, ToolCall
 
 
 class AnthropicProvider:
-    def __init__(self, model: str, api_key: str | None = None, max_tokens: int = 1024) -> None:
+    def __init__(
+        self,
+        model: str,
+        api_key: str | None = None,
+        max_tokens: int = 1024,
+        enable_prompt_caching: bool = True,
+    ) -> None:
         self._model = model
         self._api_key = api_key
         self._max_tokens = max_tokens
+        self._enable_prompt_caching = enable_prompt_caching
 
     @property
     def model(self) -> str:
         return self._model
 
+    @property
+    def enable_prompt_caching(self) -> bool:
+        return self._enable_prompt_caching
+
     def with_model(self, model: str) -> "AnthropicProvider":
-        return AnthropicProvider(model=model, api_key=self._api_key, max_tokens=self._max_tokens)
+        return AnthropicProvider(
+            model=model,
+            api_key=self._api_key,
+            max_tokens=self._max_tokens,
+            enable_prompt_caching=self._enable_prompt_caching,
+        )
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
         try:
@@ -64,14 +80,18 @@ class AnthropicProvider:
             "messages": formatted_messages,
         }
 
+        if self._enable_prompt_caching:
+            kwargs["cache_control"] = {"type": "ephemeral"}
+
         if request.tools:
+            sorted_tools = sorted(request.tools, key=lambda t: t.name)
             kwargs["tools"] = [
                 {
                     "name": t.name,
                     "description": t.description,
                     "input_schema": t.parameters,
                 }
-                for t in request.tools
+                for t in sorted_tools
             ]
 
         response_msg = client.messages.create(**kwargs)
@@ -92,8 +112,34 @@ class AnthropicProvider:
                     )
                 )
 
+        usage = None
+        raw_usage = getattr(response_msg, "usage", None)
+        if raw_usage is not None:
+            try:
+                from evidor.telemetry.events import TokenUsage
+
+                it = getattr(raw_usage, "input_tokens", None)
+                ot = getattr(raw_usage, "output_tokens", None)
+                cache_read = getattr(raw_usage, "cache_read_input_tokens", 0) or 0
+                cache_write = getattr(raw_usage, "cache_creation_input_tokens", 0) or 0
+
+                if isinstance(it, int) or isinstance(ot, int):
+                    prompt_tokens = (int(it) if isinstance(it, int) else 0) + cache_read
+                    completion_tokens = int(ot) if isinstance(ot, int) else 0
+                    total_tokens = prompt_tokens + completion_tokens
+                    usage = TokenUsage(
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=total_tokens,
+                        cached_tokens=cache_read,
+                        cache_creation_tokens=cache_write,
+                    )
+            except Exception:
+                pass
+
         return GenerationResponse(
             text="".join(text_parts),
             model=self._model,
             tool_calls=tuple(tool_calls),
+            usage=usage,
         )

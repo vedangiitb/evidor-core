@@ -64,13 +64,24 @@ class TokenUsage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cached_tokens: int = 0
+    cache_creation_tokens: int = 0
 
     @classmethod
-    def from_counts(cls, prompt_tokens: int = 0, completion_tokens: int = 0) -> TokenUsage:
+    def from_counts(
+        cls,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        *,
+        cached_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+    ) -> TokenUsage:
         return cls(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens,
+            cached_tokens=cached_tokens,
+            cache_creation_tokens=cache_creation_tokens,
         )
 
 
@@ -210,6 +221,10 @@ class LLMCallEndEvent(TelemetryEvent):
             attrs[semconv.GEN_AI_USAGE_INPUT_TOKENS] = self.token_usage.prompt_tokens
             attrs[semconv.GEN_AI_USAGE_OUTPUT_TOKENS] = self.token_usage.completion_tokens
             attrs[semconv.GEN_AI_USAGE_TOTAL_TOKENS] = self.token_usage.total_tokens
+            if self.token_usage.cached_tokens > 0:
+                attrs[semconv.GEN_AI_USAGE_CACHE_READ_TOKENS] = self.token_usage.cached_tokens
+            if self.token_usage.cache_creation_tokens > 0:
+                attrs[semconv.GEN_AI_USAGE_CACHE_WRITE_TOKENS] = self.token_usage.cache_creation_tokens
         if self.error:
             attrs[semconv.ERROR_MESSAGE] = self.error
         return attrs

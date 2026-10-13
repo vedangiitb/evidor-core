@@ -73,11 +73,13 @@ def test_openai_provider_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_anthropic_provider_properties_and_with_model() -> None:
     provider = AnthropicProvider(model="claude-3-5", api_key="ant-key", max_tokens=2048)
     assert provider.model == "claude-3-5"
+    assert provider.enable_prompt_caching is True
 
     new_provider = provider.with_model("claude-3-haiku")
     assert new_provider.model == "claude-3-haiku"
     assert new_provider._api_key == "ant-key"
     assert new_provider._max_tokens == 2048
+    assert new_provider.enable_prompt_caching is True
 
 
 def test_anthropic_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,6 +111,7 @@ def test_anthropic_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
         max_tokens=500,
         system="sys instruction",
         messages=[{"role": "user", "content": "hello"}],
+        cache_control={"type": "ephemeral"},
     )
 
 
@@ -585,4 +588,190 @@ def test_openai_provider_handles_malformed_tool_arguments(monkeypatch: pytest.Mo
     assert len(resp.tool_calls) == 1
     assert "__decode_error__" in resp.tool_calls[0].arguments
     assert resp.tool_calls[0].arguments["__raw_args__"] == "{unclosed json"
+
+
+# --- Prompt Caching Tests ---
+
+
+def test_anthropic_provider_prompt_caching(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+    mock_text_block = MagicMock(type="text", text="cached response")
+    mock_usage = MagicMock(
+        input_tokens=50,
+        output_tokens=25,
+        cache_read_input_tokens=1000,
+        cache_creation_input_tokens=200,
+    )
+    mock_response = MagicMock(content=[mock_text_block], usage=mock_usage)
+    mock_client.messages.create.return_value = mock_response
+    mock_anthropic.Anthropic = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    tool_b = Tool(name="b_tool", description="Tool B", parameters={}, func=lambda: "b")
+    tool_a = Tool(name="a_tool", description="Tool A", parameters={}, func=lambda: "a")
+
+    provider = AnthropicProvider(model="claude-3-5-sonnet", enable_prompt_caching=True)
+    assert provider.enable_prompt_caching is True
+
+    copied = provider.with_model("claude-3-5-haiku")
+    assert copied.enable_prompt_caching is True
+
+    req = GenerationRequest(
+        messages=[
+            Message(role="system", content="System instructions"),
+            Message(role="user", content="Turn 1 prompt"),
+            Message(role="assistant", content="Turn 1 reply"),
+            Message(role="user", content="Turn 2 prompt"),
+        ],
+        tools=[tool_b, tool_a],
+    )
+
+    resp = provider.generate(req)
+    assert resp.text == "cached response"
+    assert resp.usage is not None
+    assert resp.usage.prompt_tokens == 1050
+    assert resp.usage.completion_tokens == 25
+    assert resp.usage.cached_tokens == 1000
+    assert resp.usage.cache_creation_tokens == 200
+
+    create_kwargs = mock_client.messages.create.call_args.kwargs
+    # Top-level automatic caching
+    assert create_kwargs["cache_control"] == {"type": "ephemeral"}
+    assert create_kwargs["system"] == "System instructions"
+    assert len(create_kwargs["tools"]) == 2
+    assert create_kwargs["tools"][0]["name"] == "a_tool"
+    assert create_kwargs["tools"][1]["name"] == "b_tool"
+
+    messages = create_kwargs["messages"]
+    assert len(messages) == 3
+    assert messages[0]["content"] == "Turn 1 prompt"
+    assert messages[1]["content"] == "Turn 1 reply"
+    assert messages[2]["content"] == "Turn 2 prompt"
+
+
+def test_anthropic_provider_disable_prompt_caching(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = MagicMock(content=[MagicMock(type="text", text="ok")], usage=None)
+    mock_anthropic.Anthropic = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(model="claude-3-5", enable_prompt_caching=False)
+    assert provider.enable_prompt_caching is False
+
+    req = GenerationRequest(
+        messages=[
+            Message(role="user", content="hello"),
+        ]
+    )
+    provider.generate(req)
+
+    call_kwargs = mock_client.messages.create.call_args.kwargs
+    assert "cache_control" not in call_kwargs
+
+
+def test_openai_provider_prompt_caching_and_tool_sorting(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_openai = types.ModuleType("openai")
+    mock_client = MagicMock(spec=["chat"])
+    mock_usage = MagicMock(
+        prompt_tokens=1200,
+        completion_tokens=50,
+        total_tokens=1250,
+        prompt_tokens_details=MagicMock(cached_tokens=1024),
+    )
+    mock_choice = MagicMock(message=MagicMock(content="OpenAI reply", tool_calls=None))
+    mock_response = MagicMock(choices=[mock_choice], usage=mock_usage)
+    mock_client.chat.completions.create.return_value = mock_response
+    mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    tool_z = Tool(name="z_tool", description="Z", parameters={}, func=lambda: "z")
+    tool_a = Tool(name="a_tool", description="A", parameters={}, func=lambda: "a")
+
+    provider = OpenAIProvider(model="gpt-4o")
+    req = GenerationRequest(
+        messages=[Message(role="user", content="hello")],
+        tools=[tool_z, tool_a],
+    )
+    resp = provider.generate(req)
+
+    assert resp.text == "OpenAI reply"
+    assert resp.usage is not None
+    assert resp.usage.prompt_tokens == 1200
+    assert resp.usage.cached_tokens == 1024
+
+    create_kwargs = mock_client.chat.completions.create.call_args.kwargs
+    tools = create_kwargs["tools"]
+    assert tools[0]["function"]["name"] == "a_tool"
+    assert tools[1]["function"]["name"] == "z_tool"
+
+
+def test_openai_provider_deepseek_cached_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_openai = types.ModuleType("openai")
+    mock_client = MagicMock(spec=["chat"])
+    mock_usage = MagicMock(
+        prompt_tokens=1500,
+        completion_tokens=100,
+        total_tokens=1600,
+        prompt_tokens_details=MagicMock(cached_tokens=0, prompt_cache_hit_tokens=1400),
+    )
+    mock_response = MagicMock(choices=[MagicMock(message=MagicMock(content="DeepSeek reply", tool_calls=None))], usage=mock_usage)
+    mock_client.chat.completions.create.return_value = mock_response
+    mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    provider = OpenAIProvider(model="deepseek-chat")
+    resp = provider.generate(GenerationRequest(prompt="hi"))
+
+    assert resp.usage is not None
+    assert resp.usage.prompt_tokens == 1500
+    assert resp.usage.cached_tokens == 1400
+
+
+def test_gemini_provider_prompt_caching_and_cached_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_google = types.ModuleType("google")
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    mock_types.Content = MagicMock(side_effect=lambda role, parts: {"role": role, "parts": parts})  # type: ignore[attr-defined]
+    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
+    mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
+    mock_types.GenerateContentConfig = MagicMock(side_effect=lambda **kwargs: kwargs)  # type: ignore[attr-defined]
+    mock_types.HttpOptions = MagicMock(side_effect=lambda **kw: {"http_options": kw})  # type: ignore[attr-defined]
+    mock_types.HttpRetryOptions = MagicMock(side_effect=lambda **kw: {"retry_options": kw})  # type: ignore[attr-defined]
+
+    mock_usage = MagicMock(
+        prompt_token_count=2000,
+        candidates_token_count=150,
+        total_token_count=2150,
+        cached_content_token_count=1800,
+    )
+    mock_client = MagicMock()
+    mock_response = MagicMock(text="Gemini cached reply", usage_metadata=mock_usage, candidates=None, function_calls=None)
+    mock_client.models.generate_content.return_value = mock_response
+    mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    mock_genai.types = mock_types  # type: ignore[attr-defined]
+    mock_google.genai = mock_genai  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google", mock_google)
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-1.5-pro", cached_content="cachedContents/abc123xyz")
+    assert provider.cached_content == "cachedContents/abc123xyz"
+
+    copied = provider.with_model("gemini-2.5-pro")
+    assert copied.cached_content == "cachedContents/abc123xyz"
+
+    resp = provider.generate(GenerationRequest(prompt="hello cached gemini"))
+
+    assert resp.text == "Gemini cached reply"
+    assert resp.usage is not None
+    assert resp.usage.prompt_tokens == 2000
+    assert resp.usage.cached_tokens == 1800
+
+    config_call = mock_client.models.generate_content.call_args.kwargs["config"]
+    assert config_call["cached_content"] == "cachedContents/abc123xyz"
+
 

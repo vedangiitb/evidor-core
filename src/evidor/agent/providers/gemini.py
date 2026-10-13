@@ -6,16 +6,30 @@ from evidor.models import GenerationRequest, GenerationResponse, ToolCall
 
 
 class GeminiProvider:
-    def __init__(self, model: str, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        api_key: str | None = None,
+        cached_content: str | None = None,
+    ) -> None:
         self._model = model
         self._api_key = api_key
+        self._cached_content = cached_content
 
     @property
     def model(self) -> str:
         return self._model
 
+    @property
+    def cached_content(self) -> str | None:
+        return self._cached_content
+
     def with_model(self, model: str) -> "GeminiProvider":
-        return GeminiProvider(model=model, api_key=self._api_key)
+        return GeminiProvider(
+            model=model,
+            api_key=self._api_key,
+            cached_content=self._cached_content,
+        )
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
         try:
@@ -55,23 +69,26 @@ class GeminiProvider:
 
         gemini_tools: list[Any] | None = None
         if request.tools:
+            sorted_tools = sorted(request.tools, key=lambda t: t.name)
             declarations = [
                 types.FunctionDeclaration(
                     name=t.name,
                     description=t.description,
                     parameters=t.parameters,
                 )
-                for t in request.tools
+                for t in sorted_tools
             ]
             gemini_tools = [types.Tool(function_declarations=declarations)]
 
         config = None
-        if system_prompt or gemini_tools:
+        if system_prompt or gemini_tools or self._cached_content:
             config_kwargs: dict[str, Any] = {}
             if system_prompt:
                 config_kwargs["system_instruction"] = system_prompt
             if gemini_tools:
                 config_kwargs["tools"] = gemini_tools
+            if self._cached_content:
+                config_kwargs["cached_content"] = self._cached_content
             config = types.GenerateContentConfig(**config_kwargs)
 
         http_options = None
@@ -145,6 +162,7 @@ class GeminiProvider:
                 pt = getattr(usage_metadata, "prompt_token_count", None)
                 ct = getattr(usage_metadata, "candidates_token_count", None)
                 tt = getattr(usage_metadata, "total_token_count", None)
+                cached_tokens = getattr(usage_metadata, "cached_content_token_count", 0) or 0
                 if isinstance(pt, int) or isinstance(ct, int) or isinstance(tt, int):
                     prompt_tokens = int(pt) if isinstance(pt, int) else 0
                     completion_tokens = int(ct) if isinstance(ct, int) else 0
@@ -153,6 +171,7 @@ class GeminiProvider:
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
                         total_tokens=total_tokens,
+                        cached_tokens=int(cached_tokens) if isinstance(cached_tokens, int) else 0,
                     )
             except Exception:
                 pass
