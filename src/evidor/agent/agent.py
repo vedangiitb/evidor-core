@@ -26,7 +26,14 @@ from ..telemetry import (
 )
 from ..tools import Tool
 from ..tools.core.tool_executor import ToolExecutor
-from .context.context import DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_MESSAGES, ConversationContext
+from .context.context import (
+    DEFAULT_CHAIN_MILESTONES,
+    DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_HIGH_WATER_RATIO,
+    DEFAULT_LOW_WATER_RATIO,
+    DEFAULT_MAX_MESSAGES,
+    ConversationContext,
+)
 from .context.history import ConversationHistory
 from .context.summarization import ConversationSummarizer, resolve_summary_provider
 from .providers.base import ModelProvider
@@ -47,6 +54,9 @@ class Agent:
         system_prompt: str | None = None,
         context_window: int = DEFAULT_CONTEXT_WINDOW,
         max_messages: int = DEFAULT_MAX_MESSAGES,
+        high_water_ratio: float = DEFAULT_HIGH_WATER_RATIO,
+        low_water_ratio: float = DEFAULT_LOW_WATER_RATIO,
+        chain_milestones: bool = DEFAULT_CHAIN_MILESTONES,
         summarization_model: str | ModelProvider | None = None,
         telemetry: TelemetryRuntime | TelemetrySink | Sequence[TelemetrySink] | None = None,
         retry_config: RetryConfig | bool | None = DEFAULT_RETRY_CONFIG,
@@ -60,7 +70,13 @@ class Agent:
             generate_fn=lambda req: self._generate_with_telemetry(req, provider=self._summary_provider),
             generate_async_fn=lambda req: self._generate_with_telemetry_async(req, provider=self._summary_provider),
         )
-        self._context = ConversationContext(context_window, max_messages)
+        self._context = ConversationContext(
+            context_window=context_window,
+            max_messages=max_messages,
+            high_water_ratio=high_water_ratio,
+            low_water_ratio=low_water_ratio,
+            chain_milestones=chain_milestones,
+        )
         self._system_prompt = system_prompt
         self._history = ConversationHistory(system_prompt)
         # Retained for compatibility with callers that inspect or seed test history.

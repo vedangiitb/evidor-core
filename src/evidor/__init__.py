@@ -1,7 +1,13 @@
 """Minimal, provider-agnostic LLM harness."""
 
 from .agent import Agent
-from .agent.context.context import DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_MESSAGES
+from .agent.context.context import (
+    DEFAULT_CHAIN_MILESTONES,
+    DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_HIGH_WATER_RATIO,
+    DEFAULT_LOW_WATER_RATIO,
+    DEFAULT_MAX_MESSAGES,
+)
 from .agent.providers import AnthropicProvider, GeminiProvider, ModelProvider, OpenAIProvider
 from .mcp import (
     HTTPServerConfig,
@@ -64,7 +70,10 @@ __all__ = [
     "clean_html",
     "ComparisonItem",
     "ConsoleSink",
+    "DEFAULT_CHAIN_MILESTONES",
     "DEFAULT_CONTEXT_WINDOW",
+    "DEFAULT_HIGH_WATER_RATIO",
+    "DEFAULT_LOW_WATER_RATIO",
     "DEFAULT_MAX_MESSAGES",
     "DEFAULT_RETRY_CONFIG",
     "EvidenceItem",
