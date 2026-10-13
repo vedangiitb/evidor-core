@@ -73,8 +73,15 @@ class LangfuseSink(TelemetrySink):
             params["metadata"]["run_id"] = event.run_id
         elif isinstance(event, LLMCallStartEvent):
             inp = event.input_prompt or (list(event.input_messages) if event.input_messages else None)
-            params.update(name=f"llm.{event.model}" if event.model else "llm.call", as_type="generation", model=event.model, input=inp)
+            span_name = (
+                "llm.summarize"
+                if getattr(event, "call_type", "generation") == "summarization"
+                else (f"llm.{event.model}" if event.model else "llm.call")
+            )
+            params.update(name=span_name, as_type="generation", model=event.model, input=inp)
             params["metadata"]["provider"] = event.provider
+            if getattr(event, "call_type", None):
+                params["metadata"]["call_type"] = event.call_type
         elif isinstance(event, ToolCallStartEvent):
             params.update(name=f"tool.{event.tool_name}", as_type="tool", input=event.arguments)
             params["metadata"]["tool_call_id"] = event.tool_call_id

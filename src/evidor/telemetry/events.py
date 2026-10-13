@@ -158,6 +158,7 @@ class LLMCallStartEvent(TelemetryEvent):
 
     provider: str
     model: str
+    call_type: str = "generation"
     messages_count: int = 0
     tools_count: int = 0
     input_messages: tuple[dict[str, Any], ...] = ()
@@ -173,6 +174,7 @@ class LLMCallStartEvent(TelemetryEvent):
         attrs[semconv.OPENINFERENCE_SPAN_KIND] = semconv.SPAN_KIND_LLM
         attrs[semconv.GEN_AI_SYSTEM] = self.provider
         attrs[semconv.GEN_AI_REQUEST_MODEL] = self.model
+        attrs[semconv.EVIDOR_CALL_TYPE] = self.call_type
         attrs["llm.messages_count"] = self.messages_count
         attrs["llm.tools_count"] = self.tools_count
         if self.retry_attempt > 0:
@@ -190,6 +192,7 @@ class LLMCallEndEvent(TelemetryEvent):
 
     provider: str
     model: str
+    call_type: str = "generation"
     status: SpanStatus = "ok"
     duration_ms: float = 0.0
     token_usage: TokenUsage | None = None
@@ -208,6 +211,7 @@ class LLMCallEndEvent(TelemetryEvent):
         attrs[semconv.OPENINFERENCE_SPAN_KIND] = semconv.SPAN_KIND_LLM
         attrs[semconv.GEN_AI_SYSTEM] = self.provider
         attrs[semconv.GEN_AI_RESPONSE_MODEL] = self.model
+        attrs[semconv.EVIDOR_CALL_TYPE] = self.call_type
         attrs["status"] = self.status
         attrs["duration_ms"] = self.duration_ms
         attrs["llm.tool_calls_count"] = self.tool_calls_count

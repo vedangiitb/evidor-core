@@ -107,6 +107,8 @@ class OpenTelemetrySink(TelemetrySink):
         if isinstance(event, (AgentRunStartEvent, AgentRunEndEvent)):
             return "agent.run"
         if isinstance(event, (LLMCallStartEvent, LLMCallEndEvent)):
+            if getattr(event, "call_type", "generation") == "summarization":
+                return "llm.summarize"
             return f"llm.{event.model}" if event.model else "llm.call"
         if isinstance(event, (ToolCallStartEvent, ToolCallEndEvent)):
             return f"tool.{event.tool_name}" if event.tool_name else "tool.call"

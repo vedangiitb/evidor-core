@@ -382,3 +382,48 @@ def test_sink_capture_content_false_redacts_pii() -> None:
     assert end_agent.status == "ok"
 
 
+def test_agent_summarization_telemetry_tagging() -> None:
+    sink = InMemorySink()
+    provider = MockProvider([
+        GenerationResponse(text="reply 1", model="mock-model"),
+        GenerationResponse(text="reply 2", model="mock-model"),
+        GenerationResponse(text="summary text", model="mock-model"),  # summarizer response
+        GenerationResponse(text="reply 3", model="mock-model"),        # turn 3 response
+    ])
+
+    agent = Agent(provider=provider, max_messages=3, telemetry=sink)
+    agent.send("msg 1")
+    agent.send("msg 2")
+    agent.send("msg 3")  # Triggers compaction!
+
+    agent.close()
+
+    llm_starts = [e for e in sink.events if isinstance(e, LLMCallStartEvent)]
+    llm_ends = [e for e in sink.events if isinstance(e, LLMCallEndEvent)]
+
+    # 4 total LLM calls: 1 for msg 1, 1 for msg 2, 1 for summarization on msg 3, 1 for msg 3 dialog
+    assert len(llm_starts) == 4
+    assert len(llm_ends) == 4
+
+    # msg 1
+    assert llm_starts[0].call_type == "generation"
+    assert llm_ends[0].call_type == "generation"
+
+    # msg 2
+    assert llm_starts[1].call_type == "generation"
+    assert llm_ends[1].call_type == "generation"
+
+    # msg 3 summarization call
+    assert llm_starts[2].call_type == "summarization"
+    assert llm_starts[2].to_attributes()["evidor.call_type"] == "summarization"
+    assert llm_ends[2].call_type == "summarization"
+    assert llm_ends[2].to_attributes()["evidor.call_type"] == "summarization"
+
+    # msg 3 dialog turn call
+    assert llm_starts[3].call_type == "generation"
+    assert llm_starts[3].to_attributes()["evidor.call_type"] == "generation"
+    assert llm_ends[3].call_type == "generation"
+    assert llm_ends[3].to_attributes()["evidor.call_type"] == "generation"
+
+
+
