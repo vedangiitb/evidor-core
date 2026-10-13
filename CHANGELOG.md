@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.6.0-dev.1 (2026-10-13)
+
+### Features
+
+- Enable prompt caching with telemetry
+  ([`172ff90`](https://github.com/vedangiitb/evidor-core/commit/172ff90b198b56e5e908e316f0b4dc13e1313c97))
+
+
 ## v1.5.0 (2026-10-12)
 
 
