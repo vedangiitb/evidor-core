@@ -5,6 +5,67 @@ from typing import Any
 from evidor.models import GenerationRequest, GenerationResponse, ToolCall
 
 
+def _sanitize_gemini_schema(schema: Any, types_mod: Any) -> Any:
+    """Sanitize a JSON schema dictionary for Google GenAI types.Schema.
+
+    google-genai Schema models use extra='forbid'. Remove vendor extensions (e.g. x-*)
+    and unsupported meta-schema keys ($schema, $id, $comment) to avoid ValidationError.
+    """
+    if not isinstance(schema, dict):
+        if isinstance(schema, list):
+            return [_sanitize_gemini_schema(item, types_mod) for item in schema]
+        return schema
+
+    allowed_keys = getattr(types_mod, "_ALLOWED_SCHEMA_KEYS", None)
+    if allowed_keys is None:
+        schema_model = getattr(types_mod, "Schema", None)
+        if schema_model and hasattr(schema_model, "model_fields"):
+            allowed_keys = set(schema_model.model_fields.keys())
+            allowed_keys.update(f.alias for f in schema_model.model_fields.values() if f.alias)
+        else:
+            allowed_keys = {
+                "type", "format", "title", "description", "default", "nullable",
+                "enum", "properties", "required", "items", "all_of", "allOf",
+                "any_of", "anyOf", "one_of", "oneOf", "not",
+                "maximum", "minimum", "exclusive_maximum", "exclusiveMaximum",
+                "exclusive_minimum", "exclusiveMinimum",
+                "max_length", "maxLength", "min_length", "minLength",
+                "pattern", "max_items", "maxItems", "min_items", "minItems",
+                "unique_items", "uniqueItems", "max_properties", "maxProperties",
+                "min_properties", "minProperties", "additional_properties", "additionalProperties",
+                "defs", "$defs", "ref", "$ref", "example", "property_ordering", "propertyOrdering"
+            }
+        try:
+            types_mod._ALLOWED_SCHEMA_KEYS = allowed_keys
+        except Exception:
+            pass
+
+    cleaned: dict[str, Any] = {}
+    for k, v in schema.items():
+        if k == "$ref":
+            k = "ref"
+        elif k in ("$defs", "definitions"):
+            k = "defs"
+        elif k == "examples" and "example" not in schema and isinstance(v, list) and v:
+            cleaned["example"] = v[0]
+            continue
+
+        if k == "properties" and isinstance(v, dict):
+            cleaned["properties"] = {
+                prop_name: _sanitize_gemini_schema(prop_s, types_mod)
+                for prop_name, prop_s in v.items()
+            }
+        elif k == "defs" and isinstance(v, dict):
+            cleaned["defs"] = {
+                d_name: _sanitize_gemini_schema(d_s, types_mod)
+                for d_name, d_s in v.items()
+            }
+        elif k in allowed_keys:
+            cleaned[k] = _sanitize_gemini_schema(v, types_mod)
+
+    return cleaned
+
+
 class GeminiProvider:
     def __init__(
         self,
@@ -74,7 +135,7 @@ class GeminiProvider:
                 types.FunctionDeclaration(
                     name=t.name,
                     description=t.description,
-                    parameters=t.parameters,
+                    parameters=_sanitize_gemini_schema(t.parameters, types) if t.parameters else None,
                 )
                 for t in sorted_tools
             ]
