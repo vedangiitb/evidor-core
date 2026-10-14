@@ -1,5 +1,6 @@
 import sys
 import types
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -424,6 +425,91 @@ def test_gemini_provider_tools_and_function_calls(monkeypatch: pytest.MonkeyPatc
     resp = provider.generate(request)
     assert resp.text == "Looking it up"
     assert resp.tool_calls == (ToolCall(id="call_gemini_1", name="lookup", arguments={"id": 42}),)
+
+
+def test_gemini_provider_sanitizes_vendor_mcp_extensions_in_tool_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_google = types.ModuleType("google")
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    captured_params: dict[str, Any] = {}
+
+    def mock_function_declaration(name: str, description: str, parameters: Any) -> str:
+        captured_params[name] = parameters
+        return f"fd:{name}"
+
+    mock_types.Content = MagicMock(side_effect=lambda role, parts: {"role": role, "parts": parts})  # type: ignore[attr-defined]
+    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
+    mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
+    mock_types.FunctionDeclaration = MagicMock(side_effect=mock_function_declaration)  # type: ignore[attr-defined]
+    mock_types.Tool = MagicMock(side_effect=lambda function_declarations: f"tool:{function_declarations}")  # type: ignore[attr-defined]
+    mock_types.GenerateContentConfig = MagicMock(side_effect=lambda **kwargs: kwargs)  # type: ignore[attr-defined]
+
+    mock_response = MagicMock(text="Triage done", candidates=[])
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = mock_response
+    mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    mock_genai.types = mock_types  # type: ignore[attr-defined]
+    mock_google.genai = mock_genai  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google", mock_google)
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-2.5-flash")
+    tool_def = Tool(
+        name="github_mcp_tool",
+        description="GitHub tool",
+        parameters={
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "x-custom-meta": "value",
+            "properties": {
+                "owner": {
+                    "type": "string",
+                    "x-mcp-header": "owner",
+                    "description": "Repo owner",
+                },
+                "repo": {
+                    "type": "string",
+                    "x-mcp-header": "repo",
+                },
+                "issue_fields": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "value": {
+                                "type": ["string", "number", "boolean"],
+                                "description": "The field value",
+                            }
+                        },
+                    },
+                },
+            },
+            "required": ["owner", "repo"],
+        },
+        func=lambda owner, repo, issue_fields=None: "ok",
+    )
+    request = GenerationRequest(
+        messages=[Message(role="user", content="triage")],
+        tools=(tool_def,),
+    )
+    resp = provider.generate(request)
+    assert resp.text == "Triage done"
+
+    sanitized = captured_params["github_mcp_tool"]
+    assert "$schema" not in sanitized
+    assert "x-custom-meta" not in sanitized
+    assert "x-mcp-header" not in sanitized["properties"]["owner"]
+    assert "x-mcp-header" not in sanitized["properties"]["repo"]
+    assert sanitized["properties"]["owner"]["description"] == "Repo owner"
+
+    # Multi-type list ['string', 'number', 'boolean'] should be converted to anyOf
+    value_schema = sanitized["properties"]["issue_fields"]["items"]["properties"]["value"]
+    assert "type" not in value_schema
+    assert value_schema["anyOf"] == [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]
+    assert value_schema["description"] == "The field value"
 
 
 def test_gemini_provider_function_call_via_candidates(monkeypatch: pytest.MonkeyPatch) -> None:

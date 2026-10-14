@@ -47,8 +47,18 @@ from .semconv import (
     SPAN_KIND_LLM,
     SPAN_KIND_TOOL,
 )
-from .adapters import LangfuseSink, OpenTelemetrySink, PhoenixSink, PrometheusSink
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .adapters import LangfuseSink, OpenTelemetrySink, PhoenixSink, PrometheusSink
 from .sink import ConsoleSink, InMemorySink, TelemetrySink
+
+_ADAPTER_EXPORTS = {
+    "LangfuseSink": ".adapters.langfuse",
+    "OpenTelemetrySink": ".adapters.opentelemetry",
+    "PhoenixSink": ".adapters.phoenix",
+    "PrometheusSink": ".adapters.prometheus",
+}
 
 __all__ = [
     # Trace Context and Base Types
@@ -110,4 +120,20 @@ __all__ = [
     "EVIDOR_RETRY_MAX",
     "EVIDOR_RETRY_OUTCOME",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in _ADAPTER_EXPORTS:
+        import importlib
+
+        module = importlib.import_module(_ADAPTER_EXPORTS[name], __package__)
+        val = getattr(module, name)
+        globals()[name] = val
+        return val
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals().keys()) | set(__all__))
+
 

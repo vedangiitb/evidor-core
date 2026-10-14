@@ -27,7 +27,14 @@ def _serialize_mcp_result(result: Any) -> str:
     if isinstance(result, str):
         return result
 
-    is_error = getattr(result, "is_error", False) or getattr(result, "isError", False)
+    if hasattr(result, "is_error"):
+        is_error = bool(result.is_error)
+    elif isinstance(result, dict):
+        is_error = bool(result.get("is_error", result.get("isError", False)))
+    elif hasattr(result, "isError"):
+        is_error = bool(result.isError)
+    else:
+        is_error = False
     content = getattr(result, "content", None)
     parts: list[str] = []
 

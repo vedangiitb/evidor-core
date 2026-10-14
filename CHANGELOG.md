@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.6.2-dev.1 (2026-10-14)
+
+### Bug Fixes
+
+- **mcp**: Mcp arg passing issues
+  ([`ac5d807`](https://github.com/vedangiitb/evidor-core/commit/ac5d8072208cc3bebb8382f5b45f5c9243d50a15))
+
+
 ## v1.6.1 (2026-10-13)
 
 
