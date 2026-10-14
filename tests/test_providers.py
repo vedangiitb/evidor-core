@@ -474,10 +474,22 @@ def test_gemini_provider_sanitizes_vendor_mcp_extensions_in_tool_schema(monkeypa
                     "type": "string",
                     "x-mcp-header": "repo",
                 },
+                "issue_fields": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "value": {
+                                "type": ["string", "number", "boolean"],
+                                "description": "The field value",
+                            }
+                        },
+                    },
+                },
             },
             "required": ["owner", "repo"],
         },
-        func=lambda owner, repo: "ok",
+        func=lambda owner, repo, issue_fields=None: "ok",
     )
     request = GenerationRequest(
         messages=[Message(role="user", content="triage")],
@@ -492,6 +504,12 @@ def test_gemini_provider_sanitizes_vendor_mcp_extensions_in_tool_schema(monkeypa
     assert "x-mcp-header" not in sanitized["properties"]["owner"]
     assert "x-mcp-header" not in sanitized["properties"]["repo"]
     assert sanitized["properties"]["owner"]["description"] == "Repo owner"
+
+    # Multi-type list ['string', 'number', 'boolean'] should be converted to anyOf
+    value_schema = sanitized["properties"]["issue_fields"]["items"]["properties"]["value"]
+    assert "type" not in value_schema
+    assert value_schema["anyOf"] == [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]
+    assert value_schema["description"] == "The field value"
 
 
 def test_gemini_provider_function_call_via_candidates(monkeypatch: pytest.MonkeyPatch) -> None:

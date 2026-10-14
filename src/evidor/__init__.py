@@ -28,18 +28,30 @@ from .retry import (
 )
 
 
-from .telemetry import (
+from typing import TYPE_CHECKING, Any
 
+from .telemetry import (
     ConsoleSink,
     InMemorySink,
-    LangfuseSink,
-    OpenTelemetrySink,
-    PhoenixSink,
-    PrometheusSink,
     TelemetryRuntime,
     TelemetrySink,
     TraceContext,
 )
+
+if TYPE_CHECKING:
+    from .telemetry import (
+        LangfuseSink,
+        OpenTelemetrySink,
+        PhoenixSink,
+        PrometheusSink,
+    )
+
+_LAZY_EXPORTS = {
+    "LangfuseSink": ".telemetry",
+    "OpenTelemetrySink": ".telemetry",
+    "PhoenixSink": ".telemetry",
+    "PrometheusSink": ".telemetry",
+}
 from .tools import (
     BraveSearchProvider,
     calculator,
@@ -117,3 +129,19 @@ __all__ = [
     "WebSearchProvider",
     "web_search",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LAZY_EXPORTS:
+        import importlib
+
+        module = importlib.import_module(_LAZY_EXPORTS[name], __package__)
+        val = getattr(module, name)
+        globals()[name] = val
+        return val
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals().keys()) | set(__all__))
+
