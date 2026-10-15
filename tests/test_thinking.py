@@ -796,7 +796,7 @@ def test_gemini_provider_function_call_thought_signature_replay(monkeypatch: pyt
         candidates=[MagicMock(content=MagicMock(parts=[final_text_part]))],
         usage_metadata=None,
     )
-    mock_client.models.generate_content.side_effect = [mock_resp_1, mock_resp_2]
+    mock_client.models.generate_content.side_effect = [mock_resp_1, mock_resp_2, mock_resp_2]
     mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
@@ -846,7 +846,6 @@ def test_gemini_provider_function_call_thought_signature_replay(monkeypatch: pyt
         Message(role="assistant", content="", tool_calls=res_1.tool_calls, thought_blocks=(deserialized_fc_block,)),
         Message(role="tool", content="42", tool_call_id=res_1.tool_calls[0].id, name="execute_code"),
     ]
-    mock_client.models.generate_content.return_value = mock_resp_2
     provider.generate(GenerationRequest(messages=messages_deserialized))
 
     replayed_contents = mock_client.models.generate_content.call_args.kwargs["contents"]
