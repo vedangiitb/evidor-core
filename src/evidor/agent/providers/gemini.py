@@ -179,27 +179,85 @@ class GeminiProvider:
                 contents.append(types.Content(role="user", parts=[part]))
             elif message.role == "assistant":
                 parts: list[Any] = []
+                replayed_fc_counts: dict[str, int] = {}
                 if message.thought_blocks:
                     for tb in message.thought_blocks:
-                        if hasattr(tb, "text") and getattr(tb, "thought", False):
+                        if hasattr(tb, "function_call") and tb.function_call:
                             parts.append(tb)
-                        elif isinstance(tb, dict) and tb.get("thought", False):
-                            tb_text = tb.get("text", "")
+                            fc_name = getattr(tb.function_call, "name", None)
+                            if fc_name:
+                                replayed_fc_counts[fc_name] = replayed_fc_counts.get(fc_name, 0) + 1
+                        elif hasattr(tb, "text") and getattr(tb, "thought", False):
+                            parts.append(tb)
+                        elif isinstance(tb, dict):
+                            raw_p = tb.get("_raw_part")
+                            if raw_p is not None and (hasattr(raw_p, "function_call") or hasattr(raw_p, "text")):
+                                parts.append(raw_p)
+                                if hasattr(raw_p, "function_call") and raw_p.function_call:
+                                    fc_name = getattr(raw_p.function_call, "name", None)
+                                    if fc_name:
+                                        replayed_fc_counts[fc_name] = replayed_fc_counts.get(fc_name, 0) + 1
+                                continue
+
                             tb_sig = tb.get("thought_signature") or tb.get("thoughtSignature")
-                            try:
-                                if tb_sig is not None:
-                                    p = types.Part(text=tb_text, thought=True, thought_signature=tb_sig)
-                                else:
-                                    p = types.Part(text=tb_text, thought=True)
-                            except Exception:
-                                p = types.Part.from_text(text=tb_text)
-                                p.thought = True
-                                if tb_sig is not None:
+                            is_fc = (
+                                tb.get("type") == "function_call"
+                                or "function_call" in tb
+                                or (("name" in tb or "args" in tb) and not tb.get("thought", False))
+                            )
+                            if is_fc:
+                                fc_name = tb.get("name") or (
+                                    tb["function_call"].get("name")
+                                    if isinstance(tb.get("function_call"), dict)
+                                    else ""
+                                )
+                                fc_args = tb.get("args") or (
+                                    tb["function_call"].get("args")
+                                    if isinstance(tb.get("function_call"), dict)
+                                    else {}
+                                )
+                                p = None
+                                try:
+                                    p = types.Part.from_function_call(name=fc_name, args=fc_args)
+                                    if tb_sig is not None:
+                                        p.thought_signature = tb_sig
+                                except Exception:
                                     try:
-                                        setattr(p, "thought_signature", tb_sig)
+                                        fc_cls = getattr(types, "FunctionCall", None)
+                                        fc_obj = fc_cls(name=fc_name, args=fc_args) if fc_cls else None
+                                        p = types.Part(function_call=fc_obj, thought_signature=tb_sig)
                                     except Exception:
-                                        pass
-                            parts.append(p)
+                                        p = types.Part.from_text(text="")
+                                        setattr(p, "function_call", {"name": fc_name, "args": fc_args})
+                                        if tb_sig is not None:
+                                            setattr(p, "thought_signature", tb_sig)
+                                if p is not None:
+                                    parts.append(p)
+                                    if fc_name:
+                                        replayed_fc_counts[fc_name] = replayed_fc_counts.get(fc_name, 0) + 1
+                            elif tb.get("thought", False) or tb.get("type") == "thought" or ("text" in tb and tb_sig is not None):
+                                tb_text = tb.get("text", "")
+                                try:
+                                    if tb_sig is not None:
+                                        p = types.Part(text=tb_text, thought=True, thought_signature=tb_sig)
+                                    else:
+                                        p = types.Part(text=tb_text, thought=True)
+                                except Exception:
+                                    p = types.Part.from_text(text=tb_text)
+                                    p.thought = True
+                                    if tb_sig is not None:
+                                        try:
+                                            setattr(p, "thought_signature", tb_sig)
+                                        except Exception:
+                                            pass
+                                parts.append(p)
+                            elif tb_sig is not None:
+                                try:
+                                    p = types.Part(thought_signature=tb_sig)
+                                except Exception:
+                                    p = types.Part.from_text(text="")
+                                    setattr(p, "thought_signature", tb_sig)
+                                parts.append(p)
                         elif hasattr(tb, "text") or hasattr(tb, "function_call"):
                             parts.append(tb)
                 if message.content and not parts:
@@ -208,9 +266,12 @@ class GeminiProvider:
                     getattr(p, "text", None) == message.content and not getattr(p, "thought", False) for p in parts
                 ):
                     parts.append(types.Part.from_text(text=message.content))
-                if message.tool_calls and not any(getattr(p, "function_call", None) for p in parts):
+                if message.tool_calls:
                     for tc in message.tool_calls:
-                        parts.append(types.Part.from_function_call(name=tc.name, args=tc.arguments))
+                        if replayed_fc_counts.get(tc.name, 0) > 0:
+                            replayed_fc_counts[tc.name] -= 1
+                        else:
+                            parts.append(types.Part.from_function_call(name=tc.name, args=tc.arguments))
                 contents.append(types.Content(role="model", parts=parts))
             else:
                 contents.append(
@@ -293,31 +354,45 @@ class GeminiProvider:
             for part in parts:
                 part_text = getattr(part, "text", None)
                 is_thought = getattr(part, "thought", False)
+                sig = getattr(part, "thought_signature", None) or getattr(part, "thoughtSignature", None)
                 if isinstance(part_text, str):
                     if not is_thought:
                         text_chunks.append(part_text)
                     else:
                         thought_chunks.append(part_text)
 
-                if (
-                    is_thought
-                    or getattr(part, "thought_signature", None)
-                    or getattr(part, "thoughtSignature", None)
-                ):
-                    sig = getattr(part, "thought_signature", None) or getattr(part, "thoughtSignature", None)
-                    tb_dict: dict[str, Any] = {
-                        "text": part_text or "",
-                        "thought": True,
-                    }
-                    if sig is not None:
-                        tb_dict["thought_signature"] = sig
-                    thought_blocks.append(tb_dict)
-
                 fc = getattr(part, "function_call", None)
                 if fc:
                     call_id = getattr(fc, "id", None) or f"call_{len(tool_calls)+1}"
                     args = dict(fc.args) if getattr(fc, "args", None) else {}
                     tool_calls.append(ToolCall(id=call_id, name=fc.name or "", arguments=args))
+                    if sig is not None:
+                        fc_dict: dict[str, Any] = {
+                            "type": "function_call",
+                            "name": fc.name or "",
+                            "args": args,
+                            "thought_signature": sig,
+                            "_raw_part": part,
+                        }
+                        thought_blocks.append(fc_dict)
+                elif is_thought:
+                    tb_dict: dict[str, Any] = {
+                        "type": "thought",
+                        "text": part_text or "",
+                        "thought": True,
+                        "_raw_part": part,
+                    }
+                    if sig is not None:
+                        tb_dict["thought_signature"] = sig
+                    thought_blocks.append(tb_dict)
+                elif sig is not None:
+                    gen_dict: dict[str, Any] = {
+                        "thought_signature": sig,
+                        "_raw_part": part,
+                    }
+                    if part_text:
+                        gen_dict["text"] = part_text
+                    thought_blocks.append(gen_dict)
 
             if text_chunks:
                 text = "".join(text_chunks)

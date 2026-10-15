@@ -30,6 +30,7 @@ class OpenAIThinkingConfig(ThinkingConfig):
     """Configuration for OpenAI reasoning models (o1, o3-mini, etc.)."""
 
     effort: ThinkingEffort = "medium"
+    summary: str | None = None
 
     def validate(self) -> None:
         pass

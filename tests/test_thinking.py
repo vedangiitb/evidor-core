@@ -542,8 +542,19 @@ def test_openai_thinking_forward_compatible_models() -> None:
 def test_openai_responses_api_thinking_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_openai = types.ModuleType("openai")
     mock_client = MagicMock()
-    # Configure Responses API mock
-    mock_reasoning_item = MagicMock(type="reasoning", summary="Responses API deliberate steps")
+
+    class FakeReasoningSummaryText:
+        def __init__(self, text: str, type: str = "text") -> None:
+            self.text = text
+            self.type = type
+
+    # Responses API reasoning output returns summary as a list of structured objects
+    mock_summary_part = FakeReasoningSummaryText(text="Responses API deliberate steps")
+    mock_reasoning_item = MagicMock(
+        type="reasoning",
+        summary=[mock_summary_part],
+        content=[],
+    )
     mock_text_item = MagicMock(type="message")
     mock_resp = MagicMock(
         output=[mock_reasoning_item, mock_text_item],
@@ -569,7 +580,31 @@ def test_openai_responses_api_thinking_extraction(monkeypatch: pytest.MonkeyPatc
     assert res.usage.reasoning_tokens == 80
 
     call_kwargs = mock_client.responses.create.call_args.kwargs
-    assert call_kwargs["reasoning_effort"] == "high"
+    assert call_kwargs["reasoning"] == {"effort": "high"}
+    assert "reasoning_effort" not in call_kwargs
+
+
+def test_openai_responses_api_with_summary_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_openai = types.ModuleType("openai")
+    mock_client = MagicMock()
+    mock_resp = MagicMock(
+        output=[],
+        output_text="Done",
+        usage=None,
+    )
+    mock_client.responses.create.return_value = mock_resp
+    mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    provider = OpenAIProvider(
+        model="o3-mini",
+        thinking=OpenAIThinkingConfig(effort="low", summary="auto"),
+    )
+    provider.generate(GenerationRequest(prompt="Summarized steps"))
+
+    call_kwargs = mock_client.responses.create.call_args.kwargs
+    assert call_kwargs["reasoning"] == {"effort": "low", "summary": "auto"}
+    assert "reasoning_effort" not in call_kwargs
 
 
 def test_openai_chat_completions_reasoning_content_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -698,5 +733,127 @@ def test_gemini_multiturn_thought_signature_preservation(monkeypatch: pytest.Mon
     assert th_part.thought is True
     assert th_part.text == "Internal Gemini reasoning..."
     assert th_part.thought_signature == b"crypto_gemini_sig_xyz"
+
+
+def test_gemini_provider_function_call_thought_signature_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    class FakeFunctionCall:
+        def __init__(self, name: str, args: dict[str, Any]) -> None:
+            self.name = name
+            self.args = args
+
+    class FakePart:
+        def __init__(
+            self,
+            text: str | None = None,
+            thought: bool | None = None,
+            thought_signature: Any = None,
+            function_call: Any = None,
+        ) -> None:
+            self.text = text
+            self.thought = thought
+            self.thought_signature = thought_signature
+            self.function_call = function_call
+
+        @classmethod
+        def from_text(cls, text: str) -> "FakePart":
+            return cls(text=text)
+
+        @classmethod
+        def from_function_call(cls, name: str, args: dict[str, Any]) -> "FakePart":
+            return cls(function_call=FakeFunctionCall(name=name, args=args))
+
+        @classmethod
+        def from_function_response(cls, name: str, response: dict[str, Any]) -> "FakePart":
+            p = cls()
+            setattr(p, "function_response", {"name": name, "response": response})
+            return p
+
+    class FakeContent:
+        def __init__(self, role: str, parts: list[Any]) -> None:
+            self.role = role
+            self.parts = parts
+
+    mock_types.Part = FakePart  # type: ignore[attr-defined]
+    mock_types.Content = FakeContent  # type: ignore[attr-defined]
+    mock_types.GenerateContentConfig = MagicMock()  # type: ignore[attr-defined]
+    mock_types.ThinkingConfig = MagicMock()  # type: ignore[attr-defined]
+
+    mock_client = MagicMock()
+    # Turn 1: Model response has a function call part with thought_signature directly attached to it
+    fc_part = FakePart.from_function_call(name="execute_code", args={"code": "print(42)"})
+    fc_part.thought_signature = b"gemini_fc_sig_binary_999"
+
+    mock_resp_1 = MagicMock(
+        candidates=[MagicMock(content=MagicMock(parts=[fc_part]))],
+        usage_metadata=None,
+    )
+    # Turn 2: Final response text
+    final_text_part = FakePart.from_text("Output: 42")
+    mock_resp_2 = MagicMock(
+        candidates=[MagicMock(content=MagicMock(parts=[final_text_part]))],
+        usage_metadata=None,
+    )
+    mock_client.models.generate_content.side_effect = [mock_resp_1, mock_resp_2]
+    mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-2.5-flash")
+
+    # Turn 1 execution
+    res_1 = provider.generate(GenerationRequest(prompt="Run code"))
+    assert len(res_1.tool_calls) == 1
+    assert res_1.tool_calls[0].name == "execute_code"
+    assert res_1.tool_calls[0].arguments == {"code": "print(42)"}
+    assert len(res_1.thought_blocks) == 1
+    assert res_1.thought_blocks[0]["type"] == "function_call"
+    assert res_1.thought_blocks[0]["thought_signature"] == b"gemini_fc_sig_binary_999"
+
+    # Turn 2 multi-turn tool replay: assistant message has tool_calls and thought_blocks
+    messages = [
+        Message(role="user", content="Run code"),
+        Message(role="assistant", content="", tool_calls=res_1.tool_calls, thought_blocks=res_1.thought_blocks),
+        Message(role="tool", content="42", tool_call_id=res_1.tool_calls[0].id, name="execute_code"),
+    ]
+    res_2 = provider.generate(GenerationRequest(messages=messages))
+    assert res_2.text == "Output: 42"
+
+    second_call_contents = mock_client.models.generate_content.call_args_list[1].kwargs["contents"]
+    assistant_content = second_call_contents[1]
+    assert assistant_content.role == "model"
+    # Ensure thought signature is attached directly to the function-call part
+    assert len(assistant_content.parts) == 1
+    replayed_part = assistant_content.parts[0]
+    assert replayed_part.function_call.name == "execute_code"
+    assert replayed_part.function_call.args == {"code": "print(42)"}
+    assert replayed_part.thought_signature == b"gemini_fc_sig_binary_999"
+    # Ensure it is NOT converted into a thought text part
+    assert getattr(replayed_part, "thought", None) is not True
+
+    # Also verify replay with a deserialized dictionary representation (e.g. from JSON storage without _raw_part)
+    deserialized_fc_block = {
+        "type": "function_call",
+        "name": "execute_code",
+        "args": {"code": "print(42)"},
+        "thought_signature": b"gemini_fc_sig_binary_999",
+    }
+    messages_deserialized = [
+        Message(role="user", content="Run code"),
+        Message(role="assistant", content="", tool_calls=res_1.tool_calls, thought_blocks=(deserialized_fc_block,)),
+        Message(role="tool", content="42", tool_call_id=res_1.tool_calls[0].id, name="execute_code"),
+    ]
+    mock_client.models.generate_content.return_value = mock_resp_2
+    provider.generate(GenerationRequest(messages=messages_deserialized))
+
+    replayed_contents = mock_client.models.generate_content.call_args.kwargs["contents"]
+    replayed_assistant = replayed_contents[1]
+    assert len(replayed_assistant.parts) == 1
+    reconstructed_part = replayed_assistant.parts[0]
+    assert reconstructed_part.function_call.name == "execute_code"
+    assert reconstructed_part.thought_signature == b"gemini_fc_sig_binary_999"
 
 

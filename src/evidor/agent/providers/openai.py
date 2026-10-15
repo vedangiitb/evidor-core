@@ -20,6 +20,38 @@ def _safe_parse_tool_arguments(raw_args: Any) -> dict[str, Any]:
         return {"__raw_args__": raw_args, "__decode_error__": str(err)}
 
 
+def _extract_reasoning_texts(val: Any) -> list[str]:
+    if not val:
+        return []
+    if isinstance(val, str):
+        s = val.strip()
+        return [s] if s else []
+    texts: list[str] = []
+    if isinstance(val, (list, tuple)):
+        for item in val:
+            if isinstance(item, str):
+                s = item.strip()
+                if s:
+                    texts.append(s)
+            elif isinstance(item, dict):
+                t = item.get("text") or item.get("content")
+                if isinstance(t, str) and t.strip():
+                    texts.append(t.strip())
+            else:
+                t = getattr(item, "text", None) or getattr(item, "content", None)
+                if isinstance(t, str) and t.strip():
+                    texts.append(t.strip())
+    elif isinstance(val, dict):
+        t = val.get("text") or val.get("content")
+        if isinstance(t, str) and t.strip():
+            texts.append(t.strip())
+    else:
+        t = getattr(val, "text", None) or getattr(val, "content", None)
+        if isinstance(t, str) and t.strip():
+            texts.append(t.strip())
+    return texts
+
+
 def _parse_openai_usage(raw_usage: Any) -> Any:
     if raw_usage is None:
         return None
@@ -141,8 +173,15 @@ class OpenAIProvider:
                     input_items.append({"role": message.role, "content": message.content})
 
             kwargs: dict[str, Any] = {"model": self._model, "input": input_items}
-            if self._thinking and self._thinking.enabled and self._thinking.effort:
-                kwargs["reasoning_effort"] = self._thinking.effort
+            if self._thinking and self._thinking.enabled:
+                reasoning_config: dict[str, Any] = {}
+                if self._thinking.effort:
+                    reasoning_config["effort"] = self._thinking.effort
+                summary_val = getattr(self._thinking, "summary", None)
+                if summary_val:
+                    reasoning_config["summary"] = summary_val
+                if reasoning_config:
+                    kwargs["reasoning"] = reasoning_config
             if openai_tools:
                 kwargs["tools"] = [
                     {
@@ -161,11 +200,15 @@ class OpenAIProvider:
             for item in output_list:
                 item_type = getattr(item, "type", None)
                 if item_type in ("reasoning", "thought"):
-                    for attr_name in ("content", "text", "summary"):
+                    item_texts: list[str] = []
+                    for attr_name in ("summary", "content", "text"):
                         val = getattr(item, attr_name, None)
-                        if isinstance(val, str) and val:
-                            thinking_parts.append(val)
+                        extracted = _extract_reasoning_texts(val)
+                        if extracted:
+                            item_texts.extend(extracted)
                             break
+                    if item_texts:
+                        thinking_parts.extend(item_texts)
                 elif item_type == "function_call":
                     args = _safe_parse_tool_arguments(item.arguments)
                     call_id = getattr(item, "call_id", None) or getattr(item, "id", f"call_{len(tool_calls)+1}")
@@ -175,7 +218,7 @@ class OpenAIProvider:
             if isinstance(raw_resp_thinking, str) and raw_resp_thinking:
                 thinking_parts.append(raw_resp_thinking)
 
-            thinking_text = "".join(thinking_parts) if thinking_parts else None
+            thinking_text = "\n".join(thinking_parts) if thinking_parts else None
             usage = _parse_openai_usage(getattr(response, "usage", None))
             return GenerationResponse(
                 text=text,
