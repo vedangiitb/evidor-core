@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v1.6.3-dev.1 (2026-10-15)
+
+### Bug Fixes
+
+- Fixing gemini though singnature issues and removing redundant strict validations
+  ([`438baca`](https://github.com/vedangiitb/evidor-core/commit/438bacab937b76265923ad65186bfa7f9485bdbb))
+
+- Fixing gemini thought signature issues and openai response parsing
+  ([`d8886c2`](https://github.com/vedangiitb/evidor-core/commit/d8886c22fd0f36e72d889e39dc86dd1fd1360dc2))
+
+- Fixing test failures
+  ([`5df54b9`](https://github.com/vedangiitb/evidor-core/commit/5df54b9f6b1961fea47735041be03b7188d59ddc))
+
+
 ## v1.6.2 (2026-10-14)
 
 
