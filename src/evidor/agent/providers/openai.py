@@ -43,11 +43,17 @@ def _parse_openai_usage(raw_usage: Any) -> Any:
             if not cached_tokens:
                 cached_tokens = getattr(raw_usage, "prompt_cache_hit_tokens", 0) or 0
 
+            reasoning_tokens = 0
+            ct_details = getattr(raw_usage, "completion_tokens_details", None)
+            if ct_details is not None:
+                reasoning_tokens = getattr(ct_details, "reasoning_tokens", 0) or 0
+
             return TokenUsage(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
                 cached_tokens=int(cached_tokens) if isinstance(cached_tokens, int) else 0,
+                reasoning_tokens=int(reasoning_tokens) if isinstance(reasoning_tokens, int) else 0,
             )
     except Exception:
         pass
@@ -55,16 +61,36 @@ def _parse_openai_usage(raw_usage: Any) -> Any:
 
 
 class OpenAIProvider:
-    def __init__(self, model: str, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        api_key: str | None = None,
+        thinking: Any = None,
+    ) -> None:
         self._model = model
         self._api_key = api_key
+        if thinking is not None:
+            from evidor.models import OpenAIThinkingConfig
+
+            self._thinking: OpenAIThinkingConfig | None = (
+                thinking
+                if isinstance(thinking, OpenAIThinkingConfig)
+                else OpenAIThinkingConfig.from_value(thinking)
+            )
+            self._thinking.validate()
+        else:
+            self._thinking = None
 
     @property
     def model(self) -> str:
         return self._model
 
+    @property
+    def thinking(self) -> Any:
+        return self._thinking
+
     def with_model(self, model: str) -> "OpenAIProvider":
-        return OpenAIProvider(model=model, api_key=self._api_key)
+        return OpenAIProvider(model=model, api_key=self._api_key, thinking=self._thinking)
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
         try:
@@ -115,6 +141,8 @@ class OpenAIProvider:
                     input_items.append({"role": message.role, "content": message.content})
 
             kwargs: dict[str, Any] = {"model": self._model, "input": input_items}
+            if self._thinking and self._thinking.enabled:
+                kwargs["reasoning_effort"] = self._thinking.effort
             if openai_tools:
                 kwargs["tools"] = [
                     {
@@ -164,6 +192,8 @@ class OpenAIProvider:
                 chat_messages.append({"role": message.role, "content": message.content})
 
         chat_kwargs: dict[str, Any] = {"model": self._model, "messages": chat_messages}
+        if self._thinking and self._thinking.enabled:
+            chat_kwargs["reasoning_effort"] = self._thinking.effort
         if openai_tools:
             chat_kwargs["tools"] = openai_tools
 

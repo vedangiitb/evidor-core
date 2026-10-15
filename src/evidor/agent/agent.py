@@ -228,6 +228,7 @@ class Agent:
             for tc in response.tool_calls
         )
         token_usage = getattr(response, "usage", None)
+        thinking_text = getattr(response, "thinking", None)
         emit_event(
             LLMCallEndEvent(
                 trace_context=llm_ctx,
@@ -240,6 +241,7 @@ class Agent:
                 tool_calls_count=len(response.tool_calls),
                 output_text=response.text,
                 output_tool_calls=output_tool_calls,
+                thinking_text=thinking_text,
                 retry_attempt=attempt,
             )
         )

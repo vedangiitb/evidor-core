@@ -32,14 +32,26 @@ class TelemetrySink(Protocol):
 class InMemorySink:
     """Thread-safe in-memory sink for testing, inspection, and local assertions."""
 
-    def __init__(self, capture_content: bool = True) -> None:
+    def __init__(self, capture_content: bool = True, capture_thinking: bool = False) -> None:
         self._capture_content = capture_content
+        self._capture_thinking = capture_thinking
         self._events: list[TelemetryEvent] = []
         self._lock = threading.Lock()
 
+    @property
+    def capture_content(self) -> bool:
+        return self._capture_content
+
+    @property
+    def capture_thinking(self) -> bool:
+        return self._capture_thinking
+
     def write(self, events: Sequence[TelemetryEvent]) -> None:
         with self._lock:
-            to_store = events if self._capture_content else [redact_event(e) for e in events]
+            to_store = [
+                redact_event(e, capture_content=self._capture_content, capture_thinking=self._capture_thinking)
+                for e in events
+            ]
             self._events.extend(to_store)
 
     def flush(self) -> None:
@@ -68,15 +80,26 @@ class InMemorySink:
 class ConsoleSink:
     """Simple sink printing events to stderr or stdout for local debugging."""
 
-    def __init__(self, stream: Any = None, capture_content: bool = True) -> None:
+    def __init__(self, stream: Any = None, capture_content: bool = True, capture_thinking: bool = False) -> None:
         self._stream = stream or sys.stderr
         self._capture_content = capture_content
+        self._capture_thinking = capture_thinking
         self._lock = threading.Lock()
+
+    @property
+    def capture_content(self) -> bool:
+        return self._capture_content
+
+    @property
+    def capture_thinking(self) -> bool:
+        return self._capture_thinking
 
     def write(self, events: Sequence[TelemetryEvent]) -> None:
         with self._lock:
             for event in events:
-                ev = event if self._capture_content else redact_event(event)
+                ev = redact_event(
+                    event, capture_content=self._capture_content, capture_thinking=self._capture_thinking
+                )
                 attrs = ev.to_attributes()
                 cls_name = ev.__class__.__name__
                 trace_id = ev.trace_context.trace_id[:8]

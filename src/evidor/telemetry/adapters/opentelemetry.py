@@ -70,6 +70,7 @@ class OpenTelemetrySink(TelemetrySink):
         tracer: Tracer | None = None,
         tracer_name: str = "evidor",
         capture_content: bool = True,
+        capture_thinking: bool = False,
     ) -> None:
         if not HAS_OPENTELEMETRY:
             raise ImportError(
@@ -79,6 +80,7 @@ class OpenTelemetrySink(TelemetrySink):
 
         self._tracer_provider = tracer_provider
         self._capture_content = capture_content
+        self._capture_thinking = capture_thinking
         if tracer is not None:
             self._tracer: Tracer = tracer
         elif tracer_provider is not None:
@@ -89,10 +91,20 @@ class OpenTelemetrySink(TelemetrySink):
         self._active_spans: dict[str, Span] = {}
         self._lock = threading.Lock()
 
+    @property
+    def capture_content(self) -> bool:
+        return self._capture_content
+
+    @property
+    def capture_thinking(self) -> bool:
+        return self._capture_thinking
+
     def write(self, events: Sequence[TelemetryEvent]) -> None:
         """Process a batch of emitted events and update OpenTelemetry spans."""
         for event in events:
-            ev = event if self._capture_content else redact_event(event)
+            ev = redact_event(
+                event, capture_content=self._capture_content, capture_thinking=self._capture_thinking
+            )
             self._handle_event(ev)
 
     def _handle_event(self, event: TelemetryEvent) -> None:

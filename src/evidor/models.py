@@ -11,6 +11,96 @@ if TYPE_CHECKING:
 
 
 MessageRole = Literal["system", "user", "assistant", "tool"]
+ThinkingEffort = Literal["low", "medium", "high", "minimal"]
+
+
+@dataclass(frozen=True, slots=True)
+class ThinkingConfig:
+    """Base class for model thinking / reasoning configuration."""
+
+    enabled: bool = True
+
+    def validate(self) -> None:
+        """Hook for provider-neutral constraint checks."""
+        pass
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAIThinkingConfig(ThinkingConfig):
+    """Configuration for OpenAI reasoning models (o1, o3-mini, etc.)."""
+
+    effort: ThinkingEffort = "medium"
+
+    def validate(self) -> None:
+        if self.effort not in ("low", "medium", "high", "minimal"):
+            raise ValueError(f"Invalid OpenAI reasoning effort: {self.effort}")
+
+    @classmethod
+    def from_value(cls, value: Any) -> OpenAIThinkingConfig:
+        if isinstance(value, OpenAIThinkingConfig):
+            return value
+        if isinstance(value, bool):
+            return cls(enabled=value)
+        if isinstance(value, str) and value in ("low", "medium", "high", "minimal"):
+            return cls(enabled=True, effort=value)  # type: ignore[arg-type]
+        raise TypeError(f"Cannot coerce {type(value).__name__} to OpenAIThinkingConfig")
+
+
+@dataclass(frozen=True, slots=True)
+class AnthropicThinkingConfig(ThinkingConfig):
+    """Configuration for Anthropic extended thinking (Claude 3.7 Sonnet, Claude 4+)."""
+
+    budget_tokens: int | None = 2048
+    type: Literal["enabled", "adaptive"] = "enabled"
+    effort: Literal["low", "medium", "high", "max"] | None = None
+
+    def validate(self) -> None:
+        if self.enabled and self.type == "enabled":
+            if self.budget_tokens is None or self.budget_tokens < 1024:
+                raise ValueError("Anthropic manual thinking budget_tokens must be >= 1024")
+        if self.enabled and self.type == "adaptive" and self.effort:
+            if self.effort not in ("low", "medium", "high", "max"):
+                raise ValueError(f"Invalid Anthropic adaptive effort: {self.effort}")
+
+    @classmethod
+    def from_value(cls, value: Any) -> AnthropicThinkingConfig:
+        if isinstance(value, AnthropicThinkingConfig):
+            return value
+        if isinstance(value, bool):
+            return cls(enabled=value)
+        if isinstance(value, int):
+            return cls(enabled=True, type="enabled", budget_tokens=value)
+        if isinstance(value, str):
+            if value in ("low", "medium", "high", "max"):
+                return cls(enabled=True, type="adaptive", effort=value, budget_tokens=None)  # type: ignore[arg-type]
+            if value == "adaptive":
+                return cls(enabled=True, type="adaptive", budget_tokens=None)
+        raise TypeError(f"Cannot coerce {type(value).__name__} to AnthropicThinkingConfig")
+
+
+@dataclass(frozen=True, slots=True)
+class GeminiThinkingConfig(ThinkingConfig):
+    """Configuration for Google Gemini thinking models (Gemini 2.0/2.5/3.8)."""
+
+    thinking_budget: int | None = None  # None = dynamic, 0 = off, >0 = token budget cap
+    include_thoughts: bool = True
+
+    def validate(self) -> None:
+        if self.thinking_budget is not None and self.thinking_budget < -1:
+            raise ValueError("Gemini thinking_budget must be >= -1")
+
+    @classmethod
+    def from_value(cls, value: Any) -> GeminiThinkingConfig:
+        if isinstance(value, GeminiThinkingConfig):
+            return value
+        if isinstance(value, bool):
+            return cls(enabled=value, thinking_budget=None if value else 0, include_thoughts=value)
+        if isinstance(value, int):
+            return cls(enabled=value > 0, thinking_budget=value)
+        raise TypeError(f"Cannot coerce {type(value).__name__} to GeminiThinkingConfig")
+
+
+AnyThinkingConfig = ThinkingConfig | OpenAIThinkingConfig | AnthropicThinkingConfig | GeminiThinkingConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,11 +137,20 @@ class Message:
     tool_call_id: str | None = None
     name: str | None = None
     is_summary: bool = False
+    thinking: str | None = None
+    thought_blocks: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.tool_calls, (list, tuple)):
             object.__setattr__(self, "tool_calls", tuple(self.tool_calls))
-        if (not self.content or not self.content.strip()) and not self.tool_calls and self.role != "tool":
+        if isinstance(self.thought_blocks, (list, tuple)):
+            object.__setattr__(self, "thought_blocks", tuple(self.thought_blocks))
+        if (
+            (not self.content or not self.content.strip())
+            and not self.tool_calls
+            and not self.thought_blocks
+            and self.role != "tool"
+        ):
             raise ValueError("message content must not be empty")
 
 
@@ -94,7 +193,12 @@ class GenerationResponse:
     model: str
     tool_calls: tuple[ToolCall, ...] = ()
     usage: Any = None
+    thinking: str | None = None
+    thought_blocks: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.tool_calls, (list, tuple)):
             object.__setattr__(self, "tool_calls", tuple(self.tool_calls))
+        if isinstance(self.thought_blocks, (list, tuple)):
+            object.__setattr__(self, "thought_blocks", tuple(self.thought_blocks))
+

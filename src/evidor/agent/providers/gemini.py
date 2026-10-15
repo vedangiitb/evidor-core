@@ -120,14 +120,30 @@ class GeminiProvider:
         model: str,
         api_key: str | None = None,
         cached_content: str | None = None,
+        thinking: Any = None,
     ) -> None:
         self._model = model
         self._api_key = api_key
         self._cached_content = cached_content
+        if thinking is not None:
+            from evidor.models import GeminiThinkingConfig
+
+            self._thinking: GeminiThinkingConfig | None = (
+                thinking
+                if isinstance(thinking, GeminiThinkingConfig)
+                else GeminiThinkingConfig.from_value(thinking)
+            )
+            self._thinking.validate()
+        else:
+            self._thinking = None
 
     @property
     def model(self) -> str:
         return self._model
+
+    @property
+    def thinking(self) -> Any:
+        return self._thinking
 
     @property
     def cached_content(self) -> str | None:
@@ -138,6 +154,7 @@ class GeminiProvider:
             model=model,
             api_key=self._api_key,
             cached_content=self._cached_content,
+            thinking=self._thinking,
         )
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
@@ -162,9 +179,21 @@ class GeminiProvider:
                 contents.append(types.Content(role="user", parts=[part]))
             elif message.role == "assistant":
                 parts: list[Any] = []
-                if message.content:
+                if message.thought_blocks:
+                    for tb in message.thought_blocks:
+                        if hasattr(tb, "text") or hasattr(tb, "thought") or hasattr(tb, "function_call"):
+                            parts.append(tb)
+                        elif isinstance(tb, dict) and "thought" in tb:
+                            p = types.Part.from_text(text=tb.get("text", ""))
+                            p.thought = True
+                            parts.append(p)
+                if message.content and not parts:
                     parts.append(types.Part.from_text(text=message.content))
-                if message.tool_calls:
+                elif message.content and parts and not any(
+                    getattr(p, "text", None) == message.content and not getattr(p, "thought", False) for p in parts
+                ):
+                    parts.append(types.Part.from_text(text=message.content))
+                if message.tool_calls and not any(getattr(p, "function_call", None) for p in parts):
                     for tc in message.tool_calls:
                         parts.append(types.Part.from_function_call(name=tc.name, args=tc.arguments))
                 contents.append(types.Content(role="model", parts=parts))
@@ -190,14 +219,34 @@ class GeminiProvider:
             gemini_tools = [types.Tool(function_declarations=declarations)]
 
         config = None
-        if system_prompt or gemini_tools or self._cached_content:
-            config_kwargs: dict[str, Any] = {}
-            if system_prompt:
-                config_kwargs["system_instruction"] = system_prompt
-            if gemini_tools:
-                config_kwargs["tools"] = gemini_tools
-            if self._cached_content:
-                config_kwargs["cached_content"] = self._cached_content
+        config_kwargs: dict[str, Any] = {}
+        if system_prompt:
+            config_kwargs["system_instruction"] = system_prompt
+        if gemini_tools:
+            config_kwargs["tools"] = gemini_tools
+        if self._cached_content:
+            config_kwargs["cached_content"] = self._cached_content
+
+        if self._thinking is not None:
+            thinking_budget = self._thinking.thinking_budget
+            if not self._thinking.enabled:
+                thinking_budget = 0
+            include_thoughts = self._thinking.include_thoughts if self._thinking.enabled else False
+
+            thinking_config_cls = getattr(types, "ThinkingConfig", None)
+            if thinking_config_cls is not None:
+                tc_kwargs: dict[str, Any] = {}
+                if thinking_budget is not None:
+                    tc_kwargs["thinking_budget"] = thinking_budget
+                tc_kwargs["include_thoughts"] = include_thoughts
+                config_kwargs["thinking_config"] = thinking_config_cls(**tc_kwargs)
+            else:
+                config_kwargs["thinking_config"] = {
+                    "thinking_budget": thinking_budget,
+                    "include_thoughts": include_thoughts,
+                }
+
+        if config_kwargs:
             config = types.GenerateContentConfig(**config_kwargs)
 
         http_options = None
@@ -213,10 +262,10 @@ class GeminiProvider:
         client = genai.Client(api_key=self._api_key, http_options=http_options)
         response = client.models.generate_content(model=self._model, contents=contents, config=config)
 
-        # Parse text and tool calls.
-        # Extract directly from candidate parts to avoid triggering google-genai's
-        # warning when non-text parts (e.g. function calls) are present.
+        # Parse text, thoughts, and tool calls.
         text = ""
+        thinking_text = None
+        thought_blocks: list[Any] = []
         tool_calls: list[ToolCall] = []
 
         candidates = getattr(response, "candidates", None)
@@ -235,6 +284,13 @@ class GeminiProvider:
                     else:
                         thought_chunks.append(part_text)
 
+                if (
+                    is_thought
+                    or getattr(part, "thought_signature", None)
+                    or getattr(part, "thoughtSignature", None)
+                ):
+                    thought_blocks.append(part)
+
                 fc = getattr(part, "function_call", None)
                 if fc:
                     call_id = getattr(fc, "id", None) or f"call_{len(tool_calls)+1}"
@@ -245,6 +301,9 @@ class GeminiProvider:
                 text = "".join(text_chunks)
             elif not tool_calls and thought_chunks:
                 text = "".join(thought_chunks)
+
+            if thought_chunks:
+                thinking_text = "".join(thought_chunks)
 
         # Fallback for tool_calls if not extracted from candidates' parts
         if not tool_calls and getattr(response, "function_calls", None):
@@ -272,6 +331,18 @@ class GeminiProvider:
                 ct = getattr(usage_metadata, "candidates_token_count", None)
                 tt = getattr(usage_metadata, "total_token_count", None)
                 cached_tokens = getattr(usage_metadata, "cached_content_token_count", 0) or 0
+
+                reasoning_tokens = 0
+                ct_details = getattr(usage_metadata, "candidates_tokens_details", None)
+                if ct_details is not None:
+                    rt = getattr(ct_details, "reasoning_tokens", None) or getattr(ct_details, "thinking_token_count", None)
+                    if isinstance(rt, int):
+                        reasoning_tokens = rt
+                if not reasoning_tokens:
+                    ttc = getattr(usage_metadata, "thinking_token_count", None)
+                    if isinstance(ttc, int):
+                        reasoning_tokens = ttc
+
                 if isinstance(pt, int) or isinstance(ct, int) or isinstance(tt, int):
                     prompt_tokens = int(pt) if isinstance(pt, int) else 0
                     completion_tokens = int(ct) if isinstance(ct, int) else 0
@@ -281,9 +352,17 @@ class GeminiProvider:
                         completion_tokens=completion_tokens,
                         total_tokens=total_tokens,
                         cached_tokens=int(cached_tokens) if isinstance(cached_tokens, int) else 0,
+                        reasoning_tokens=int(reasoning_tokens) if isinstance(reasoning_tokens, int) else 0,
                     )
             except Exception:
                 pass
 
-        return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls), usage=usage)
+        return GenerationResponse(
+            text=text,
+            model=self._model,
+            tool_calls=tuple(tool_calls),
+            usage=usage,
+            thinking=thinking_text,
+            thought_blocks=tuple(thought_blocks),
+        )
 

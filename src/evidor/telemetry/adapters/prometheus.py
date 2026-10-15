@@ -34,6 +34,7 @@ class PrometheusSink(TelemetrySink):
         registry: Any = None,
         metric_prefix: str = "evidor",
         capture_content: bool = True,
+        capture_thinking: bool = False,
     ) -> None:
         if not HAS_PROMETHEUS:
             raise ImportError(
@@ -42,6 +43,8 @@ class PrometheusSink(TelemetrySink):
             )
 
         self._registry = registry or REGISTRY
+        self._capture_content = capture_content
+        self._capture_thinking = capture_thinking
         pfx = metric_prefix.rstrip("_")
 
         def _metric(cls: type, name: str, doc: str, labels: list[str]) -> Any:
@@ -101,6 +104,7 @@ class PrometheusSink(TelemetrySink):
                     ("total", u.total_tokens),
                     ("cached", getattr(u, "cached_tokens", 0)),
                     ("cache_creation", getattr(u, "cache_creation_tokens", 0)),
+                    ("reasoning", getattr(u, "reasoning_tokens", 0)),
                 ):
                     if count > 0:
                         self.tokens_total.labels(provider=p, model=m, token_type=k).inc(count)

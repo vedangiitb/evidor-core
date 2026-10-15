@@ -43,6 +43,7 @@ class PhoenixSink(OpenTelemetrySink):
         tracer_provider: Any = None,
         tracer_name: str = "evidor",
         capture_content: bool = True,
+        capture_thinking: bool = False,
         **register_kwargs: Any,
     ) -> None:
         if not HAS_PHOENIX:
@@ -62,6 +63,7 @@ class PhoenixSink(OpenTelemetrySink):
             tracer_provider=tracer_provider,
             tracer_name=tracer_name,
             capture_content=capture_content,
+            capture_thinking=capture_thinking,
         )
 
     @staticmethod
@@ -194,6 +196,10 @@ class PhoenixSink(OpenTelemetrySink):
                                     args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
                                     span.set_attribute(f"{prefix}.function.arguments", args_str)
 
+                    if event.thinking_text:
+                        span.set_attribute("llm.output_messages.0.message.content.0.type", "reasoning")
+                        span.set_attribute("llm.output_messages.0.message.content.0.text", event.thinking_text)
+
                 if event.token_usage:
                     if event.token_usage.prompt_tokens > 0:
                         span.set_attribute("llm.token_count.prompt", event.token_usage.prompt_tokens)
@@ -201,6 +207,11 @@ class PhoenixSink(OpenTelemetrySink):
                         span.set_attribute("llm.token_count.completion", event.token_usage.completion_tokens)
                     if event.token_usage.total_tokens > 0:
                         span.set_attribute("llm.token_count.total", event.token_usage.total_tokens)
+                    if event.token_usage.reasoning_tokens > 0:
+                        span.set_attribute(
+                            "llm.token_count.completion_details.reasoning",
+                            event.token_usage.reasoning_tokens,
+                        )
 
             elif isinstance(event, ToolCallEndEvent):
                 if self._capture_content and event.result is not None:
