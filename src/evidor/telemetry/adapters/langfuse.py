@@ -33,7 +33,13 @@ except ImportError:
 class LangfuseSink(TelemetrySink):
     """Translates Evidor events into Langfuse traces, generations, and tool spans."""
 
-    def __init__(self, client: Any = None, capture_content: bool = True, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        client: Any = None,
+        capture_content: bool = True,
+        capture_thinking: bool = False,
+        **kwargs: Any,
+    ) -> None:
         if not HAS_LANGFUSE:
             raise ImportError(
                 "The 'langfuse' package is required for the Langfuse adapter. "
@@ -42,13 +48,24 @@ class LangfuseSink(TelemetrySink):
 
         self._client = client if client is not None else Langfuse(**kwargs)
         self._capture_content = capture_content
+        self._capture_thinking = capture_thinking
         self._active_observations: dict[str, Any] = {}
         self._lock = threading.Lock()
+
+    @property
+    def capture_content(self) -> bool:
+        return self._capture_content
+
+    @property
+    def capture_thinking(self) -> bool:
+        return self._capture_thinking
 
     def write(self, events: Sequence[TelemetryEvent]) -> None:
         """Process a batch of emitted events."""
         for event in events:
-            ev = event if self._capture_content else redact_event(event)
+            ev = redact_event(
+                event, capture_content=self._capture_content, capture_thinking=self._capture_thinking
+            )
             if isinstance(ev, (AgentRunStartEvent, LLMCallStartEvent, ToolCallStartEvent, MCPCallStartEvent)):
                 self._start_observation(ev)
             elif isinstance(ev, (AgentRunEndEvent, LLMCallEndEvent, ToolCallEndEvent, MCPCallEndEvent)):
@@ -109,12 +126,26 @@ class LangfuseSink(TelemetrySink):
         if not out and getattr(event, "output_tool_calls", None):
             out = list(event.output_tool_calls)
 
+        thinking = getattr(event, "thinking_text", None)
+        if thinking:
+            if isinstance(out, str) and out:
+                out = {"content": out, "reasoning": thinking}
+            elif isinstance(out, list):
+                out = {"tool_calls": out, "reasoning": thinking}
+            elif isinstance(out, dict):
+                out = dict(out)
+                out["reasoning"] = thinking
+            else:
+                out = {"reasoning": thinking}
+
         usage = None
         tok = getattr(event, "token_usage", None)
         if tok:
             usage = {"input": tok.prompt_tokens, "output": tok.completion_tokens, "total": tok.total_tokens}
             if getattr(tok, "cached_tokens", 0) > 0:
                 usage["cached"] = tok.cached_tokens
+            if getattr(tok, "reasoning_tokens", 0) > 0:
+                usage["reasoning"] = tok.reasoning_tokens
 
         level = "ERROR" if getattr(event, "status", None) == "error" else "DEFAULT"
         err = getattr(event, "error", None)

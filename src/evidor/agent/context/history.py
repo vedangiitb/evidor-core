@@ -18,9 +18,17 @@ class ConversationHistory:
 
     def add_assistant(self, response: GenerationResponse) -> None:
         content = response.text
-        if (not content or not content.strip()) and not response.tool_calls:
+        if (not content or not content.strip()) and not response.tool_calls and not response.thought_blocks:
             content = "Done."
-        self.messages.append(Message(role="assistant", content=content, tool_calls=response.tool_calls))
+        self.messages.append(
+            Message(
+                role="assistant",
+                content=content,
+                tool_calls=response.tool_calls,
+                thinking=response.thinking,
+                thought_blocks=response.thought_blocks,
+            )
+        )
 
     def add_tool_result(self, call: ToolCall, result: str) -> None:
         self.messages.append(Message(role="tool", content=result, tool_call_id=call.id, name=call.name))

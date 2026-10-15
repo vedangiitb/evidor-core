@@ -202,6 +202,74 @@ simple_request = GenerationRequest(prompt="Hello!")
 response = provider.generate(simple_request)
 ```
 
+### Configurable Thinking & Reasoning Mode
+
+Evidor provides first-class support for reasoning models across **OpenAI** (`o1`, `o3-mini`), **Anthropic** (`claude-3-7-sonnet-20250219`), and **Gemini** (`gemini-2.5-flash`, `gemini-2.5-pro`). Thinking can be configured either using provider-specific typed configuration classes or natural shorthands.
+
+```python
+from evidor import (
+    Agent,
+    AnthropicProvider,
+    AnthropicThinkingConfig,
+    GeminiProvider,
+    GeminiThinkingConfig,
+    OpenAIProvider,
+    OpenAIThinkingConfig,
+)
+
+# 1. OpenAI: Configure reasoning effort ('low', 'medium', 'high')
+# Via shorthand:
+provider = OpenAIProvider(model="o3-mini", thinking="high")
+# Or via typed config:
+provider = OpenAIProvider(model="o3-mini", thinking=OpenAIThinkingConfig(effort="high"))
+
+# 2. Anthropic: Configure token budget or adaptive effort
+# Shorthand int (sets budget_tokens >= 1024; auto-bumps max_tokens if needed):
+provider = AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking=4096)
+# Shorthand string (adaptive thinking):
+provider = AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking="high")
+# Or via typed config:
+provider = AnthropicProvider(
+    model="claude-3-7-sonnet-20250219",
+    thinking=AnthropicThinkingConfig(budget_tokens=4096),
+)
+
+# 3. Gemini: Configure token budget or disable thinking
+# Shorthand int (budget tokens):
+provider = GeminiProvider(model="gemini-2.5-flash", thinking=2048)
+# Shorthand bool (False disables thinking budget; True enables dynamic thinking):
+provider = GeminiProvider(model="gemini-2.5-flash", thinking=False)
+# Or via typed config:
+provider = GeminiProvider(
+    model="gemini-2.5-flash",
+    thinking=GeminiThinkingConfig(thinking_budget=2048, include_thoughts=True),
+)
+```
+
+#### Inspecting Thinking Steps & Reasoning Tokens
+
+When thinking is enabled and the provider outputs thought tokens, the response provides both the visible text and the internal reasoning scratchpad:
+
+```python
+agent = Agent(AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking=2048))
+response = agent.send("Solve this logic riddle step-by-step...")
+
+# Final visible response
+print(response.text)
+
+# Model's internal reasoning scratchpad (if available)
+if response.thinking:
+    print(f"Reasoning Steps:\n{response.thinking}")
+
+# Reasoning tokens recorded in usage metadata
+if response.usage and response.usage.reasoning_tokens:
+    print(f"Reasoning tokens consumed: {response.usage.reasoning_tokens}")
+```
+
+#### Multi-Turn Tool Calling & Cryptographic Signatures
+
+Reasoning models from Anthropic and Gemini output thought blocks alongside cryptographic signatures (such as Anthropic's `signature` field or Gemini's thought parts). In multi-turn tool loops, these signatures must be preserved and replayed in subsequent conversation turns to avoid API verification errors. Evidor automatically captures and replays them in `agent.messages` and `thought_blocks` without requiring any manual handling.
+
 ## Tools & Function Calling
 
 Evidor provides first-class primitives for defining tools and equipping agents with automatic function-calling execution loops.
@@ -777,17 +845,49 @@ Standard attributes automatically populated:
 
 ---
 
+### Thinking Visibility in Telemetry (`capture_thinking`)
+
+Internal thinking scratchpads can be lengthy and often contain confidential reasoning traces. All Evidor telemetry sinks default to **`capture_thinking=False`**, which redacts the raw thinking text while preserving reasoning token counts (`gen_ai.usage.reasoning_tokens` and Prometheus `evidor_tokens_total{token_type="reasoning"}`).
+
+To make intermediate thinking steps visible in your traces, logs, or UI dashboards, enable `capture_thinking=True`:
+
+```python
+from evidor import Agent, AnthropicProvider
+from evidor.telemetry import ConsoleSink, OpenTelemetrySink, PhoenixSink, LangfuseSink
+
+# Enable thinking visibility on any sink
+console_sink = ConsoleSink(capture_content=True, capture_thinking=True)
+otel_sink = OpenTelemetrySink(capture_content=True, capture_thinking=True)
+phoenix_sink = PhoenixSink(capture_content=True, capture_thinking=True)
+langfuse_sink = LangfuseSink(capture_content=True, capture_thinking=True)
+
+agent = Agent(
+    AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking=2048),
+    telemetry=[console_sink, phoenix_sink],
+)
+response = agent.send("Analyze system security risks...")
+agent.close()
+```
+
+#### Supported Telemetry Thinking Attributes & Semantics:
+- **OpenTelemetry (`evidor[otel]`)**: Exports `gen_ai.reasoning.content` and `evidor.thinking.content` span attributes, plus `gen_ai.usage.reasoning_tokens`.
+- **Arize Phoenix (`evidor[phoenix]`)**: Automatically outputs OpenInference reasoning blocks (`message_content.type = "reasoning"`) rendered directly in the Phoenix UI, and logs `llm.token_count.completion_details.reasoning`.
+- **Langfuse (`evidor[langfuse]`)**: Attaches reasoning text to generation traces and populates `usage["reasoning"]`.
+- **Prometheus (`evidor[prometheus]`)**: Tracks token consumption under `evidor_tokens_total{token_type="reasoning"}`.
+
+---
+
 ### Privacy & PII Protection (Metadata-Only Mode)
 
 In privacy-sensitive or regulated environments (such as healthcare, finance, or customer data processing), you may not want to persist raw user prompts, model outputs, or tool arguments to external observability backends, while still requiring distributed trace hierarchies, token usage, latency timings, and error analytics.
 
-All Evidor telemetry sinks accept a `capture_content: bool = True` parameter. Setting `capture_content=False` strips raw text payloads before export:
+All Evidor telemetry sinks accept `capture_content: bool = True` and `capture_thinking: bool = False` parameters. Setting `capture_content=False` strips all raw text payloads before export:
 
 ```python
 from evidor import Agent, OpenAIProvider
 from evidor.telemetry import OpenTelemetrySink, LangfuseSink, PhoenixSink
 
-# Sinks record span trees, token usage, and latencies, but redact all prompts and outputs
+# Sinks record span trees, token usage, and latencies, but redact all prompts, thinking, and outputs
 otel_sink = OpenTelemetrySink(capture_content=False)
 langfuse_sink = LangfuseSink(capture_content=False)
 phoenix_sink = PhoenixSink(capture_content=False)
@@ -800,19 +900,20 @@ response = agent.send("Sensitive patient record or financial data...")
 agent.close()
 ```
 
-| Field / Semantic Attribute | `capture_content=True` (default) | `capture_content=False` (metadata-only) |
-| :--- | :--- | :--- |
-| **Trace & Span IDs, Run IDs** | Preserved | Preserved |
-| **Duration & Timestamps** | Preserved | Preserved |
-| **Token Usage Counts** | Preserved | Preserved |
-| **Model & Provider Names** | Preserved | Preserved |
-| **Tool & MCP Server Names** | Preserved | Preserved |
-| **Errors & Exceptions** | Preserved | Preserved |
-| **User Prompts & Messages** | Recorded | **Omitted / Redacted** |
-| **Model Output Text** | Recorded | **Omitted / Redacted** |
-| **Tool Arguments & Results** | Recorded | **Omitted / Redacted** |
+| Field / Semantic Attribute | `capture_content=True`<br>`capture_thinking=False` (default) | `capture_content=True`<br>`capture_thinking=True` | `capture_content=False`<br>(metadata-only) |
+| :--- | :--- | :--- | :--- |
+| **Trace & Span IDs, Run IDs** | Preserved | Preserved | Preserved |
+| **Duration & Timestamps** | Preserved | Preserved | Preserved |
+| **Token Usage (incl. Reasoning Tokens)** | Preserved | Preserved | Preserved |
+| **Model & Provider Names** | Preserved | Preserved | Preserved |
+| **Tool & MCP Server Names** | Preserved | Preserved | Preserved |
+| **Errors & Exceptions** | Preserved | Preserved | Preserved |
+| **User Prompts & Messages** | Recorded | Recorded | **Omitted / Redacted** |
+| **Model Output Text** | Recorded | Recorded | **Omitted / Redacted** |
+| **Thinking / Reasoning Scratchpad** | **Omitted / Redacted** | **Recorded** | **Omitted / Redacted** |
+| **Tool Arguments & Results** | Recorded | Recorded | **Omitted / Redacted** |
 
-For custom sinks, the pure function `redact_event(event)` is exported directly from `evidor.telemetry`.
+For custom sinks, the pure function `redact_event(event, capture_content=..., capture_thinking=...)` is exported directly from `evidor.telemetry`.
 
 ---
 
@@ -860,13 +961,13 @@ agent = Agent(OpenAIProvider("gpt-4.1-mini"), telemetry=runtime)
 
 ## Providers
 
-Supported providers and their typical models:
+Supported providers, example models, and reasoning/thinking support:
 
-| Provider | Example Model | Environment Variable | Extra Install |
-| --- | --- | --- | --- |
-| `OpenAIProvider` | `gpt-4.1-mini` | `OPENAI_API_KEY` | `evidor[openai]` |
-| `AnthropicProvider` | `claude-3-5-sonnet-20241022` | `ANTHROPIC_API_KEY` | `evidor[anthropic]` |
-| `GeminiProvider` | `gemini-2.5-flash` | `GEMINI_API_KEY` | `evidor[gemini]` |
+| Provider | Example Models | Thinking Support | Environment Variable | Extra Install |
+| --- | --- | --- | --- | --- |
+| `OpenAIProvider` | `gpt-4.1-mini`, `o3-mini`, `o1` | `reasoning_effort` (`"low"`, `"medium"`, `"high"`) | `OPENAI_API_KEY` | `evidor[openai]` |
+| `AnthropicProvider` | `claude-3-5-sonnet`, `claude-3-7-sonnet` | Extended budget (`budget_tokens >= 1024`) or adaptive | `ANTHROPIC_API_KEY` | `evidor[anthropic]` |
+| `GeminiProvider` | `gemini-2.5-flash`, `gemini-2.5-pro` | `thinking_budget` (tokens, `0` to disable, `None` dynamic) | `GEMINI_API_KEY` | `evidor[gemini]` |
 
 API keys can be supplied explicitly via the `api_key` constructor argument or read automatically from environment variables.
 

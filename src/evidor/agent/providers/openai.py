@@ -20,6 +20,38 @@ def _safe_parse_tool_arguments(raw_args: Any) -> dict[str, Any]:
         return {"__raw_args__": raw_args, "__decode_error__": str(err)}
 
 
+def _extract_reasoning_texts(val: Any) -> list[str]:
+    if not val:
+        return []
+    if isinstance(val, str):
+        s = val.strip()
+        return [s] if s else []
+    texts: list[str] = []
+    if isinstance(val, (list, tuple)):
+        for item in val:
+            if isinstance(item, str):
+                s = item.strip()
+                if s:
+                    texts.append(s)
+            elif isinstance(item, dict):
+                t = item.get("text") or item.get("content")
+                if isinstance(t, str) and t.strip():
+                    texts.append(t.strip())
+            else:
+                t = getattr(item, "text", None) or getattr(item, "content", None)
+                if isinstance(t, str) and t.strip():
+                    texts.append(t.strip())
+    elif isinstance(val, dict):
+        t = val.get("text") or val.get("content")
+        if isinstance(t, str) and t.strip():
+            texts.append(t.strip())
+    else:
+        t = getattr(val, "text", None) or getattr(val, "content", None)
+        if isinstance(t, str) and t.strip():
+            texts.append(t.strip())
+    return texts
+
+
 def _parse_openai_usage(raw_usage: Any) -> Any:
     if raw_usage is None:
         return None
@@ -43,11 +75,17 @@ def _parse_openai_usage(raw_usage: Any) -> Any:
             if not cached_tokens:
                 cached_tokens = getattr(raw_usage, "prompt_cache_hit_tokens", 0) or 0
 
+            reasoning_tokens = 0
+            ct_details = getattr(raw_usage, "completion_tokens_details", None)
+            if ct_details is not None:
+                reasoning_tokens = getattr(ct_details, "reasoning_tokens", 0) or 0
+
             return TokenUsage(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
                 cached_tokens=int(cached_tokens) if isinstance(cached_tokens, int) else 0,
+                reasoning_tokens=int(reasoning_tokens) if isinstance(reasoning_tokens, int) else 0,
             )
     except Exception:
         pass
@@ -55,16 +93,36 @@ def _parse_openai_usage(raw_usage: Any) -> Any:
 
 
 class OpenAIProvider:
-    def __init__(self, model: str, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        api_key: str | None = None,
+        thinking: Any = None,
+    ) -> None:
         self._model = model
         self._api_key = api_key
+        if thinking is not None:
+            from evidor.models import OpenAIThinkingConfig
+
+            self._thinking: OpenAIThinkingConfig | None = (
+                thinking
+                if isinstance(thinking, OpenAIThinkingConfig)
+                else OpenAIThinkingConfig.from_value(thinking)
+            )
+            self._thinking.validate()
+        else:
+            self._thinking = None
 
     @property
     def model(self) -> str:
         return self._model
 
+    @property
+    def thinking(self) -> Any:
+        return self._thinking
+
     def with_model(self, model: str) -> "OpenAIProvider":
-        return OpenAIProvider(model=model, api_key=self._api_key)
+        return OpenAIProvider(model=model, api_key=self._api_key, thinking=self._thinking)
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
         try:
@@ -115,6 +173,15 @@ class OpenAIProvider:
                     input_items.append({"role": message.role, "content": message.content})
 
             kwargs: dict[str, Any] = {"model": self._model, "input": input_items}
+            if self._thinking and self._thinking.enabled:
+                reasoning_config: dict[str, Any] = {}
+                if self._thinking.effort:
+                    reasoning_config["effort"] = self._thinking.effort
+                summary_val = getattr(self._thinking, "summary", None)
+                if summary_val:
+                    reasoning_config["summary"] = summary_val
+                if reasoning_config:
+                    kwargs["reasoning"] = reasoning_config
             if openai_tools:
                 kwargs["tools"] = [
                     {
@@ -128,14 +195,38 @@ class OpenAIProvider:
             response = client.responses.create(**kwargs)
             text = getattr(response, "output_text", None) or ""
             tool_calls: list[ToolCall] = []
+            thinking_parts: list[str] = []
             output_list = getattr(response, "output", None) or []
             for item in output_list:
-                if getattr(item, "type", None) == "function_call":
+                item_type = getattr(item, "type", None)
+                if item_type in ("reasoning", "thought"):
+                    item_texts: list[str] = []
+                    for attr_name in ("summary", "content", "text"):
+                        val = getattr(item, attr_name, None)
+                        extracted = _extract_reasoning_texts(val)
+                        if extracted:
+                            item_texts.extend(extracted)
+                            break
+                    if item_texts:
+                        thinking_parts.extend(item_texts)
+                elif item_type == "function_call":
                     args = _safe_parse_tool_arguments(item.arguments)
                     call_id = getattr(item, "call_id", None) or getattr(item, "id", f"call_{len(tool_calls)+1}")
                     tool_calls.append(ToolCall(id=call_id, name=item.name, arguments=args))
+
+            raw_resp_thinking = getattr(response, "reasoning", None) or getattr(response, "thinking", None)
+            if isinstance(raw_resp_thinking, str) and raw_resp_thinking:
+                thinking_parts.append(raw_resp_thinking)
+
+            thinking_text = "\n".join(thinking_parts) if thinking_parts else None
             usage = _parse_openai_usage(getattr(response, "usage", None))
-            return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls), usage=usage)
+            return GenerationResponse(
+                text=text,
+                model=self._model,
+                tool_calls=tuple(tool_calls),
+                usage=usage,
+                thinking=thinking_text,
+            )
 
         # Standard Chat Completions API
         chat_messages: list[dict[str, Any]] = []
@@ -164,6 +255,8 @@ class OpenAIProvider:
                 chat_messages.append({"role": message.role, "content": message.content})
 
         chat_kwargs: dict[str, Any] = {"model": self._model, "messages": chat_messages}
+        if self._thinking and self._thinking.enabled and self._thinking.effort:
+            chat_kwargs["reasoning_effort"] = self._thinking.effort
         if openai_tools:
             chat_kwargs["tools"] = openai_tools
 
@@ -177,6 +270,19 @@ class OpenAIProvider:
                 tc_args = _safe_parse_tool_arguments(tc.function.arguments)
                 tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=tc_args))
 
+        # Check for reasoning content if returned by provider (e.g. DeepSeek-R1 / compatible endpoints)
+        chat_thinking = (
+            getattr(choice_msg, "reasoning_content", None)
+            or getattr(choice_msg, "reasoning", None)
+        )
+        thinking_text = str(chat_thinking) if isinstance(chat_thinking, str) and chat_thinking else None
+
         usage = _parse_openai_usage(getattr(chat_response, "usage", None))
 
-        return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls), usage=usage)
+        return GenerationResponse(
+            text=text,
+            model=self._model,
+            tool_calls=tuple(tool_calls),
+            usage=usage,
+            thinking=thinking_text,
+        )

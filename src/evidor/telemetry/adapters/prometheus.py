@@ -27,13 +27,25 @@ except ImportError:
 
 
 class PrometheusSink(TelemetrySink):
-    """Telemetry sink exporting Evidor metrics to Prometheus."""
+    """Telemetry sink exporting Evidor operational metrics to Prometheus.
+
+    Args:
+        registry: The Prometheus CollectorRegistry to register metrics with (defaults to REGISTRY).
+        metric_prefix: Prefix for all emitted metric names (defaults to "evidor").
+        capture_content: Accepted for signature parity with other TelemetrySink implementations.
+            Because Prometheus exports only aggregated numeric counters and histograms—never
+            raw text payloads or scratchpads—no text content is ever emitted regardless of this flag.
+        capture_thinking: Accepted for signature parity with other TelemetrySink implementations.
+            Reasoning-token metrics (``tokens_total{token_type="reasoning"}``) are quantitative and
+            remain fully available regardless of whether raw thinking text capture is enabled.
+    """
 
     def __init__(
         self,
         registry: Any = None,
         metric_prefix: str = "evidor",
         capture_content: bool = True,
+        capture_thinking: bool = False,
     ) -> None:
         if not HAS_PROMETHEUS:
             raise ImportError(
@@ -42,6 +54,8 @@ class PrometheusSink(TelemetrySink):
             )
 
         self._registry = registry or REGISTRY
+        self._capture_content = capture_content
+        self._capture_thinking = capture_thinking
         pfx = metric_prefix.rstrip("_")
 
         def _metric(cls: type, name: str, doc: str, labels: list[str]) -> Any:
@@ -101,6 +115,7 @@ class PrometheusSink(TelemetrySink):
                     ("total", u.total_tokens),
                     ("cached", getattr(u, "cached_tokens", 0)),
                     ("cache_creation", getattr(u, "cache_creation_tokens", 0)),
+                    ("reasoning", getattr(u, "reasoning_tokens", 0)),
                 ):
                     if count > 0:
                         self.tokens_total.labels(provider=p, model=m, token_type=k).inc(count)

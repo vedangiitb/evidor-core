@@ -16,6 +16,8 @@ GEN_AI_USAGE_OUTPUT_TOKENS: Final[str] = "gen_ai.usage.output_tokens"
 GEN_AI_USAGE_TOTAL_TOKENS: Final[str] = "gen_ai.usage.total_tokens"
 GEN_AI_USAGE_CACHE_READ_TOKENS: Final[str] = "gen_ai.usage.cache_read_tokens"
 GEN_AI_USAGE_CACHE_WRITE_TOKENS: Final[str] = "gen_ai.usage.cache_creation_tokens"
+GEN_AI_USAGE_REASONING_TOKENS: Final[str] = "gen_ai.usage.reasoning.output_tokens"
+GEN_AI_REASONING_CONTENT: Final[str] = "gen_ai.reasoning_content"
 
 # --- OpenInference Semantic Conventions ---
 OPENINFERENCE_SPAN_KIND: Final[str] = "openinference.span.kind"
@@ -39,4 +41,6 @@ EVIDOR_RETRY_OUTCOME: Final[str] = "evidor.retry.outcome"
 EVIDOR_RETRY_DELAY_SECONDS: Final[str] = "evidor.retry.delay_seconds"
 EVIDOR_RETRY_MAX: Final[str] = "evidor.retry.max"
 EVIDOR_CALL_TYPE: Final[str] = "evidor.call_type"
+EVIDOR_THINKING_CONTENT: Final[str] = "evidor.thinking_content"
+
 
