@@ -59,9 +59,10 @@ def test_openai_thinking_config() -> None:
     c3 = OpenAIThinkingConfig.from_value(cfg)
     assert c3 is cfg
 
-    # Invalid effort
-    with pytest.raises(ValueError, match="Invalid OpenAI reasoning effort"):
-        OpenAIThinkingConfig(effort="extreme").validate()  # type: ignore[arg-type]
+    # Any custom or newly released effort mode is accepted
+    c_future = OpenAIThinkingConfig.from_value("ultra-high")
+    assert c_future.effort == "ultra-high"
+    assert c_future.enabled is True
 
     # Invalid type
     with pytest.raises(TypeError, match="Cannot coerce"):
@@ -74,10 +75,6 @@ def test_anthropic_thinking_config() -> None:
     assert cfg.type == "enabled"
     cfg.validate()
 
-    # Minimum budget constraint
-    with pytest.raises(ValueError, match="Anthropic manual thinking budget_tokens must be >= 1024"):
-        AnthropicThinkingConfig(budget_tokens=500).validate()
-
     # Adaptive effort
     adaptive = AnthropicThinkingConfig(type="adaptive", effort="high", budget_tokens=None)
     adaptive.validate()
@@ -89,10 +86,10 @@ def test_anthropic_thinking_config() -> None:
     assert c_int.budget_tokens == 2048
     assert c_int.type == "enabled"
 
-    # Coercion from effort string
-    c_str = AnthropicThinkingConfig.from_value("high")
+    # Coercion from effort string (including any future effort level)
+    c_str = AnthropicThinkingConfig.from_value("ultra")
     assert c_str.type == "adaptive"
-    assert c_str.effort == "high"
+    assert c_str.effort == "ultra"
 
     # Coercion from bool
     c_bool = AnthropicThinkingConfig.from_value(False)
@@ -116,10 +113,6 @@ def test_gemini_thinking_config() -> None:
     # Disabled
     cfg_off = GeminiThinkingConfig(thinking_budget=0)
     cfg_off.validate()
-
-    # Invalid budget < -1
-    with pytest.raises(ValueError, match="Gemini thinking_budget must be >= -1"):
-        GeminiThinkingConfig(thinking_budget=-5).validate()
 
     # Coercion from int
     c_int = GeminiThinkingConfig.from_value(1024)
@@ -353,7 +346,8 @@ def test_gemini_provider_thinking_extraction_and_config(monkeypatch: pytest.Monk
     assert res.text == "Final Gemini answer"
     assert res.thinking == "Thinking through problem..."
     assert len(res.thought_blocks) == 1
-    assert res.thought_blocks[0] is mock_thought_part
+    assert res.thought_blocks[0]["text"] == "Thinking through problem..."
+    assert res.thought_blocks[0]["thought"] is True
     assert res.usage is not None
     assert res.usage.reasoning_tokens == 40
 
@@ -499,4 +493,210 @@ def test_agent_emits_thinking_telemetry() -> None:
     assert llm_end.thinking_text == "Step-by-step agent deliberation"
     assert llm_end.token_usage is not None
     assert llm_end.token_usage.reasoning_tokens == 25
+
+
+def test_redact_event_capture_content_false_capture_thinking_true() -> None:
+    """Security boundary test: capture_thinking=True cannot override capture_content=False."""
+    ctx = TraceContext.new_root()
+    usage = TokenUsage(prompt_tokens=10, completion_tokens=50, total_tokens=60, reasoning_tokens=35)
+    event = LLMCallEndEvent(
+        trace_context=ctx,
+        provider="AnthropicProvider",
+        model="claude-3-7-sonnet",
+        output_text="Secret final answer",
+        thinking_text="Private internal deliberation",
+        token_usage=usage,
+    )
+
+    redacted = redact_event(event, capture_content=False, capture_thinking=True)
+
+    # Text content must be stripped
+    assert redacted.output_text == ""
+    assert redacted.thinking_text is None
+
+    # Quantitative token counts must be preserved
+    assert redacted.token_usage is not None
+    assert redacted.token_usage.reasoning_tokens == 35
+
+    attrs = redacted.to_attributes()
+    assert semconv.GEN_AI_REASONING_CONTENT not in attrs
+    assert semconv.EVIDOR_THINKING_CONTENT not in attrs
+    assert attrs[semconv.GEN_AI_USAGE_REASONING_TOKENS] == 35
+
+
+def test_openai_thinking_forward_compatible_models() -> None:
+    # Any model name is accepted without client-side gating for forward compatibility
+    p1 = OpenAIProvider(model="o3-mini", thinking="high")
+    assert p1.thinking.effort == "high"
+
+    p2 = OpenAIProvider(model="gpt-4o", thinking="low")
+    assert p2.thinking.effort == "low"
+
+    p3 = OpenAIProvider(model="future-o4-preview", thinking="medium")
+    assert p3.thinking.effort == "medium"
+
+    p4 = OpenAIProvider(model="gpt-4o", thinking=False)
+    assert p4.thinking.enabled is False
+
+
+def test_openai_responses_api_thinking_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_openai = types.ModuleType("openai")
+    mock_client = MagicMock()
+    # Configure Responses API mock
+    mock_reasoning_item = MagicMock(type="reasoning", summary="Responses API deliberate steps")
+    mock_text_item = MagicMock(type="message")
+    mock_resp = MagicMock(
+        output=[mock_reasoning_item, mock_text_item],
+        output_text="Responses API final answer",
+        usage=MagicMock(
+            prompt_tokens=50,
+            completion_tokens=100,
+            total_tokens=150,
+            prompt_tokens_details=None,
+            completion_tokens_details=MagicMock(reasoning_tokens=80),
+        ),
+    )
+    mock_client.responses.create.return_value = mock_resp
+    mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    provider = OpenAIProvider(model="o3-mini", thinking="high")
+    res = provider.generate(GenerationRequest(prompt="Deep math"))
+
+    assert res.text == "Responses API final answer"
+    assert res.thinking == "Responses API deliberate steps"
+    assert res.usage is not None
+    assert res.usage.reasoning_tokens == 80
+
+    call_kwargs = mock_client.responses.create.call_args.kwargs
+    assert call_kwargs["reasoning_effort"] == "high"
+
+
+def test_openai_chat_completions_reasoning_content_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_openai = types.ModuleType("openai")
+    mock_client = MagicMock(spec=["chat"])
+    mock_choice = MagicMock()
+    mock_choice.message.content = "Final solution"
+    mock_choice.message.reasoning_content = "DeepSeek-R1 style reasoning steps"
+    mock_choice.message.tool_calls = None
+    mock_usage = MagicMock(
+        prompt_tokens=40,
+        completion_tokens=120,
+        total_tokens=160,
+        prompt_tokens_details=None,
+        completion_tokens_details=MagicMock(reasoning_tokens=90),
+    )
+    mock_resp = MagicMock(choices=[mock_choice], usage=mock_usage)
+    mock_client.chat.completions.create.return_value = mock_resp
+    mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    provider = OpenAIProvider(model="o1", thinking="medium")
+    res = provider.generate(GenerationRequest(prompt="Logic puzzle"))
+
+    assert res.text == "Final solution"
+    assert res.thinking == "DeepSeek-R1 style reasoning steps"
+    assert res.usage is not None
+    assert res.usage.reasoning_tokens == 90
+
+
+def test_anthropic_forward_compatibility() -> None:
+    # Any model name is accepted without client-side gating for forward compatibility
+    p_any = AnthropicProvider(model="claude-future-model", thinking=2048)
+    assert p_any.thinking.budget_tokens == 2048
+    assert p_any._max_tokens == 2048 + 2048
+
+    # When user explicitly provides max_tokens, it is respected as-is without client-side blocking
+    p_explicit = AnthropicProvider(model="claude-future-model", max_tokens=1500, thinking=2048)
+    assert p_explicit._max_tokens == 1500
+
+    # Any future effort level string is passed through
+    p_older = AnthropicProvider(model="claude-3-5-sonnet", thinking="ultra")
+    assert p_older.thinking.effort == "ultra"
+
+    p2 = AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking=False)
+    assert p2.thinking.enabled is False
+
+
+def test_gemini_multiturn_thought_signature_preservation(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    class FakePart:
+        def __init__(self, text: str = "", thought: bool = False, thought_signature: Any = None, **kwargs: Any) -> None:
+            self.text = text
+            self.thought = thought
+            self.thought_signature = thought_signature
+            self.function_call = None
+            self.kwargs = kwargs
+
+        @classmethod
+        def from_text(cls, text: str) -> Any:
+            return cls(text=text)
+
+        @classmethod
+        def from_function_call(cls, name: str, args: dict[str, Any]) -> Any:
+            p = cls()
+            fc = MagicMock()
+            fc.name = name
+            fc.args = args
+            p.function_call = fc
+            return p
+
+        @classmethod
+        def from_function_response(cls, name: str, response: dict[str, Any]) -> Any:
+            p = cls()
+            fr = MagicMock()
+            fr.name = name
+            fr.response = response
+            p.function_response = fr
+            return p
+
+    class FakeContent:
+        def __init__(self, role: str, parts: list[Any]) -> None:
+            self.role = role
+            self.parts = parts
+
+    mock_types.Part = FakePart  # type: ignore[attr-defined]
+    mock_types.Content = FakeContent  # type: ignore[attr-defined]
+    mock_types.GenerateContentConfig = MagicMock()  # type: ignore[attr-defined]
+    mock_types.ThinkingConfig = MagicMock()  # type: ignore[attr-defined]
+
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = MagicMock(
+        candidates=[MagicMock(content=MagicMock(parts=[]))],
+        usage_metadata=None,
+    )
+    mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-2.5-flash")
+
+    # Multi-turn conversation with thought block containing cryptographic signature
+    tc = ToolCall(id="call_1", name="search", arguments={"q": "test"})
+    thought_block = {
+        "text": "Internal Gemini reasoning...",
+        "thought": True,
+        "thought_signature": b"crypto_gemini_sig_xyz",
+    }
+    messages = [
+        Message(role="user", content="Search query"),
+        Message(role="assistant", content="", tool_calls=(tc,), thought_blocks=(thought_block,)),
+        Message(role="tool", content="search result", tool_call_id="call_1", name="search"),
+    ]
+
+    provider.generate(GenerationRequest(messages=messages))
+
+    call_contents = mock_client.models.generate_content.call_args.kwargs["contents"]
+    assistant_content = call_contents[1]
+    assert assistant_content.role == "model"
+
+    # Verify that the thought part was reconstructed with thought=True and signature intact
+    th_part = assistant_content.parts[0]
+    assert th_part.thought is True
+    assert th_part.text == "Internal Gemini reasoning..."
+    assert th_part.thought_signature == b"crypto_gemini_sig_xyz"
+
 

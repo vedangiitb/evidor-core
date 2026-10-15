@@ -30,7 +30,16 @@ class TelemetrySink(Protocol):
 
 
 class InMemorySink:
-    """Thread-safe in-memory sink for testing, inspection, and local assertions."""
+    """Thread-safe in-memory sink for testing, inspection, and local assertions.
+
+    Args:
+        capture_content: When True (default), user prompts, model outputs, and tool
+            arguments are captured. When False (metadata-only), all raw text payloads
+            are redacted.
+        capture_thinking: When True and capture_content is True, internal thinking
+            scratchpads are captured. Note: capture_thinking cannot override
+            capture_content=False (privacy boundary).
+    """
 
     def __init__(self, capture_content: bool = True, capture_thinking: bool = False) -> None:
         self._capture_content = capture_content
@@ -78,7 +87,15 @@ class InMemorySink:
 
 
 class ConsoleSink:
-    """Simple sink printing events to stderr or stdout for local debugging."""
+    """Simple sink printing events to stderr or stdout for local debugging.
+
+    Args:
+        stream: Output file stream (defaults to sys.stderr).
+        capture_content: When True (default), payload texts are printed.
+        capture_thinking: When True and capture_content is True, internal thinking
+            scratchpads are printed. Note: capture_thinking cannot override
+            capture_content=False (privacy boundary).
+    """
 
     def __init__(self, stream: Any = None, capture_content: bool = True, capture_thinking: bool = False) -> None:
         self._stream = stream or sys.stderr

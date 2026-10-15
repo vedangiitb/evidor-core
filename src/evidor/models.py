@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 
 MessageRole = Literal["system", "user", "assistant", "tool"]
-ThinkingEffort = Literal["low", "medium", "high", "minimal"]
+ThinkingEffort = str
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,8 +32,7 @@ class OpenAIThinkingConfig(ThinkingConfig):
     effort: ThinkingEffort = "medium"
 
     def validate(self) -> None:
-        if self.effort not in ("low", "medium", "high", "minimal"):
-            raise ValueError(f"Invalid OpenAI reasoning effort: {self.effort}")
+        pass
 
     @classmethod
     def from_value(cls, value: Any) -> OpenAIThinkingConfig:
@@ -41,8 +40,8 @@ class OpenAIThinkingConfig(ThinkingConfig):
             return value
         if isinstance(value, bool):
             return cls(enabled=value)
-        if isinstance(value, str) and value in ("low", "medium", "high", "minimal"):
-            return cls(enabled=True, effort=value)  # type: ignore[arg-type]
+        if isinstance(value, str):
+            return cls(enabled=True, effort=value)
         raise TypeError(f"Cannot coerce {type(value).__name__} to OpenAIThinkingConfig")
 
 
@@ -51,16 +50,11 @@ class AnthropicThinkingConfig(ThinkingConfig):
     """Configuration for Anthropic extended thinking (Claude 3.7 Sonnet, Claude 4+)."""
 
     budget_tokens: int | None = 2048
-    type: Literal["enabled", "adaptive"] = "enabled"
-    effort: Literal["low", "medium", "high", "max"] | None = None
+    type: str = "enabled"
+    effort: str | None = None
 
     def validate(self) -> None:
-        if self.enabled and self.type == "enabled":
-            if self.budget_tokens is None or self.budget_tokens < 1024:
-                raise ValueError("Anthropic manual thinking budget_tokens must be >= 1024")
-        if self.enabled and self.type == "adaptive" and self.effort:
-            if self.effort not in ("low", "medium", "high", "max"):
-                raise ValueError(f"Invalid Anthropic adaptive effort: {self.effort}")
+        pass
 
     @classmethod
     def from_value(cls, value: Any) -> AnthropicThinkingConfig:
@@ -71,10 +65,9 @@ class AnthropicThinkingConfig(ThinkingConfig):
         if isinstance(value, int):
             return cls(enabled=True, type="enabled", budget_tokens=value)
         if isinstance(value, str):
-            if value in ("low", "medium", "high", "max"):
-                return cls(enabled=True, type="adaptive", effort=value, budget_tokens=None)  # type: ignore[arg-type]
             if value == "adaptive":
                 return cls(enabled=True, type="adaptive", budget_tokens=None)
+            return cls(enabled=True, type="adaptive", effort=value, budget_tokens=None)
         raise TypeError(f"Cannot coerce {type(value).__name__} to AnthropicThinkingConfig")
 
 
@@ -86,8 +79,7 @@ class GeminiThinkingConfig(ThinkingConfig):
     include_thoughts: bool = True
 
     def validate(self) -> None:
-        if self.thinking_budget is not None and self.thinking_budget < -1:
-            raise ValueError("Gemini thinking_budget must be >= -1")
+        pass
 
     @classmethod
     def from_value(cls, value: Any) -> GeminiThinkingConfig:

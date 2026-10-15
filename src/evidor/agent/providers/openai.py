@@ -141,7 +141,7 @@ class OpenAIProvider:
                     input_items.append({"role": message.role, "content": message.content})
 
             kwargs: dict[str, Any] = {"model": self._model, "input": input_items}
-            if self._thinking and self._thinking.enabled:
+            if self._thinking and self._thinking.enabled and self._thinking.effort:
                 kwargs["reasoning_effort"] = self._thinking.effort
             if openai_tools:
                 kwargs["tools"] = [
@@ -156,14 +156,34 @@ class OpenAIProvider:
             response = client.responses.create(**kwargs)
             text = getattr(response, "output_text", None) or ""
             tool_calls: list[ToolCall] = []
+            thinking_parts: list[str] = []
             output_list = getattr(response, "output", None) or []
             for item in output_list:
-                if getattr(item, "type", None) == "function_call":
+                item_type = getattr(item, "type", None)
+                if item_type in ("reasoning", "thought"):
+                    for attr_name in ("content", "text", "summary"):
+                        val = getattr(item, attr_name, None)
+                        if isinstance(val, str) and val:
+                            thinking_parts.append(val)
+                            break
+                elif item_type == "function_call":
                     args = _safe_parse_tool_arguments(item.arguments)
                     call_id = getattr(item, "call_id", None) or getattr(item, "id", f"call_{len(tool_calls)+1}")
                     tool_calls.append(ToolCall(id=call_id, name=item.name, arguments=args))
+
+            raw_resp_thinking = getattr(response, "reasoning", None) or getattr(response, "thinking", None)
+            if isinstance(raw_resp_thinking, str) and raw_resp_thinking:
+                thinking_parts.append(raw_resp_thinking)
+
+            thinking_text = "".join(thinking_parts) if thinking_parts else None
             usage = _parse_openai_usage(getattr(response, "usage", None))
-            return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls), usage=usage)
+            return GenerationResponse(
+                text=text,
+                model=self._model,
+                tool_calls=tuple(tool_calls),
+                usage=usage,
+                thinking=thinking_text,
+            )
 
         # Standard Chat Completions API
         chat_messages: list[dict[str, Any]] = []
@@ -192,7 +212,7 @@ class OpenAIProvider:
                 chat_messages.append({"role": message.role, "content": message.content})
 
         chat_kwargs: dict[str, Any] = {"model": self._model, "messages": chat_messages}
-        if self._thinking and self._thinking.enabled:
+        if self._thinking and self._thinking.enabled and self._thinking.effort:
             chat_kwargs["reasoning_effort"] = self._thinking.effort
         if openai_tools:
             chat_kwargs["tools"] = openai_tools
@@ -207,6 +227,19 @@ class OpenAIProvider:
                 tc_args = _safe_parse_tool_arguments(tc.function.arguments)
                 tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=tc_args))
 
+        # Check for reasoning content if returned by provider (e.g. DeepSeek-R1 / compatible endpoints)
+        chat_thinking = (
+            getattr(choice_msg, "reasoning_content", None)
+            or getattr(choice_msg, "reasoning", None)
+        )
+        thinking_text = str(chat_thinking) if isinstance(chat_thinking, str) and chat_thinking else None
+
         usage = _parse_openai_usage(getattr(chat_response, "usage", None))
 
-        return GenerationResponse(text=text, model=self._model, tool_calls=tuple(tool_calls), usage=usage)
+        return GenerationResponse(
+            text=text,
+            model=self._model,
+            tool_calls=tuple(tool_calls),
+            usage=usage,
+            thinking=thinking_text,
+        )

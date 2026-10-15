@@ -10,7 +10,7 @@ class AnthropicProvider:
         self,
         model: str,
         api_key: str | None = None,
-        max_tokens: int = 1024,
+        max_tokens: int | None = None,
         enable_prompt_caching: bool = True,
         thinking: Any = None,
     ) -> None:
@@ -26,11 +26,14 @@ class AnthropicProvider:
                 else AnthropicThinkingConfig.from_value(thinking)
             )
             self._thinking.validate()
-            if self._thinking.enabled and self._thinking.type == "enabled" and self._thinking.budget_tokens:
-                if max_tokens <= self._thinking.budget_tokens:
-                    max_tokens = self._thinking.budget_tokens + 2048
         else:
             self._thinking = None
+
+        if max_tokens is None:
+            if self._thinking and self._thinking.enabled and self._thinking.budget_tokens:
+                max_tokens = self._thinking.budget_tokens + 2048
+            else:
+                max_tokens = 1024
         self._max_tokens = max_tokens
 
     @property

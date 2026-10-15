@@ -27,7 +27,18 @@ except ImportError:
 
 
 class PrometheusSink(TelemetrySink):
-    """Telemetry sink exporting Evidor metrics to Prometheus."""
+    """Telemetry sink exporting Evidor operational metrics to Prometheus.
+
+    Args:
+        registry: The Prometheus CollectorRegistry to register metrics with (defaults to REGISTRY).
+        metric_prefix: Prefix for all emitted metric names (defaults to "evidor").
+        capture_content: Accepted for signature parity with other TelemetrySink implementations.
+            Because Prometheus exports only aggregated numeric counters and histograms—never
+            raw text payloads or scratchpads—no text content is ever emitted regardless of this flag.
+        capture_thinking: Accepted for signature parity with other TelemetrySink implementations.
+            Reasoning-token metrics (``tokens_total{token_type="reasoning"}``) are quantitative and
+            remain fully available regardless of whether raw thinking text capture is enabled.
+    """
 
     def __init__(
         self,

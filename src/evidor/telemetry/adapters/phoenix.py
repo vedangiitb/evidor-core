@@ -180,10 +180,19 @@ class PhoenixSink(OpenTelemetrySink):
                         )
 
                     # OpenInference structured output message attributes
-                    if event.output_text or event.output_tool_calls:
+                    if event.output_text or event.output_tool_calls or event.thinking_text:
                         span.set_attribute("llm.output_messages.0.message.role", "assistant")
-                        if event.output_text:
+                        if event.thinking_text:
+                            # Use OpenInference structured contents array (message.contents)
+                            # without colliding with scalar message.content
+                            span.set_attribute("llm.output_messages.0.message.contents.0.message_content.type", "reasoning")
+                            span.set_attribute("llm.output_messages.0.message.contents.0.message_content.text", event.thinking_text)
+                            if event.output_text:
+                                span.set_attribute("llm.output_messages.0.message.contents.1.message_content.type", "text")
+                                span.set_attribute("llm.output_messages.0.message.contents.1.message_content.text", event.output_text)
+                        elif event.output_text:
                             span.set_attribute("llm.output_messages.0.message.content", event.output_text)
+
                         for idx, tc in enumerate(event.output_tool_calls):
                             prefix = f"llm.output_messages.0.message.tool_calls.{idx}.tool_call"
                             if isinstance(tc, dict):
@@ -195,10 +204,6 @@ class PhoenixSink(OpenTelemetrySink):
                                     args = tc["arguments"]
                                     args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
                                     span.set_attribute(f"{prefix}.function.arguments", args_str)
-
-                    if event.thinking_text:
-                        span.set_attribute("llm.output_messages.0.message.content.0.type", "reasoning")
-                        span.set_attribute("llm.output_messages.0.message.content.0.text", event.thinking_text)
 
                 if event.token_usage:
                     if event.token_usage.prompt_tokens > 0:

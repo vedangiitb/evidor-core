@@ -364,7 +364,21 @@ def redact_event(
     capture_content: bool = False,
     capture_thinking: bool = False,
 ) -> TelemetryEvent:
-    """Return a copy of the telemetry event with raw prompt, message, tool, or thinking contents stripped."""
+    """Return a copy of the telemetry event with raw prompt, message, tool, or thinking contents stripped.
+
+    Security & Privacy Boundary:
+        ``capture_content`` acts as the primary gate for all text payloads (prompts, outputs, tool arguments).
+        ``capture_thinking`` is a secondary filter layered on top of ``capture_content``.
+
+        If ``capture_content`` is False (metadata-only mode), all text content—including internal thinking
+        scratchpads—is strictly redacted regardless of ``capture_thinking``. In other words,
+        ``capture_thinking=True`` cannot override ``capture_content=False``.
+
+        When ``capture_content=False, capture_thinking=True``:
+        - All text payloads (prompt, output_text, thinking_text, tool arguments) are redacted.
+        - Quantitative metrics such as latency and token counts (including reasoning_tokens in token_usage)
+          are fully preserved.
+    """
     if isinstance(event, AgentRunStartEvent):
         if not capture_content:
             return replace(event, user_prompt="", system_prompt=None)

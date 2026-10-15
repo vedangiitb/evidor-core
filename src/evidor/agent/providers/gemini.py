@@ -181,12 +181,27 @@ class GeminiProvider:
                 parts: list[Any] = []
                 if message.thought_blocks:
                     for tb in message.thought_blocks:
-                        if hasattr(tb, "text") or hasattr(tb, "thought") or hasattr(tb, "function_call"):
+                        if hasattr(tb, "text") and getattr(tb, "thought", False):
                             parts.append(tb)
-                        elif isinstance(tb, dict) and "thought" in tb:
-                            p = types.Part.from_text(text=tb.get("text", ""))
-                            p.thought = True
+                        elif isinstance(tb, dict) and tb.get("thought", False):
+                            tb_text = tb.get("text", "")
+                            tb_sig = tb.get("thought_signature") or tb.get("thoughtSignature")
+                            try:
+                                if tb_sig is not None:
+                                    p = types.Part(text=tb_text, thought=True, thought_signature=tb_sig)
+                                else:
+                                    p = types.Part(text=tb_text, thought=True)
+                            except Exception:
+                                p = types.Part.from_text(text=tb_text)
+                                p.thought = True
+                                if tb_sig is not None:
+                                    try:
+                                        setattr(p, "thought_signature", tb_sig)
+                                    except Exception:
+                                        pass
                             parts.append(p)
+                        elif hasattr(tb, "text") or hasattr(tb, "function_call"):
+                            parts.append(tb)
                 if message.content and not parts:
                     parts.append(types.Part.from_text(text=message.content))
                 elif message.content and parts and not any(
@@ -289,7 +304,14 @@ class GeminiProvider:
                     or getattr(part, "thought_signature", None)
                     or getattr(part, "thoughtSignature", None)
                 ):
-                    thought_blocks.append(part)
+                    sig = getattr(part, "thought_signature", None) or getattr(part, "thoughtSignature", None)
+                    tb_dict: dict[str, Any] = {
+                        "text": part_text or "",
+                        "thought": True,
+                    }
+                    if sig is not None:
+                        tb_dict["thought_signature"] = sig
+                    thought_blocks.append(tb_dict)
 
                 fc = getattr(part, "function_call", None)
                 if fc:
