@@ -66,6 +66,7 @@ class TokenUsage:
     total_tokens: int = 0
     cached_tokens: int = 0
     cache_creation_tokens: int = 0
+    reasoning_tokens: int = 0
 
     @classmethod
     def from_counts(
@@ -75,6 +76,7 @@ class TokenUsage:
         *,
         cached_tokens: int = 0,
         cache_creation_tokens: int = 0,
+        reasoning_tokens: int = 0,
     ) -> TokenUsage:
         return cls(
             prompt_tokens=prompt_tokens,
@@ -82,6 +84,7 @@ class TokenUsage:
             total_tokens=prompt_tokens + completion_tokens,
             cached_tokens=cached_tokens,
             cache_creation_tokens=cache_creation_tokens,
+            reasoning_tokens=reasoning_tokens,
         )
 
 
@@ -199,6 +202,7 @@ class LLMCallEndEvent(TelemetryEvent):
     tool_calls_count: int = 0
     output_text: str = ""
     output_tool_calls: tuple[dict[str, Any], ...] = ()
+    thinking_text: str | None = None
     error: str | None = None
     retry_attempt: int = 0
 
@@ -221,6 +225,9 @@ class LLMCallEndEvent(TelemetryEvent):
             attrs["llm.output_text"] = self.output_text
         if self.output_tool_calls:
             attrs["llm.output_tool_calls"] = list(self.output_tool_calls)
+        if self.thinking_text:
+            attrs[semconv.GEN_AI_REASONING_CONTENT] = self.thinking_text
+            attrs[semconv.EVIDOR_THINKING_CONTENT] = self.thinking_text
         if self.token_usage:
             attrs[semconv.GEN_AI_USAGE_INPUT_TOKENS] = self.token_usage.prompt_tokens
             attrs[semconv.GEN_AI_USAGE_OUTPUT_TOKENS] = self.token_usage.completion_tokens
@@ -229,6 +236,8 @@ class LLMCallEndEvent(TelemetryEvent):
                 attrs[semconv.GEN_AI_USAGE_CACHE_READ_TOKENS] = self.token_usage.cached_tokens
             if self.token_usage.cache_creation_tokens > 0:
                 attrs[semconv.GEN_AI_USAGE_CACHE_WRITE_TOKENS] = self.token_usage.cache_creation_tokens
+            if self.token_usage.reasoning_tokens > 0:
+                attrs[semconv.GEN_AI_USAGE_REASONING_TOKENS] = self.token_usage.reasoning_tokens
         if self.error:
             attrs[semconv.ERROR_MESSAGE] = self.error
         return attrs
@@ -349,21 +358,49 @@ class ErrorEvent(TelemetryEvent):
         return attrs
 
 
-def redact_event(event: TelemetryEvent) -> TelemetryEvent:
-    """Return a copy of the telemetry event with raw prompt, message, and tool contents stripped."""
+def redact_event(
+    event: TelemetryEvent,
+    *,
+    capture_content: bool = False,
+    capture_thinking: bool = False,
+) -> TelemetryEvent:
+    """Return a copy of the telemetry event with raw prompt, message, tool, or thinking contents stripped.
+
+    Security & Privacy Boundary:
+        ``capture_content`` acts as the primary gate for all text payloads (prompts, outputs, tool arguments).
+        ``capture_thinking`` is a secondary filter layered on top of ``capture_content``.
+
+        If ``capture_content`` is False (metadata-only mode), all text content—including internal thinking
+        scratchpads—is strictly redacted regardless of ``capture_thinking``. In other words,
+        ``capture_thinking=True`` cannot override ``capture_content=False``.
+
+        When ``capture_content=False, capture_thinking=True``:
+        - All text payloads (prompt, output_text, thinking_text, tool arguments) are redacted.
+        - Quantitative metrics such as latency and token counts (including reasoning_tokens in token_usage)
+          are fully preserved.
+    """
     if isinstance(event, AgentRunStartEvent):
-        return replace(event, user_prompt="", system_prompt=None)
-    if isinstance(event, AgentRunEndEvent):
-        return replace(event, output_text="")
-    if isinstance(event, LLMCallStartEvent):
-        return replace(event, input_prompt="", input_messages=())
-    if isinstance(event, LLMCallEndEvent):
-        return replace(event, output_text="", output_tool_calls=())
-    if isinstance(event, ToolCallStartEvent):
-        return replace(event, arguments={})
-    if isinstance(event, ToolCallEndEvent):
-        return replace(event, result=None)
-    if isinstance(event, MCPCallStartEvent):
-        return replace(event, arguments={})
+        if not capture_content:
+            return replace(event, user_prompt="", system_prompt=None)
+    elif isinstance(event, AgentRunEndEvent):
+        if not capture_content:
+            return replace(event, output_text="")
+    elif isinstance(event, LLMCallStartEvent):
+        if not capture_content:
+            return replace(event, input_prompt="", input_messages=())
+    elif isinstance(event, LLMCallEndEvent):
+        new_output = event.output_text if capture_content else ""
+        new_tools = event.output_tool_calls if capture_content else ()
+        new_thinking = event.thinking_text if (capture_content and capture_thinking) else None
+        return replace(event, output_text=new_output, output_tool_calls=new_tools, thinking_text=new_thinking)
+    elif isinstance(event, ToolCallStartEvent):
+        if not capture_content:
+            return replace(event, arguments={})
+    elif isinstance(event, ToolCallEndEvent):
+        if not capture_content:
+            return replace(event, result=None)
+    elif isinstance(event, MCPCallStartEvent):
+        if not capture_content:
+            return replace(event, arguments={})
     return event
 

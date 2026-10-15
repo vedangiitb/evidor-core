@@ -43,6 +43,7 @@ class PhoenixSink(OpenTelemetrySink):
         tracer_provider: Any = None,
         tracer_name: str = "evidor",
         capture_content: bool = True,
+        capture_thinking: bool = False,
         **register_kwargs: Any,
     ) -> None:
         if not HAS_PHOENIX:
@@ -62,6 +63,7 @@ class PhoenixSink(OpenTelemetrySink):
             tracer_provider=tracer_provider,
             tracer_name=tracer_name,
             capture_content=capture_content,
+            capture_thinking=capture_thinking,
         )
 
     @staticmethod
@@ -178,10 +180,19 @@ class PhoenixSink(OpenTelemetrySink):
                         )
 
                     # OpenInference structured output message attributes
-                    if event.output_text or event.output_tool_calls:
+                    if event.output_text or event.output_tool_calls or event.thinking_text:
                         span.set_attribute("llm.output_messages.0.message.role", "assistant")
-                        if event.output_text:
+                        if event.thinking_text:
+                            # Use OpenInference structured contents array (message.contents)
+                            # without colliding with scalar message.content
+                            span.set_attribute("llm.output_messages.0.message.contents.0.message_content.type", "reasoning")
+                            span.set_attribute("llm.output_messages.0.message.contents.0.message_content.text", event.thinking_text)
+                            if event.output_text:
+                                span.set_attribute("llm.output_messages.0.message.contents.1.message_content.type", "text")
+                                span.set_attribute("llm.output_messages.0.message.contents.1.message_content.text", event.output_text)
+                        elif event.output_text:
                             span.set_attribute("llm.output_messages.0.message.content", event.output_text)
+
                         for idx, tc in enumerate(event.output_tool_calls):
                             prefix = f"llm.output_messages.0.message.tool_calls.{idx}.tool_call"
                             if isinstance(tc, dict):
@@ -201,6 +212,11 @@ class PhoenixSink(OpenTelemetrySink):
                         span.set_attribute("llm.token_count.completion", event.token_usage.completion_tokens)
                     if event.token_usage.total_tokens > 0:
                         span.set_attribute("llm.token_count.total", event.token_usage.total_tokens)
+                    if event.token_usage.reasoning_tokens > 0:
+                        span.set_attribute(
+                            "llm.token_count.completion_details.reasoning",
+                            event.token_usage.reasoning_tokens,
+                        )
 
             elif isinstance(event, ToolCallEndEvent):
                 if self._capture_content and event.result is not None:

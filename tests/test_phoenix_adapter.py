@@ -285,3 +285,52 @@ def test_phoenix_tool_call_response_enrichment() -> None:
     assert llm_span.attributes.get("llm.token_count.total") == 185
 
 
+def test_phoenix_reasoning_structured_output_attributes() -> None:
+    tp, exporter = create_phoenix_test_tracer()
+    sink = PhoenixSink(tracer_provider=tp, capture_content=True, capture_thinking=True)
+
+    ctx = TraceContext.new_root()
+    sink.write([
+        LLMCallStartEvent(
+            trace_context=ctx,
+            provider="anthropic",
+            model="claude-3-7-sonnet-20250219",
+            input_prompt="Solve riddle",
+        ),
+        LLMCallEndEvent(
+            trace_context=ctx,
+            provider="anthropic",
+            model="claude-3-7-sonnet-20250219",
+            duration_ms=450.0,
+            token_usage=TokenUsage(
+                prompt_tokens=100,
+                completion_tokens=250,
+                total_tokens=350,
+                reasoning_tokens=180,
+            ),
+            output_text="The answer is 42",
+            thinking_text="Step 1: Deliberate\nStep 2: Conclude",
+        ),
+    ])
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    span = spans[0]
+
+    # Verify structured message contents without scalar collision
+    attrs = span.attributes
+    assert attrs.get("llm.output_messages.0.message.role") == "assistant"
+    assert attrs.get("llm.output_messages.0.message.contents.0.message_content.type") == "reasoning"
+    assert attrs.get("llm.output_messages.0.message.contents.0.message_content.text") == "Step 1: Deliberate\nStep 2: Conclude"
+    assert attrs.get("llm.output_messages.0.message.contents.1.message_content.type") == "text"
+    assert attrs.get("llm.output_messages.0.message.contents.1.message_content.text") == "The answer is 42"
+    assert "llm.output_messages.0.message.content" not in attrs
+
+    # Top-level output.value is final visible text
+    assert attrs.get("output.value") == "The answer is 42"
+
+    # Token count reasoning breakdown
+    assert attrs.get("llm.token_count.completion_details.reasoning") == 180
+
+
+

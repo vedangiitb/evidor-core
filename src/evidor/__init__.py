@@ -18,7 +18,19 @@ from .mcp import (
     StdioServerConfig,
     StreamableHTTPServerConfig,
 )
-from .models import GenerationRequest, GenerationResponse, Message, SearchResult, ToolCall
+from .models import (
+    AnyThinkingConfig,
+    AnthropicThinkingConfig,
+    GeminiThinkingConfig,
+    GenerationRequest,
+    GenerationResponse,
+    Message,
+    OpenAIThinkingConfig,
+    SearchResult,
+    ThinkingConfig,
+    ThinkingEffort,
+    ToolCall,
+)
 from .retry import (
     DEFAULT_RETRY_CONFIG,
     RetryConfig,
@@ -76,6 +88,8 @@ from .tools import (
 __all__ = [
     "Agent",
     "AnthropicProvider",
+    "AnthropicThinkingConfig",
+    "AnyThinkingConfig",
     "BraveSearchProvider",
     "calculator",
     "calculate_backoff_delay",
@@ -95,6 +109,7 @@ __all__ = [
     "extract_retry_after",
     "fetch_webpage_content",
     "GeminiProvider",
+    "GeminiThinkingConfig",
     "GenerationRequest",
     "GenerationResponse",
     "get_current_time",
@@ -109,6 +124,7 @@ __all__ = [
     "Message",
     "ModelProvider",
     "OpenAIProvider",
+    "OpenAIThinkingConfig",
     "OpenTelemetrySink",
     "PhoenixSink",
     "PrometheusSink",
@@ -121,6 +137,8 @@ __all__ = [
     "StreamableHTTPServerConfig",
     "TelemetryRuntime",
     "TelemetrySink",
+    "ThinkingConfig",
+    "ThinkingEffort",
     "Tool",
     "ToolCall",
     "TraceContext",
