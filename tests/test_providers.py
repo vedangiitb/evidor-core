@@ -1006,4 +1006,118 @@ def test_gemini_provider_interactions_api_with_thinking(monkeypatch: pytest.Monk
     assert call_kwargs["generation_config"] == {"thinking_level": "high", "thinking_summaries": "auto"}
 
 
+# --- Compaction Tests ---
+
+
+def test_openai_provider_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_openai = types.ModuleType("openai")
+    mock_client = MagicMock()
+    mock_compaction_item = MagicMock(type="compaction", content="Encrypted compaction state")
+    mock_response = MagicMock(
+        id="resp_compact_1",
+        output_text="Answer after compaction",
+        output=[mock_compaction_item],
+        usage=None,
+    )
+    mock_client.responses.create.return_value = mock_response
+    mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    provider = OpenAIProvider(model="gpt-6-astra", api_key="sk-test", compact_threshold=100000)
+    assert provider.compact_threshold == 100000
+
+    new_provider = provider.with_model("gpt-6.1-sol")
+    assert new_provider.compact_threshold == 100000
+
+    request = GenerationRequest(prompt="Long context turn")
+    response = provider.generate(request)
+
+    assert response.text == "Answer after compaction"
+    assert response.compaction == "Encrypted compaction state"
+
+    call_kwargs = mock_client.responses.create.call_args.kwargs
+    assert call_kwargs["context_management"] == [
+        {"type": "compaction", "compact_threshold": 100000}
+    ]
+
+
+def test_anthropic_provider_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+    mock_compaction_block = MagicMock(
+        type="compaction",
+        content="Summary: user requested web scraper.",
+    )
+    mock_text_block = MagicMock(
+        type="text",
+        text="Here is the continuation.",
+    )
+    mock_response = MagicMock(
+        id="msg_compact_1",
+        content=[mock_compaction_block, mock_text_block],
+        usage=None,
+    )
+    mock_client.beta.messages.create.return_value = mock_response
+    mock_anthropic.Anthropic = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(
+        model="claude-3-7-sonnet-20250219",
+        api_key="ant-key",
+        compact_threshold=150000,
+        compact_instructions="Focus on architecture decisions.",
+    )
+    assert provider.compact_threshold == 150000
+    assert provider.compact_instructions == "Focus on architecture decisions."
+
+    new_provider = provider.with_model("claude-opus-4-6")
+    assert new_provider.compact_threshold == 150000
+    assert new_provider.compact_instructions == "Focus on architecture decisions."
+
+    request = GenerationRequest(prompt="Begin complex refactor")
+    response = provider.generate(request)
+
+    assert response.text == "Here is the continuation."
+    assert response.compaction == "Summary: user requested web scraper."
+
+    call_kwargs = mock_client.beta.messages.create.call_args.kwargs
+    assert call_kwargs["betas"] == ["compact-2026-01-12"]
+    assert call_kwargs["context_management"] == {
+        "edits": [
+            {
+                "type": "compact_20260112",
+                "trigger": {"type": "input_tokens", "value": 150000},
+                "instructions": "Focus on architecture decisions.",
+            }
+        ]
+    }
+
+    # Verify that formatting replayed messages puts compaction block first
+    replayed_messages = [
+        Message(role="user", content="Begin complex refactor"),
+        Message(
+            role="assistant",
+            content="Here is the continuation.",
+            compaction=response.compaction,
+        ),
+        Message(role="user", content="Next step"),
+    ]
+    formatted = provider._format_messages(replayed_messages)
+    assert len(formatted) == 3
+    assistant_formatted = formatted[1]
+    assert assistant_formatted["role"] == "assistant"
+    assert isinstance(assistant_formatted["content"], list)
+    assert assistant_formatted["content"][0] == {
+        "type": "compaction",
+        "content": "Summary: user requested web scraper.",
+    }
+    assert assistant_formatted["content"][1] == {
+        "type": "text",
+        "text": "Here is the continuation.",
+    }
+
+
+
 

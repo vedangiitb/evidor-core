@@ -49,7 +49,12 @@ class BaseProvider:
     @property
     def context_strategy(self) -> str:
         """The native context management strategy implemented by this provider."""
-        return "stateless"
+        return "stateless_replay"
+
+    @property
+    def compact_threshold(self) -> int | None:
+        """The token threshold for provider-native context compaction, if configured."""
+        return getattr(self, "_compact_threshold", None)
 
 
 def extract_system_prompt(request: GenerationRequest) -> str:

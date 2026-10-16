@@ -112,18 +112,26 @@ if response.tool_calls:
 
 ---
 
-## 2. Provider-Managed Conversations
+## 2. Multi-turn Conversations & Context Management
 
-Modern LLM providers (OpenAI, Google Gemini, Anthropic) provide native server-side context and session management. Rather than running error-prone client-side token counters, sliding windows, or summarization loops, Evidor delegates context management directly to each provider's native mechanism via `Agent`.
+Evidor provides a unified interface for multi-turn conversational agents while exposing the underlying provider architectures with complete transparency:
+
+1. **Server-Side State Chaining (OpenAI & Google Gemini)**:
+   - **OpenAI (`OpenAIProvider`)**: Uses the Responses API `previous_response_id` (and optional `conversation_id`). State is managed server-side by OpenAI; on each turn, Evidor transmits only the newest turn's delta messages.
+   - **Google Gemini (`GeminiProvider`)**: Uses the Interactions API `previous_interaction_id`. State is managed server-side by Google GenAI; on each turn, Evidor transmits only the newest input step chained to the preceding interaction.
+
+2. **Stateless Replay with Prompt Caching (Anthropic Claude)**:
+   - **Anthropic (`AnthropicProvider`)**: The Anthropic Messages API is fundamentally **stateless** — it does not store conversation threads or chain from a conversation ID on the server. The `Agent` maintains the multi-turn message history locally and replays it on each turn (`"stateless_replay"`).
+   - **Prompt Caching Optimization**: To avoid redundant re-computation costs across replayed turns, Evidor automatically applies Anthropic's **Prompt Caching** (`cache_control={"type": "ephemeral"}`). Anthropic caches the prompt prefix (system instructions, tools, and prior turns) in ephemeral KV-cache, reducing input latency and cost by up to 90% without requiring server-side conversation storage.
 
 ### Multi-turn Conversations
 
 The `Agent` maintains session state across conversation turns using the underlying provider's native strategy. Use `send()` (or `send_async()`) to advance the conversation:
 
 ```python
-from evidor import Agent, AnthropicProvider
+from evidor import Agent, OpenAIProvider
 
-agent = Agent(AnthropicProvider(model="claude-3-7-sonnet-20250219"))
+agent = Agent(OpenAIProvider(model="gpt-6-astra"))
 
 agent.send("My favorite color is navy blue.")
 response = agent.send("What color did I say I like?")
@@ -150,11 +158,40 @@ print(response.text)
 
 Evidor exposes each provider's context management strategy through `agent.strategy`:
 
-| Provider | Strategy (`agent.strategy`) | Native Mechanism | How It Works |
-| :--- | :--- | :--- | :--- |
-| **OpenAIProvider** | `"response_chain"` | Responses API (`previous_response_id`) | Each turn sends only the delta messages / tool outputs chained to `previous_response_id` (and optional `conversation_id`). OpenAI manages the full context chain server-side. |
-| **GeminiProvider** | `"interaction_chain"` | Interactions API (`previous_interaction_id`) | Each turn chains to the prior `interaction_id`. Gemini manages the conversation history server-side. |
-| **AnthropicProvider** | `"prompt_caching"` | Ephemeral Prompt Caching | Replays conversation turns while setting ephemeral prompt caching headers (`cache_control={"type": "ephemeral"}`). Anthropic caches the common prefix with up to 90% cost/latency reduction. |
+| Provider | Strategy (`agent.strategy`) | Context Architecture | Compaction Support | How It Works |
+| :--- | :--- | :--- | :--- | :--- |
+| **OpenAIProvider** | `"response_chain"` | Server-Side Chaining (Responses API `previous_response_id`) | Native Server-Side (`compact_threshold`) | Only the new turn's delta messages / tool outputs are sent. When `compact_threshold` is configured, OpenAI executes server-side compaction automatically when tokens cross the threshold and preserves state across chained turns. |
+| **GeminiProvider** | `"interaction_chain"` | Server-Side Chaining (Interactions API `previous_interaction_id`) | Managed in Interactions API | Only the new turn's delta messages are sent, linked by `previous_interaction_id`. Gemini maintains the conversation history on the server. |
+| **AnthropicProvider** | `"stateless_replay"` | Client-Replayed History + Ephemeral Prompt Caching | Native Threshold Compaction (`compact_threshold`) | Claude's Messages API is stateless; `Agent` replays the message history on each turn. When `compact_threshold` is set, Claude generates a native `compaction` summary block, and Evidor replays the compaction block on subsequent turns so Claude automatically prunes prior turns. Combined with prompt caching (`enable_prompt_caching=True`), this delivers maximum context efficiency. |
+
+### Native Provider Compaction (`compact_threshold`)
+
+For long-running agents and multi-turn workflows, both OpenAI and Anthropic provide native compaction to summarize older context at a token threshold rather than hitting context window limits:
+
+```python
+from evidor import Agent, OpenAIProvider, AnthropicProvider
+
+# 1. OpenAI: Automatic server-side compaction
+openai_agent = Agent(
+    OpenAIProvider(model="gpt-6-astra", compact_threshold=100000)
+)
+
+# 2. Anthropic Claude: Threshold compaction with optional custom instructions
+claude_agent = Agent(
+    AnthropicProvider(
+        model="claude-3-7-sonnet-20250219",
+        compact_threshold=150000,
+        compact_instructions="Focus on preserving key architecture decisions and code snippets.",
+    )
+)
+
+# You can also set compact_threshold directly on the Agent facade
+agent = Agent(OpenAIProvider(model="gpt-6-astra"), compact_threshold=100000)
+```
+
+When compaction is triggered:
+- **OpenAI**: Server-side compaction creates an opaque compaction item in the response stream. In Evidor's `response_chain` mode, passing `previous_response_id` carries this compaction forward seamlessly without manual pruning.
+- **Anthropic**: Claude produces a `compaction` block at the start of the assistant response. Evidor preserves this compaction block and automatically formats it into the assistant turn of subsequent replayed requests. Claude automatically drops all history prior to the compaction block, keeping prompts compact and cache-optimized.
 
 ### Inspecting and Resetting Provider State
 

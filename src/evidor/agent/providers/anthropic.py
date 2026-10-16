@@ -8,7 +8,18 @@ from .base import BaseProvider, build_token_usage, extract_system_prompt, sort_t
 
 
 class AnthropicProvider(BaseProvider):
-    """Provider adapter for Anthropic Claude using the Messages API."""
+    """Provider adapter for Anthropic Claude using the Messages API.
+
+    Context Management:
+        Anthropic's Messages API is fundamentally stateless: it does not store conversation
+        threads or chain from a conversation ID on the server. Evidor's Agent manages
+        multi-turn conversations by replaying the conversational history (`stateless_replay`).
+
+        When `enable_prompt_caching=True` (default), Evidor includes ephemeral prompt caching
+        headers (`cache_control={"type": "ephemeral"}`), allowing Anthropic to cache the
+        prompt prefix (system prompt, tools, and prior turns) in ephemeral KV-cache, reducing
+        input latency and cost by up to 90% without requiring server-side conversation state.
+    """
 
     def __init__(
         self,
@@ -17,6 +28,8 @@ class AnthropicProvider(BaseProvider):
         max_tokens: int | None = None,
         enable_prompt_caching: bool = True,
         thinking: Any = None,
+        compact_threshold: int | None = None,
+        compact_instructions: str | None = None,
     ) -> None:
         if thinking is not None:
             from evidor.models import AnthropicThinkingConfig
@@ -32,6 +45,8 @@ class AnthropicProvider(BaseProvider):
 
         super().__init__(model=model, api_key=api_key, thinking=thinking_cfg)
         self._enable_prompt_caching = enable_prompt_caching
+        self._compact_threshold = compact_threshold
+        self._compact_instructions = compact_instructions
 
         if max_tokens is None:
             if self._thinking and self._thinking.enabled and self._thinking.budget_tokens:
@@ -42,11 +57,19 @@ class AnthropicProvider(BaseProvider):
 
     @property
     def context_strategy(self) -> str:
-        return "prompt_caching"
+        return "stateless_replay"
 
     @property
     def enable_prompt_caching(self) -> bool:
         return self._enable_prompt_caching
+
+    @property
+    def compact_threshold(self) -> int | None:
+        return self._compact_threshold
+
+    @property
+    def compact_instructions(self) -> str | None:
+        return self._compact_instructions
 
     def with_model(self, model: str) -> "AnthropicProvider":
         return AnthropicProvider(
@@ -55,12 +78,17 @@ class AnthropicProvider(BaseProvider):
             max_tokens=self._max_tokens,
             enable_prompt_caching=self._enable_prompt_caching,
             thinking=self._thinking,
+            compact_threshold=self._compact_threshold,
+            compact_instructions=self._compact_instructions,
         )
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
         client = self._get_client()
         payload = self._build_request_payload(request)
-        response_msg = client.messages.create(**payload)
+        if self._compact_threshold is not None or self._compact_instructions is not None:
+            response_msg = client.beta.messages.create(**payload)
+        else:
+            response_msg = client.messages.create(**payload)
         return self._parse_response(response_msg)
 
     def _get_client(self) -> Any:
@@ -81,6 +109,15 @@ class AnthropicProvider(BaseProvider):
             "system": system_prompt or None,
             "messages": formatted_messages,
         }
+
+        if self._compact_threshold is not None or self._compact_instructions is not None:
+            edit: dict[str, Any] = {"type": "compact_20260112"}
+            if self._compact_threshold is not None:
+                edit["trigger"] = {"type": "input_tokens", "value": self._compact_threshold}
+            if self._compact_instructions is not None:
+                edit["instructions"] = self._compact_instructions
+            payload["betas"] = ["compact-2026-01-12"]
+            payload["context_management"] = {"edits": [edit]}
 
         if self._thinking and self._thinking.enabled:
             if self._thinking.type == "adaptive":
@@ -126,8 +163,10 @@ class AnthropicProvider(BaseProvider):
                     ],
                 })
             elif message.role == "assistant":
-                if message.thought_blocks or message.tool_calls:
+                if message.thought_blocks or message.tool_calls or message.compaction:
                     content_blocks: list[dict[str, Any]] = []
+                    if message.compaction:
+                        content_blocks.append({"type": "compaction", "content": message.compaction})
                     # Replay thought_blocks with cryptographic signatures if present
                     if message.thought_blocks:
                         for tb in message.thought_blocks:
@@ -154,7 +193,7 @@ class AnthropicProvider(BaseProvider):
         msg_id = getattr(response_msg, "id", None)
         msg_id = msg_id if isinstance(msg_id, str) else None
 
-        text, tool_calls, thought_blocks, thought_parts = self._parse_content_blocks(
+        text, tool_calls, thought_blocks, thought_parts, compaction_summary = self._parse_content_blocks(
             getattr(response_msg, "content", [])
         )
 
@@ -169,20 +208,26 @@ class AnthropicProvider(BaseProvider):
             usage=usage,
             thinking=thinking_text,
             thought_blocks=tuple(thought_blocks),
+            compaction=compaction_summary,
         )
 
     def _parse_content_blocks(
         self, content_blocks: list[Any]
-    ) -> tuple[str, list[ToolCall], list[dict[str, Any]], list[str]]:
+    ) -> tuple[str, list[ToolCall], list[dict[str, Any]], list[str], str | None]:
         text_parts: list[str] = []
         thought_parts: list[str] = []
         thought_blocks: list[dict[str, Any]] = []
         tool_calls: list[ToolCall] = []
+        compaction_summary: str | None = None
 
         for block in content_blocks:
             block_type = getattr(block, "type", None)
             if block_type == "text":
                 text_parts.append(getattr(block, "text", ""))
+            elif block_type == "compaction":
+                c = getattr(block, "content", None) or getattr(block, "text", None)
+                if c:
+                    compaction_summary = str(c)
             elif block_type == "thinking":
                 th_text = getattr(block, "thinking", "")
                 thought_parts.append(th_text)
@@ -204,7 +249,7 @@ class AnthropicProvider(BaseProvider):
                     )
                 )
 
-        return "".join(text_parts), tool_calls, thought_blocks, thought_parts
+        return "".join(text_parts), tool_calls, thought_blocks, thought_parts, compaction_summary
 
     def _parse_usage(self, raw_usage: Any) -> Any:
         if raw_usage is None:

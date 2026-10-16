@@ -135,6 +135,7 @@ class Message:
     is_summary: bool = False
     thinking: str | None = None
     thought_blocks: tuple[Any, ...] = ()
+    compaction: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.tool_calls, (list, tuple)):
@@ -145,6 +146,7 @@ class Message:
             (not self.content or not self.content.strip())
             and not self.tool_calls
             and not self.thought_blocks
+            and not self.compaction
             and self.role != "tool"
         ):
             raise ValueError("message content must not be empty")
@@ -204,6 +206,7 @@ class GenerationResponse:
     usage: Any = None
     thinking: str | None = None
     thought_blocks: tuple[Any, ...] = ()
+    compaction: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.tool_calls, (list, tuple)):

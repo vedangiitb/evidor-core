@@ -49,6 +49,7 @@ class OpenAIProvider(BaseProvider):
         model: str,
         api_key: str | None = None,
         thinking: Any = None,
+        compact_threshold: int | None = None,
     ) -> None:
         if thinking is not None:
             from evidor.models import OpenAIThinkingConfig
@@ -63,13 +64,23 @@ class OpenAIProvider(BaseProvider):
             thinking_cfg = None
 
         super().__init__(model=model, api_key=api_key, thinking=thinking_cfg)
+        self._compact_threshold = compact_threshold
 
     @property
     def context_strategy(self) -> str:
         return "response_chain"
 
+    @property
+    def compact_threshold(self) -> int | None:
+        return self._compact_threshold
+
     def with_model(self, model: str) -> "OpenAIProvider":
-        return OpenAIProvider(model=model, api_key=self._api_key, thinking=self._thinking)
+        return OpenAIProvider(
+            model=model,
+            api_key=self._api_key,
+            thinking=self._thinking,
+            compact_threshold=self._compact_threshold,
+        )
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
         client = self._get_client()
@@ -105,6 +116,11 @@ class OpenAIProvider(BaseProvider):
             payload["conversation"] = request.conversation_id
         if request.store is not None:
             payload["store"] = request.store
+
+        if self._compact_threshold is not None:
+            payload["context_management"] = [
+                {"type": "compaction", "compact_threshold": self._compact_threshold}
+            ]
 
         if self._thinking and self._thinking.enabled:
             reasoning_config: dict[str, Any] = {}
@@ -158,7 +174,7 @@ class OpenAIProvider(BaseProvider):
         resp_id = resp_id if isinstance(resp_id, str) else None
         text = getattr(response, "output_text", None) or ""
 
-        tool_calls, thinking_parts = self._parse_output_items(getattr(response, "output", None) or [])
+        tool_calls, thinking_parts, compaction_text = self._parse_output_items(getattr(response, "output", None) or [])
 
         raw_resp_thinking = getattr(response, "reasoning", None) or getattr(response, "thinking", None)
         if isinstance(raw_resp_thinking, str) and raw_resp_thinking:
@@ -174,11 +190,15 @@ class OpenAIProvider(BaseProvider):
             tool_calls=tuple(tool_calls),
             usage=usage,
             thinking=thinking_text,
+            compaction=compaction_text,
         )
 
-    def _parse_output_items(self, output_items: list[Any]) -> tuple[list[ToolCall], list[str]]:
+    def _parse_output_items(
+        self, output_items: list[Any]
+    ) -> tuple[list[ToolCall], list[str], str | None]:
         tool_calls: list[ToolCall] = []
         thinking_parts: list[str] = []
+        compaction_part: str | None = None
 
         for item in output_items:
             item_type = getattr(item, "type", None)
@@ -195,8 +215,12 @@ class OpenAIProvider(BaseProvider):
                     raw_call_id = getattr(item, "id", None)
                 call_id = raw_call_id if isinstance(raw_call_id, str) else f"call_{len(tool_calls)+1}"
                 tool_calls.append(ToolCall(id=call_id, name=item.name, arguments=args))
+            elif item_type == "compaction":
+                c = getattr(item, "content", None) or getattr(item, "encrypted_content", None) or getattr(item, "text", None)
+                if c:
+                    compaction_part = str(c)
 
-        return tool_calls, thinking_parts
+        return tool_calls, thinking_parts, compaction_part
 
     def _parse_usage(self, raw_usage: Any) -> Any:
         if raw_usage is None:
