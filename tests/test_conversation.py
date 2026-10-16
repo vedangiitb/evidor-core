@@ -3,6 +3,7 @@ import pytest
 
 from evidor import (
     Agent,
+    AnthropicProvider,
     GenerationRequest,
     GenerationResponse,
     Message,
@@ -58,17 +59,17 @@ class InteractionChainProvider:
         )
 
 
-class PromptCachingProvider:
-    """Mock provider with 'prompt_caching' context strategy (like Anthropic)."""
+class StatelessReplayProvider:
+    """Mock provider with 'stateless_replay' context strategy (like Anthropic)."""
 
     def __init__(self, model: str = "claude-3-7-sonnet-20250219") -> None:
         self.model = model
-        self.context_strategy = "prompt_caching"
+        self.context_strategy = "stateless_replay"
         self.requests: list[GenerationRequest] = []
         self._turn = 0
 
-    def with_model(self, model: str) -> "PromptCachingProvider":
-        return PromptCachingProvider(model=model)
+    def with_model(self, model: str) -> "StatelessReplayProvider":
+        return StatelessReplayProvider(model=model)
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
         self.requests.append(request)
@@ -132,11 +133,11 @@ def test_provider_managed_interaction_chain_multi_turn() -> None:
     assert provider.requests[1].previous_response_id == "int_1"
 
 
-def test_prompt_caching_provider_multi_turn() -> None:
-    provider = PromptCachingProvider()
+def test_stateless_replay_provider_multi_turn() -> None:
+    provider = StatelessReplayProvider()
     agent = Agent(provider, system_prompt="Claude system")
 
-    assert agent.strategy == "prompt_caching"
+    assert agent.strategy == "stateless_replay"
 
     resp1 = agent.send("Turn 1")
     assert resp1.id == "msg_1"
@@ -144,10 +145,19 @@ def test_prompt_caching_provider_multi_turn() -> None:
 
     resp2 = agent.send("Turn 2")
     assert resp2.id == "msg_2"
-    # Replays full accumulated history for prompt caching
+    # Replays full accumulated history for stateless replay
     req2_msgs = provider.requests[1].messages
     assert len(req2_msgs) == 4  # system + user 1 + assistant 1 + user 2
     assert req2_msgs[-1].content == "Turn 2"
+
+
+def test_anthropic_provider_strategy_and_properties() -> None:
+    provider = AnthropicProvider(model="claude-3-7-sonnet-20250219")
+    assert provider.context_strategy == "stateless_replay"
+    assert provider.enable_prompt_caching is True
+
+    agent = Agent(provider)
+    assert agent.strategy == "stateless_replay"
 
 
 def test_stateful_chain_tool_calling_loop() -> None:
@@ -236,4 +246,52 @@ async def test_async_stateful_chain() -> None:
     assert resp2.id == "resp_2"
     assert agent.last_response_id == "resp_2"
     assert provider.requests[1].previous_response_id == "resp_1"
+
+
+class CompactingMockProvider:
+    """Mock provider simulating native compaction emitting compaction summary."""
+
+    def __init__(self, model: str = "claude-3-7-sonnet-20250219") -> None:
+        self.model = model
+        self.context_strategy = "stateless_replay"
+        self._compact_threshold = None
+        self.requests: list[GenerationRequest] = []
+        self._turn = 0
+
+    def with_model(self, model: str) -> "CompactingMockProvider":
+        return CompactingMockProvider(model=model)
+
+    def generate(self, request: GenerationRequest) -> GenerationResponse:
+        self.requests.append(request)
+        self._turn += 1
+        compaction = "Compacted conversation state" if self._turn == 1 else None
+        return GenerationResponse(
+            id=f"msg_{self._turn}",
+            text=f"Response {self._turn}",
+            model=self.model,
+            compaction=compaction,
+        )
+
+
+def test_agent_compaction_recording() -> None:
+    provider = CompactingMockProvider()
+    agent = Agent(provider, compact_threshold=150000)
+    assert agent.compact_threshold == 150000
+    assert provider._compact_threshold == 150000
+
+    resp1 = agent.send("Turn 1 prompt")
+    assert resp1.compaction == "Compacted conversation state"
+
+    # Verify assistant message in agent.messages records the compaction
+    assert len(agent.messages) == 2  # user, assistant
+    asst_msg = agent.messages[1]
+    assert asst_msg.role == "assistant"
+    assert asst_msg.compaction == "Compacted conversation state"
+
+    # On Turn 2, the replayed messages to the provider contain the compaction in the assistant message
+    agent.send("Turn 2 prompt")
+    assert len(provider.requests) == 2
+    req2 = provider.requests[1]
+    assert req2.messages[1].compaction == "Compacted conversation state"
+
 

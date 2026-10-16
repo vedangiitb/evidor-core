@@ -32,10 +32,11 @@ from .providers.base import ModelProvider
 class Agent:
     """A conversational session coordinating a provider, context state, tools, and telemetry.
 
-    Context management is provider-managed:
-    - OpenAI: Chained via `previous_response_id` (or `conversation_id`) in the Responses API.
-    - Gemini: Chained via `previous_interaction_id` in the Interactions API.
-    - Anthropic: Multi-turn messages with ephemeral prompt caching headers.
+    Context management distinguishes between provider-managed server-side chains and stateless replay:
+    - OpenAI: Provider-managed server-side state chained via `previous_response_id` (Responses API).
+    - Gemini: Provider-managed server-side state chained via `previous_interaction_id` (Interactions API).
+    - Anthropic: Stateless client-replayed history (`stateless_replay`), sending multi-turn messages
+      and leveraging Anthropic's ephemeral prompt caching (`cache_control`) for prefix cost/latency savings.
     """
 
     def __init__(
@@ -51,6 +52,7 @@ class Agent:
         previous_response_id: str | None = None,
         conversation_id: str | None = None,
         store: bool | None = None,
+        compact_threshold: int | None = None,
         telemetry: TelemetryRuntime | TelemetrySink | Sequence[TelemetrySink] | None = None,
     ) -> None:
         self._provider = provider
@@ -58,6 +60,13 @@ class Agent:
         self._last_response_id = previous_response_id
         self._conversation_id = conversation_id
         self._store = store
+        self._compact_threshold = compact_threshold or getattr(provider, "compact_threshold", None)
+        if (
+            compact_threshold is not None
+            and hasattr(provider, "_compact_threshold")
+            and getattr(provider, "_compact_threshold") is None
+        ):
+            provider._compact_threshold = compact_threshold
 
         self._messages: list[Message] = []
         if system_prompt:
@@ -101,10 +110,9 @@ class Agent:
     @property
     def strategy(self) -> str:
         """The context management strategy employed by this provider:
-        - 'response_chain': OpenAI Responses API chaining
-        - 'interaction_chain': Gemini Interactions API chaining
-        - 'prompt_caching': Anthropic prompt caching
-        - 'stateless_replay': Replays message history
+        - 'response_chain': OpenAI Responses API server-side chaining
+        - 'interaction_chain': Gemini Interactions API server-side chaining
+        - 'stateless_replay': Replays message history (used by Anthropic Claude and stateless models)
         """
         return getattr(self._provider, "context_strategy", "stateless_replay")
 
@@ -122,6 +130,11 @@ class Agent:
     def system_prompt(self) -> str | None:
         """The optional system instructions configured for this agent."""
         return self._system_prompt
+
+    @property
+    def compact_threshold(self) -> int | None:
+        """The configured token threshold for provider-native compaction, if any."""
+        return self._compact_threshold
 
 
     @property
@@ -388,7 +401,12 @@ class Agent:
                         self._last_response_id = response.id
 
                     asst_content = response.text
-                    if (not asst_content or not asst_content.strip()) and not response.tool_calls and not response.thought_blocks:
+                    if (
+                        (not asst_content or not asst_content.strip())
+                        and not response.tool_calls
+                        and not response.thought_blocks
+                        and not getattr(response, "compaction", None)
+                    ):
                         asst_content = "Done."
                     self._messages.append(
                         Message(
@@ -397,6 +415,7 @@ class Agent:
                             tool_calls=response.tool_calls,
                             thinking=response.thinking,
                             thought_blocks=response.thought_blocks,
+                            compaction=getattr(response, "compaction", None),
                         )
                     )
 
@@ -534,7 +553,12 @@ class Agent:
                         self._last_response_id = response.id
 
                     asst_content = response.text
-                    if (not asst_content or not asst_content.strip()) and not response.tool_calls and not response.thought_blocks:
+                    if (
+                        (not asst_content or not asst_content.strip())
+                        and not response.tool_calls
+                        and not response.thought_blocks
+                        and not getattr(response, "compaction", None)
+                    ):
                         asst_content = "Done."
                     self._messages.append(
                         Message(
@@ -543,6 +567,7 @@ class Agent:
                             tool_calls=response.tool_calls,
                             thinking=response.thinking,
                             thought_blocks=response.thought_blocks,
+                            compaction=getattr(response, "compaction", None),
                         )
                     )
 
