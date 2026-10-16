@@ -1,13 +1,6 @@
 """Minimal, provider-agnostic LLM harness."""
 
 from .agent import Agent
-from .agent.context.context import (
-    DEFAULT_CHAIN_MILESTONES,
-    DEFAULT_CONTEXT_WINDOW,
-    DEFAULT_HIGH_WATER_RATIO,
-    DEFAULT_LOW_WATER_RATIO,
-    DEFAULT_MAX_MESSAGES,
-)
 from .agent.providers import AnthropicProvider, GeminiProvider, ModelProvider, OpenAIProvider
 from .mcp import (
     HTTPServerConfig,
@@ -30,13 +23,6 @@ from .models import (
     ThinkingConfig,
     ThinkingEffort,
     ToolCall,
-)
-from .retry import (
-    DEFAULT_RETRY_CONFIG,
-    RetryConfig,
-    calculate_backoff_delay,
-    extract_retry_after,
-    is_network_or_provider_error,
 )
 
 
@@ -92,21 +78,13 @@ __all__ = [
     "AnyThinkingConfig",
     "BraveSearchProvider",
     "calculator",
-    "calculate_backoff_delay",
     "clean_html",
     "ComparisonItem",
     "ConsoleSink",
-    "DEFAULT_CHAIN_MILESTONES",
-    "DEFAULT_CONTEXT_WINDOW",
-    "DEFAULT_HIGH_WATER_RATIO",
-    "DEFAULT_LOW_WATER_RATIO",
-    "DEFAULT_MAX_MESSAGES",
-    "DEFAULT_RETRY_CONFIG",
     "EvidenceItem",
     "EvidenceStore",
     "evidence_store_tools",
     "ExaSearchProvider",
-    "extract_retry_after",
     "fetch_webpage_content",
     "GeminiProvider",
     "GeminiThinkingConfig",
@@ -116,7 +94,6 @@ __all__ = [
     "filesystem_tools",
     "HTTPServerConfig",
     "InMemorySink",
-    "is_network_or_provider_error",
     "LangfuseSink",
     "MCPClient",
     "MCPServerConfig",
@@ -130,7 +107,6 @@ __all__ = [
     "PrometheusSink",
     "read_webpage",
     "read_webpage_tool",
-    "RetryConfig",
     "SearchResult",
     "SSEServerConfig",
     "StdioServerConfig",
