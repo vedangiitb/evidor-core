@@ -131,6 +131,12 @@ def test_gemini_thinking_config() -> None:
     assert c_true.thinking_budget is None
     assert c_true.include_thoughts is True
 
+    # Coercion from str -> thinking_level (Gemini 3.x)
+    c_str = GeminiThinkingConfig.from_value("high")
+    assert c_str.enabled is True
+    assert c_str.thinking_level == "high"
+    assert c_str.thinking_budget is None
+
 
 # ==============================================================================
 # OpenAIProvider Thinking Tests
@@ -139,10 +145,7 @@ def test_gemini_thinking_config() -> None:
 
 def test_openai_provider_thinking_chat_completions(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_openai = types.ModuleType("openai")
-    mock_client = MagicMock(spec=["chat"])
-    mock_choice = MagicMock()
-    mock_choice.message.content = "Solved problem"
-    mock_choice.message.tool_calls = None
+    mock_client = MagicMock()
     mock_usage = MagicMock(
         prompt_tokens=100,
         completion_tokens=200,
@@ -150,12 +153,17 @@ def test_openai_provider_thinking_chat_completions(monkeypatch: pytest.MonkeyPat
         prompt_tokens_details=MagicMock(cached_tokens=10),
         completion_tokens_details=MagicMock(reasoning_tokens=150),
     )
-    mock_resp = MagicMock(choices=[mock_choice], usage=mock_usage)
-    mock_client.chat.completions.create.return_value = mock_resp
+    mock_resp = MagicMock(
+        output_text="Solved problem",
+        output=[MagicMock(type="reasoning", summary="Step-by-step logic", text="Step-by-step logic")],
+        usage=mock_usage,
+        id="resp_think",
+    )
+    mock_client.responses.create.return_value = mock_resp
     mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "openai", mock_openai)
 
-    provider = OpenAIProvider(model="o3-mini", thinking="high")
+    provider = OpenAIProvider(model="gpt-6-astra", thinking="high")
     assert provider.thinking is not None
     assert provider.thinking.effort == "high"
 
@@ -163,6 +171,7 @@ def test_openai_provider_thinking_chat_completions(monkeypatch: pytest.MonkeyPat
     res = provider.generate(req)
 
     assert res.text == "Solved problem"
+    assert res.thinking == "Step-by-step logic"
     assert res.usage is not None
     assert res.usage.prompt_tokens == 100
     assert res.usage.completion_tokens == 200
@@ -170,30 +179,27 @@ def test_openai_provider_thinking_chat_completions(monkeypatch: pytest.MonkeyPat
     assert res.usage.cached_tokens == 10
     assert res.usage.reasoning_tokens == 150
 
-    call_kwargs = mock_client.chat.completions.create.call_args.kwargs
-    assert call_kwargs["reasoning_effort"] == "high"
-    assert call_kwargs["model"] == "o3-mini"
+    call_kwargs = mock_client.responses.create.call_args.kwargs
+    assert call_kwargs["reasoning"] == {"effort": "high"}
+    assert call_kwargs["model"] == "gpt-6-astra"
 
 
 def test_openai_provider_without_thinking_omits_parameter(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_openai = types.ModuleType("openai")
-    mock_client = MagicMock(spec=["chat"])
-    mock_choice = MagicMock()
-    mock_choice.message.content = "Standard output"
-    mock_choice.message.tool_calls = None
-    mock_resp = MagicMock(choices=[mock_choice], usage=None)
-    mock_client.chat.completions.create.return_value = mock_resp
+    mock_client = MagicMock()
+    mock_resp = MagicMock(output_text="Standard output", output=[], usage=None, id="resp_no_think")
+    mock_client.responses.create.return_value = mock_resp
     mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "openai", mock_openai)
 
     # Standard model without thinking
-    provider = OpenAIProvider(model="gpt-4o")
+    provider = OpenAIProvider(model="gpt-4.1")
     assert provider.thinking is None
     res = provider.generate(GenerationRequest(prompt="Hello"))
     assert res.text == "Standard output"
 
-    call_kwargs = mock_client.chat.completions.create.call_args.kwargs
-    assert "reasoning_effort" not in call_kwargs
+    call_kwargs = mock_client.responses.create.call_args.kwargs
+    assert "reasoning" not in call_kwargs
 
 
 # ==============================================================================
@@ -286,59 +292,37 @@ def test_gemini_provider_thinking_extraction_and_config(monkeypatch: pytest.Monk
     mock_genai = types.ModuleType("google.genai")
     mock_types = types.ModuleType("google.genai.types")
 
-    class FakeThinkingConfig:
-        def __init__(self, **kwargs: Any) -> None:
-            self.kwargs = kwargs
-
-    class FakeGenerateContentConfig:
-        def __init__(self, **kwargs: Any) -> None:
-            self.kwargs = kwargs
-
-    class FakePart:
-        @classmethod
-        def from_text(cls, text: str) -> Any:
-            p = MagicMock()
-            p.text = text
-            p.thought = False
-            return p
-
-    class FakeContent:
-        def __init__(self, role: str, parts: list[Any]) -> None:
-            self.role = role
-            self.parts = parts
-
-    mock_types.ThinkingConfig = FakeThinkingConfig  # type: ignore[attr-defined]
-    mock_types.GenerateContentConfig = FakeGenerateContentConfig  # type: ignore[attr-defined]
-    mock_types.Part = FakePart  # type: ignore[attr-defined]
-    mock_types.Content = FakeContent  # type: ignore[attr-defined]
-
     mock_client = MagicMock()
-    mock_thought_part = MagicMock(text="Thinking through problem...", thought=True, function_call=None)
-    mock_thought_part.thought_signature = None
-    mock_thought_part.thoughtSignature = None
-    mock_text_part = MagicMock(text="Final Gemini answer", thought=False, function_call=None)
-    mock_text_part.thought_signature = None
-    mock_text_part.thoughtSignature = None
-    mock_candidate = MagicMock()
-    mock_candidate.content.parts = [mock_thought_part, mock_text_part]
+    mock_thought_step = MagicMock(
+        type="thought",
+        signature=None,
+        summary=[MagicMock(text="Thinking through problem...")],
+    )
+    mock_output_step = MagicMock(
+        type="model_output",
+        content=[MagicMock(text="Final Gemini answer")],
+    )
 
     mock_usage = MagicMock(
-        prompt_token_count=50,
-        candidates_token_count=100,
-        total_token_count=150,
-        cached_content_token_count=0,
-        thinking_token_count=40,
-        candidates_tokens_details=None,
+        total_input_tokens=50,
+        total_output_tokens=100,
+        total_tokens=150,
+        total_cached_tokens=0,
+        total_thought_tokens=40,
     )
-    mock_resp = MagicMock(candidates=[mock_candidate], usage_metadata=mock_usage)
-    mock_client.models.generate_content.return_value = mock_resp
+    mock_resp = MagicMock(
+        output_text="Final Gemini answer",
+        steps=[mock_thought_step, mock_output_step],
+        usage=mock_usage,
+    )
+    mock_client.interactions.create.return_value = mock_resp
     mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
 
     provider = GeminiProvider(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         thinking=GeminiThinkingConfig(thinking_budget=2048, include_thoughts=True),
     )
     res = provider.generate(GenerationRequest(prompt="Explain logic"))
@@ -351,44 +335,35 @@ def test_gemini_provider_thinking_extraction_and_config(monkeypatch: pytest.Monk
     assert res.usage is not None
     assert res.usage.reasoning_tokens == 40
 
-    call_config = mock_client.models.generate_content.call_args.kwargs["config"]
-    assert "thinking_config" in call_config.kwargs
-    tc = call_config.kwargs["thinking_config"]
-    assert tc.kwargs["thinking_budget"] == 2048
-    assert tc.kwargs["include_thoughts"] is True
+    call_config = mock_client.interactions.create.call_args.kwargs["generation_config"]
+    assert call_config["thinking_level"] == "medium"
+    assert call_config["thinking_summaries"] == "auto"
+
+    # Test Gemini 3.x thinking_level parameter
+    p_gemini_3 = GeminiProvider(model="gemini-3.8-flash", thinking="high")
+    assert p_gemini_3.thinking.thinking_level == "high"
+    res_3 = p_gemini_3.generate(GenerationRequest(prompt="Explain logic"))
+    call_config_3 = mock_client.interactions.create.call_args.kwargs["generation_config"]
+    assert call_config_3["thinking_level"] == "high"
+    assert call_config_3["thinking_summaries"] == "auto"
 
 
 def test_gemini_provider_disable_thinking(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_genai = types.ModuleType("google.genai")
     mock_types = types.ModuleType("google.genai.types")
 
-    class FakeThinkingConfig:
-        def __init__(self, **kwargs: Any) -> None:
-            self.kwargs = kwargs
-
-    class FakeGenerateContentConfig:
-        def __init__(self, **kwargs: Any) -> None:
-            self.kwargs = kwargs
-
-    mock_types.ThinkingConfig = FakeThinkingConfig  # type: ignore[attr-defined]
-    mock_types.GenerateContentConfig = FakeGenerateContentConfig  # type: ignore[attr-defined]
-    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
-    mock_types.Content = MagicMock()  # type: ignore[attr-defined]
-
     mock_client = MagicMock()
-    mock_client.models.generate_content.return_value = MagicMock(candidates=[MagicMock(content=MagicMock(parts=[]))])
+    mock_client.interactions.create.return_value = MagicMock(output_text="Fast answer", steps=[], usage=None)
     mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
 
-    provider = GeminiProvider(model="gemini-2.5-flash", thinking=False)
+    provider = GeminiProvider(model="gemini-3.8-flash", thinking=False)
     provider.generate(GenerationRequest(prompt="Fast query"))
 
-    call_config = mock_client.models.generate_content.call_args.kwargs["config"]
-    tc = call_config.kwargs["thinking_config"]
-    assert tc.kwargs["thinking_budget"] == 0
-    assert tc.kwargs["include_thoughts"] is False
+    call_config = mock_client.interactions.create.call_args.kwargs["generation_config"]
+    assert call_config["thinking_level"] == "minimal"
 
 
 # ==============================================================================
@@ -532,10 +507,16 @@ def test_openai_thinking_forward_compatible_models() -> None:
     p2 = OpenAIProvider(model="gpt-4o", thinking="low")
     assert p2.thinking.effort == "low"
 
-    p3 = OpenAIProvider(model="future-o4-preview", thinking="medium")
-    assert p3.thinking.effort == "medium"
+    p3 = OpenAIProvider(model="gpt-6-astra", thinking="xhigh")
+    assert p3.thinking.effort == "xhigh"
 
-    p4 = OpenAIProvider(model="gpt-4o", thinking=False)
+    p_sol = OpenAIProvider(model="gpt-6.1-sol", thinking="medium")
+    assert p_sol.thinking.effort == "medium"
+
+    p_luna = OpenAIProvider(model="gpt-6-luna", thinking="none")
+    assert p_luna.thinking.effort == "none"
+
+    p4 = OpenAIProvider(model="gpt-6-astra", thinking=False)
     assert p4.thinking.enabled is False
 
 
@@ -607,13 +588,41 @@ def test_openai_responses_api_with_summary_config(monkeypatch: pytest.MonkeyPatc
     assert "reasoning_effort" not in call_kwargs
 
 
+def test_openai_responses_api_modern_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_openai = types.ModuleType("openai")
+    mock_client = MagicMock()
+    mock_usage = MagicMock(
+        spec=["input_tokens", "output_tokens", "total_tokens", "input_tokens_details", "output_tokens_details"],
+        input_tokens=120,
+        output_tokens=250,
+        total_tokens=370,
+        input_tokens_details=MagicMock(cached_tokens=40),
+        output_tokens_details=MagicMock(reasoning_tokens=180),
+    )
+    mock_resp = MagicMock(
+        output=[],
+        output_text="Modern response",
+        usage=mock_usage,
+    )
+    mock_client.responses.create.return_value = mock_resp
+    mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    provider = OpenAIProvider(model="gpt-6-astra", thinking="xhigh")
+    res = provider.generate(GenerationRequest(prompt="Astra prompt"))
+
+    assert res.text == "Modern response"
+    assert res.usage is not None
+    assert res.usage.prompt_tokens == 120
+    assert res.usage.completion_tokens == 250
+    assert res.usage.total_tokens == 370
+    assert res.usage.cached_tokens == 40
+    assert res.usage.reasoning_tokens == 180
+
+
 def test_openai_chat_completions_reasoning_content_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_openai = types.ModuleType("openai")
-    mock_client = MagicMock(spec=["chat"])
-    mock_choice = MagicMock()
-    mock_choice.message.content = "Final solution"
-    mock_choice.message.reasoning_content = "DeepSeek-R1 style reasoning steps"
-    mock_choice.message.tool_calls = None
+    mock_client = MagicMock()
     mock_usage = MagicMock(
         prompt_tokens=40,
         completion_tokens=120,
@@ -621,12 +630,18 @@ def test_openai_chat_completions_reasoning_content_extraction(monkeypatch: pytes
         prompt_tokens_details=None,
         completion_tokens_details=MagicMock(reasoning_tokens=90),
     )
-    mock_resp = MagicMock(choices=[mock_choice], usage=mock_usage)
-    mock_client.chat.completions.create.return_value = mock_resp
+    mock_reasoning_item = MagicMock(type="reasoning", summary=None, text="DeepSeek-R1 style reasoning steps")
+    mock_resp = MagicMock(
+        output_text="Final solution",
+        output=[mock_reasoning_item],
+        usage=mock_usage,
+        id="resp_extract",
+    )
+    mock_client.responses.create.return_value = mock_resp
     mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "openai", mock_openai)
 
-    provider = OpenAIProvider(model="o1", thinking="medium")
+    provider = OpenAIProvider(model="gpt-6-astra", thinking="medium")
     res = provider.generate(GenerationRequest(prompt="Logic puzzle"))
 
     assert res.text == "Final solution"
@@ -657,57 +672,18 @@ def test_gemini_multiturn_thought_signature_preservation(monkeypatch: pytest.Mon
     mock_genai = types.ModuleType("google.genai")
     mock_types = types.ModuleType("google.genai.types")
 
-    class FakePart:
-        def __init__(self, text: str = "", thought: bool = False, thought_signature: Any = None, **kwargs: Any) -> None:
-            self.text = text
-            self.thought = thought
-            self.thought_signature = thought_signature
-            self.function_call = None
-            self.kwargs = kwargs
-
-        @classmethod
-        def from_text(cls, text: str) -> Any:
-            return cls(text=text)
-
-        @classmethod
-        def from_function_call(cls, name: str, args: dict[str, Any]) -> Any:
-            p = cls()
-            fc = MagicMock()
-            fc.name = name
-            fc.args = args
-            p.function_call = fc
-            return p
-
-        @classmethod
-        def from_function_response(cls, name: str, response: dict[str, Any]) -> Any:
-            p = cls()
-            fr = MagicMock()
-            fr.name = name
-            fr.response = response
-            p.function_response = fr
-            return p
-
-    class FakeContent:
-        def __init__(self, role: str, parts: list[Any]) -> None:
-            self.role = role
-            self.parts = parts
-
-    mock_types.Part = FakePart  # type: ignore[attr-defined]
-    mock_types.Content = FakeContent  # type: ignore[attr-defined]
-    mock_types.GenerateContentConfig = MagicMock()  # type: ignore[attr-defined]
-    mock_types.ThinkingConfig = MagicMock()  # type: ignore[attr-defined]
-
     mock_client = MagicMock()
-    mock_client.models.generate_content.return_value = MagicMock(
-        candidates=[MagicMock(content=MagicMock(parts=[]))],
-        usage_metadata=None,
+    mock_client.interactions.create.return_value = MagicMock(
+        output_text="Search result summary",
+        steps=[],
+        usage=None,
     )
     mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
 
-    provider = GeminiProvider(model="gemini-2.5-flash")
+    provider = GeminiProvider(model="gemini-3.8-flash")
 
     # Multi-turn conversation with thought block containing cryptographic signature
     tc = ToolCall(id="call_1", name="search", arguments={"q": "test"})
@@ -724,85 +700,62 @@ def test_gemini_multiturn_thought_signature_preservation(monkeypatch: pytest.Mon
 
     provider.generate(GenerationRequest(messages=messages))
 
-    call_contents = mock_client.models.generate_content.call_args.kwargs["contents"]
-    assistant_content = call_contents[1]
-    assert assistant_content.role == "model"
+    call_input = mock_client.interactions.create.call_args.kwargs["input"]
+    assert len(call_input) == 4
+    th_step = call_input[1]
+    assert th_step["type"] == "thought"
+    assert th_step["signature"] == b"crypto_gemini_sig_xyz"
+    assert th_step["summary"] == [{"type": "text", "text": "Internal Gemini reasoning..."}]
 
-    # Verify that the thought part was reconstructed with thought=True and signature intact
-    th_part = assistant_content.parts[0]
-    assert th_part.thought is True
-    assert th_part.text == "Internal Gemini reasoning..."
-    assert th_part.thought_signature == b"crypto_gemini_sig_xyz"
+    fc_step = call_input[2]
+    assert fc_step["type"] == "function_call"
+    assert fc_step["id"] == "call_1"
+    assert fc_step["name"] == "search"
+    assert fc_step["arguments"] == {"q": "test"}
+
+    fr_step = call_input[3]
+    assert fr_step["type"] == "function_result"
+    assert fr_step["call_id"] == "call_1"
+    assert fr_step["name"] == "search"
+    assert fr_step["result"] == {"result": "search result"}
 
 
 def test_gemini_provider_function_call_thought_signature_replay(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_genai = types.ModuleType("google.genai")
     mock_types = types.ModuleType("google.genai.types")
 
-    class FakeFunctionCall:
-        def __init__(self, name: str, args: dict[str, Any]) -> None:
-            self.name = name
-            self.args = args
-
-    class FakePart:
-        def __init__(
-            self,
-            text: str | None = None,
-            thought: bool | None = None,
-            thought_signature: Any = None,
-            function_call: Any = None,
-        ) -> None:
-            self.text = text
-            self.thought = thought
-            self.thought_signature = thought_signature
-            self.function_call = function_call
-
-        @classmethod
-        def from_text(cls, text: str) -> "FakePart":
-            return cls(text=text)
-
-        @classmethod
-        def from_function_call(cls, name: str, args: dict[str, Any]) -> "FakePart":
-            return cls(function_call=FakeFunctionCall(name=name, args=args))
-
-        @classmethod
-        def from_function_response(cls, name: str, response: dict[str, Any]) -> "FakePart":
-            p = cls()
-            setattr(p, "function_response", {"name": name, "response": response})
-            return p
-
-    class FakeContent:
-        def __init__(self, role: str, parts: list[Any]) -> None:
-            self.role = role
-            self.parts = parts
-
-    mock_types.Part = FakePart  # type: ignore[attr-defined]
-    mock_types.Content = FakeContent  # type: ignore[attr-defined]
-    mock_types.GenerateContentConfig = MagicMock()  # type: ignore[attr-defined]
-    mock_types.ThinkingConfig = MagicMock()  # type: ignore[attr-defined]
-
     mock_client = MagicMock()
-    # Turn 1: Model response has a function call part with thought_signature directly attached to it
-    fc_part = FakePart.from_function_call(name="execute_code", args={"code": "print(42)"})
-    fc_part.thought_signature = b"gemini_fc_sig_binary_999"
+    # Turn 1: Model response has a function call step with signature
+    mock_fc_step = MagicMock(
+        type="function_call",
+        id="call_fc_1",
+        arguments={"code": "print(42)"},
+        signature=b"gemini_fc_sig_binary_999",
+    )
+    mock_fc_step.name = "execute_code"
 
     mock_resp_1 = MagicMock(
-        candidates=[MagicMock(content=MagicMock(parts=[fc_part]))],
-        usage_metadata=None,
+        output_text="",
+        steps=[mock_fc_step],
+        usage=None,
     )
     # Turn 2: Final response text
-    final_text_part = FakePart.from_text("Output: 42")
-    mock_resp_2 = MagicMock(
-        candidates=[MagicMock(content=MagicMock(parts=[final_text_part]))],
-        usage_metadata=None,
+    mock_output_step = MagicMock(
+        type="model_output",
+        content=[MagicMock(text="Output: 42")],
     )
-    mock_client.models.generate_content.side_effect = [mock_resp_1, mock_resp_2, mock_resp_2]
+    mock_resp_2 = MagicMock(
+        output_text="Output: 42",
+        steps=[mock_output_step],
+        usage=None,
+    )
+    mock_client.interactions.create.side_effect = [mock_resp_1, mock_resp_2, mock_resp_2]
     mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
 
-    provider = GeminiProvider(model="gemini-2.5-flash")
+    provider = GeminiProvider(model="gemini-3.8-flash")
 
     # Turn 1 execution
     res_1 = provider.generate(GenerationRequest(prompt="Run code"))
@@ -822,21 +775,18 @@ def test_gemini_provider_function_call_thought_signature_replay(monkeypatch: pyt
     res_2 = provider.generate(GenerationRequest(messages=messages))
     assert res_2.text == "Output: 42"
 
-    second_call_contents = mock_client.models.generate_content.call_args_list[1].kwargs["contents"]
-    assistant_content = second_call_contents[1]
-    assert assistant_content.role == "model"
-    # Ensure thought signature is attached directly to the function-call part
-    assert len(assistant_content.parts) == 1
-    replayed_part = assistant_content.parts[0]
-    assert replayed_part.function_call.name == "execute_code"
-    assert replayed_part.function_call.args == {"code": "print(42)"}
-    assert replayed_part.thought_signature == b"gemini_fc_sig_binary_999"
-    # Ensure it is NOT converted into a thought text part
-    assert getattr(replayed_part, "thought", None) is not True
+    second_call_input = mock_client.interactions.create.call_args_list[1].kwargs["input"]
+    # Ensure thought signature is attached directly to the replayed function-call step
+    fc_replayed = second_call_input[1]
+    assert fc_replayed["type"] == "function_call"
+    assert fc_replayed["name"] == "execute_code"
+    assert fc_replayed["arguments"] == {"code": "print(42)"}
+    assert fc_replayed["signature"] == b"gemini_fc_sig_binary_999"
 
     # Also verify replay with a deserialized dictionary representation (e.g. from JSON storage without _raw_part)
     deserialized_fc_block = {
         "type": "function_call",
+        "id": res_1.tool_calls[0].id,
         "name": "execute_code",
         "args": {"code": "print(42)"},
         "thought_signature": b"gemini_fc_sig_binary_999",
@@ -848,11 +798,11 @@ def test_gemini_provider_function_call_thought_signature_replay(monkeypatch: pyt
     ]
     provider.generate(GenerationRequest(messages=messages_deserialized))
 
-    replayed_contents = mock_client.models.generate_content.call_args.kwargs["contents"]
-    replayed_assistant = replayed_contents[1]
-    assert len(replayed_assistant.parts) == 1
-    reconstructed_part = replayed_assistant.parts[0]
-    assert reconstructed_part.function_call.name == "execute_code"
-    assert reconstructed_part.thought_signature == b"gemini_fc_sig_binary_999"
+    replayed_input = mock_client.interactions.create.call_args.kwargs["input"]
+    reconstructed_step = replayed_input[1]
+    assert reconstructed_step["type"] == "function_call"
+    assert reconstructed_step["name"] == "execute_code"
+    assert reconstructed_step["signature"] == b"gemini_fc_sig_binary_999"
+
 
 
