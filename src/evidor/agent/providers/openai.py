@@ -1,26 +1,15 @@
 """OpenAI adapter."""
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
-from evidor.models import GenerationRequest, GenerationResponse, ToolCall
-
-
-def _safe_parse_tool_arguments(raw_args: Any) -> dict[str, Any]:
-    if isinstance(raw_args, dict):
-        return raw_args
-    if not isinstance(raw_args, str):
-        return {}
-    try:
-        parsed = json.loads(raw_args)
-        if isinstance(parsed, dict):
-            return parsed
-        return {"__raw_args__": parsed}
-    except Exception as err:
-        return {"__raw_args__": raw_args, "__decode_error__": str(err)}
+from evidor.models import GenerationRequest, GenerationResponse, Message, ToolCall
+from .base import BaseProvider, build_token_usage, safe_parse_tool_arguments, sort_tools
 
 
 def _extract_reasoning_texts(val: Any) -> list[str]:
+    """Extract string snippets from diverse reasoning or thought payload shapes."""
     if not val:
         return []
     if isinstance(val, str):
@@ -52,237 +41,199 @@ def _extract_reasoning_texts(val: Any) -> list[str]:
     return texts
 
 
-def _parse_openai_usage(raw_usage: Any) -> Any:
-    if raw_usage is None:
-        return None
-    try:
-        from evidor.telemetry.events import TokenUsage
+class OpenAIProvider(BaseProvider):
+    """Provider adapter for OpenAI using the modern Responses API."""
 
-        pt = getattr(raw_usage, "prompt_tokens", None)
-        ct = getattr(raw_usage, "completion_tokens", None)
-        tt = getattr(raw_usage, "total_tokens", None)
-        if isinstance(pt, int) or isinstance(ct, int) or isinstance(tt, int):
-            prompt_tokens = int(pt) if isinstance(pt, int) else 0
-            completion_tokens = int(ct) if isinstance(ct, int) else 0
-            total_tokens = int(tt) if isinstance(tt, int) else (prompt_tokens + completion_tokens)
-
-            cached_tokens = 0
-            pt_details = getattr(raw_usage, "prompt_tokens_details", None)
-            if pt_details is not None:
-                cached_tokens = getattr(pt_details, "cached_tokens", 0) or 0
-                if not cached_tokens:
-                    cached_tokens = getattr(pt_details, "prompt_cache_hit_tokens", 0) or 0
-            if not cached_tokens:
-                cached_tokens = getattr(raw_usage, "prompt_cache_hit_tokens", 0) or 0
-
-            reasoning_tokens = 0
-            ct_details = getattr(raw_usage, "completion_tokens_details", None)
-            if ct_details is not None:
-                reasoning_tokens = getattr(ct_details, "reasoning_tokens", 0) or 0
-
-            return TokenUsage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-                cached_tokens=int(cached_tokens) if isinstance(cached_tokens, int) else 0,
-                reasoning_tokens=int(reasoning_tokens) if isinstance(reasoning_tokens, int) else 0,
-            )
-    except Exception:
-        pass
-    return None
-
-
-class OpenAIProvider:
     def __init__(
         self,
         model: str,
         api_key: str | None = None,
         thinking: Any = None,
     ) -> None:
-        self._model = model
-        self._api_key = api_key
         if thinking is not None:
             from evidor.models import OpenAIThinkingConfig
 
-            self._thinking: OpenAIThinkingConfig | None = (
+            thinking_cfg: OpenAIThinkingConfig | None = (
                 thinking
                 if isinstance(thinking, OpenAIThinkingConfig)
                 else OpenAIThinkingConfig.from_value(thinking)
             )
-            self._thinking.validate()
+            thinking_cfg.validate()
         else:
-            self._thinking = None
+            thinking_cfg = None
+
+        super().__init__(model=model, api_key=api_key, thinking=thinking_cfg)
 
     @property
-    def model(self) -> str:
-        return self._model
-
-    @property
-    def thinking(self) -> Any:
-        return self._thinking
+    def context_strategy(self) -> str:
+        return "response_chain"
 
     def with_model(self, model: str) -> "OpenAIProvider":
         return OpenAIProvider(model=model, api_key=self._api_key, thinking=self._thinking)
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
+        client = self._get_client()
+        payload = self._build_request_payload(request)
+        response = client.responses.create(**payload)
+        return self._parse_response(response)
+
+    def _get_client(self) -> Any:
         try:
             from openai import OpenAI
         except ImportError as error:
             raise ImportError("Install OpenAI support with: pip install 'evidor[openai]'") from error
 
-        client = OpenAI(api_key=self._api_key, max_retries=0)
+        client = OpenAI(api_key=self._api_key)
+        if not hasattr(client, "responses") or not hasattr(client.responses, "create"):
+            raise RuntimeError(
+                "Modern OpenAI Responses API (client.responses.create) is required. "
+                "Please update openai to the latest version."
+            )
+        return client
 
-        # Build tools if provided
-        openai_tools: list[dict[str, Any]] | None = None
+    def _build_request_payload(self, request: GenerationRequest) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "input": self._build_input_items(request.messages),
+        }
+
+        if request.system:
+            payload["instructions"] = request.system
+        if request.previous_response_id:
+            payload["previous_response_id"] = request.previous_response_id
+        if request.conversation_id:
+            payload["conversation"] = request.conversation_id
+        if request.store is not None:
+            payload["store"] = request.store
+
+        if self._thinking and self._thinking.enabled:
+            reasoning_config: dict[str, Any] = {}
+            if self._thinking.effort:
+                reasoning_config["effort"] = self._thinking.effort
+            summary_val = getattr(self._thinking, "summary", None)
+            if summary_val:
+                reasoning_config["summary"] = summary_val
+            if reasoning_config:
+                payload["reasoning"] = reasoning_config
+
         if request.tools:
-            sorted_tools = sorted(request.tools, key=lambda t: t.name)
-            openai_tools = [
+            sorted_tools = sort_tools(request.tools)
+            payload["tools"] = [
                 {
                     "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    },
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
                 }
                 for t in sorted_tools
             ]
 
-        # Use Responses API if available on client (e.g. experimental/mocked responses)
-        if hasattr(client, "responses") and hasattr(client.responses, "create"):
-            input_items: list[dict[str, Any]] = []
-            for message in request.messages:
-                if message.role == "tool":
-                    input_items.append({
-                        "role": "tool",
-                        "content": message.content,
-                        "tool_call_id": message.tool_call_id,
-                    })
-                elif message.tool_calls:
-                    item: dict[str, Any] = {"role": "assistant", "content": message.content or ""}
-                    item["tool_calls"] = [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
-                        }
-                        for tc in message.tool_calls
-                    ]
-                    input_items.append(item)
-                else:
-                    input_items.append({"role": message.role, "content": message.content})
+        return payload
 
-            kwargs: dict[str, Any] = {"model": self._model, "input": input_items}
-            if self._thinking and self._thinking.enabled:
-                reasoning_config: dict[str, Any] = {}
-                if self._thinking.effort:
-                    reasoning_config["effort"] = self._thinking.effort
-                summary_val = getattr(self._thinking, "summary", None)
-                if summary_val:
-                    reasoning_config["summary"] = summary_val
-                if reasoning_config:
-                    kwargs["reasoning"] = reasoning_config
-            if openai_tools:
-                kwargs["tools"] = [
-                    {
-                        "type": "function",
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    }
-                    for t in request.tools
-                ]
-            response = client.responses.create(**kwargs)
-            text = getattr(response, "output_text", None) or ""
-            tool_calls: list[ToolCall] = []
-            thinking_parts: list[str] = []
-            output_list = getattr(response, "output", None) or []
-            for item in output_list:
-                item_type = getattr(item, "type", None)
-                if item_type in ("reasoning", "thought"):
-                    item_texts: list[str] = []
-                    for attr_name in ("summary", "content", "text"):
-                        val = getattr(item, attr_name, None)
-                        extracted = _extract_reasoning_texts(val)
-                        if extracted:
-                            item_texts.extend(extracted)
-                            break
-                    if item_texts:
-                        thinking_parts.extend(item_texts)
-                elif item_type == "function_call":
-                    args = _safe_parse_tool_arguments(item.arguments)
-                    call_id = getattr(item, "call_id", None) or getattr(item, "id", f"call_{len(tool_calls)+1}")
-                    tool_calls.append(ToolCall(id=call_id, name=item.name, arguments=args))
-
-            raw_resp_thinking = getattr(response, "reasoning", None) or getattr(response, "thinking", None)
-            if isinstance(raw_resp_thinking, str) and raw_resp_thinking:
-                thinking_parts.append(raw_resp_thinking)
-
-            thinking_text = "\n".join(thinking_parts) if thinking_parts else None
-            usage = _parse_openai_usage(getattr(response, "usage", None))
-            return GenerationResponse(
-                text=text,
-                model=self._model,
-                tool_calls=tuple(tool_calls),
-                usage=usage,
-                thinking=thinking_text,
-            )
-
-        # Standard Chat Completions API
-        chat_messages: list[dict[str, Any]] = []
-        for message in request.messages:
+    def _build_input_items(self, messages: Sequence[Message]) -> list[dict[str, Any]]:
+        input_items: list[dict[str, Any]] = []
+        for message in messages:
             if message.role == "tool":
-                chat_messages.append({
-                    "role": "tool",
-                    "tool_call_id": message.tool_call_id,
-                    "content": message.content,
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": message.tool_call_id,
+                    "output": message.content,
                 })
             elif message.tool_calls:
-                msg_dict: dict[str, Any] = {"role": "assistant", "content": message.content or None}
-                msg_dict["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments),
-                        },
-                    }
-                    for tc in message.tool_calls
-                ]
-                chat_messages.append(msg_dict)
+                for tc in message.tool_calls:
+                    input_items.append({
+                        "type": "function_call",
+                        "call_id": tc.id,
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments) if isinstance(tc.arguments, dict) else str(tc.arguments),
+                    })
+                if message.content:
+                    input_items.append({"role": "assistant", "content": message.content})
             else:
-                chat_messages.append({"role": message.role, "content": message.content})
+                input_items.append({"role": message.role, "content": message.content})
+        return input_items
 
-        chat_kwargs: dict[str, Any] = {"model": self._model, "messages": chat_messages}
-        if self._thinking and self._thinking.enabled and self._thinking.effort:
-            chat_kwargs["reasoning_effort"] = self._thinking.effort
-        if openai_tools:
-            chat_kwargs["tools"] = openai_tools
+    def _parse_response(self, response: Any) -> GenerationResponse:
+        resp_id = getattr(response, "id", None)
+        resp_id = resp_id if isinstance(resp_id, str) else None
+        text = getattr(response, "output_text", None) or ""
 
-        chat_response = client.chat.completions.create(**chat_kwargs)
-        choice = chat_response.choices[0]
-        choice_msg = choice.message
-        text = choice_msg.content or ""
-        tool_calls = []
-        if getattr(choice_msg, "tool_calls", None):
-            for tc in choice_msg.tool_calls:
-                tc_args = _safe_parse_tool_arguments(tc.function.arguments)
-                tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=tc_args))
+        tool_calls, thinking_parts = self._parse_output_items(getattr(response, "output", None) or [])
 
-        # Check for reasoning content if returned by provider (e.g. DeepSeek-R1 / compatible endpoints)
-        chat_thinking = (
-            getattr(choice_msg, "reasoning_content", None)
-            or getattr(choice_msg, "reasoning", None)
-        )
-        thinking_text = str(chat_thinking) if isinstance(chat_thinking, str) and chat_thinking else None
+        raw_resp_thinking = getattr(response, "reasoning", None) or getattr(response, "thinking", None)
+        if isinstance(raw_resp_thinking, str) and raw_resp_thinking:
+            thinking_parts.append(raw_resp_thinking)
 
-        usage = _parse_openai_usage(getattr(chat_response, "usage", None))
+        thinking_text = "\n".join(thinking_parts) if thinking_parts else None
+        usage = self._parse_usage(getattr(response, "usage", None))
 
         return GenerationResponse(
+            id=resp_id,
             text=text,
             model=self._model,
             tool_calls=tuple(tool_calls),
             usage=usage,
             thinking=thinking_text,
+        )
+
+    def _parse_output_items(self, output_items: list[Any]) -> tuple[list[ToolCall], list[str]]:
+        tool_calls: list[ToolCall] = []
+        thinking_parts: list[str] = []
+
+        for item in output_items:
+            item_type = getattr(item, "type", None)
+            if item_type in ("reasoning", "thought"):
+                for attr_name in ("summary", "content", "text"):
+                    extracted = _extract_reasoning_texts(getattr(item, attr_name, None))
+                    if extracted:
+                        thinking_parts.extend(extracted)
+                        break
+            elif item_type == "function_call":
+                args = safe_parse_tool_arguments(item.arguments)
+                raw_call_id = getattr(item, "call_id", None)
+                if not isinstance(raw_call_id, str):
+                    raw_call_id = getattr(item, "id", None)
+                call_id = raw_call_id if isinstance(raw_call_id, str) else f"call_{len(tool_calls)+1}"
+                tool_calls.append(ToolCall(id=call_id, name=item.name, arguments=args))
+
+        return tool_calls, thinking_parts
+
+    def _parse_usage(self, raw_usage: Any) -> Any:
+        if raw_usage is None:
+            return None
+
+        pt = getattr(raw_usage, "prompt_tokens", None)
+        if pt is None:
+            pt = getattr(raw_usage, "input_tokens", None)
+        ct = getattr(raw_usage, "completion_tokens", None)
+        if ct is None:
+            ct = getattr(raw_usage, "output_tokens", None)
+        tt = getattr(raw_usage, "total_tokens", None)
+
+        if not (isinstance(pt, int) or isinstance(ct, int) or isinstance(tt, int)):
+            return None
+
+        prompt_tokens = int(pt) if isinstance(pt, int) else 0
+        completion_tokens = int(ct) if isinstance(ct, int) else 0
+
+        cached_tokens = 0
+        pt_details = getattr(raw_usage, "prompt_tokens_details", None) or getattr(raw_usage, "input_tokens_details", None)
+        if pt_details is not None:
+            cached_tokens = getattr(pt_details, "cached_tokens", 0) or 0
+            if not cached_tokens:
+                cached_tokens = getattr(pt_details, "prompt_cache_hit_tokens", 0) or 0
+        if not cached_tokens:
+            cached_tokens = getattr(raw_usage, "prompt_cache_hit_tokens", 0) or 0
+
+        reasoning_tokens = 0
+        ct_details = getattr(raw_usage, "completion_tokens_details", None) or getattr(raw_usage, "output_tokens_details", None)
+        if ct_details is not None:
+            reasoning_tokens = getattr(ct_details, "reasoning_tokens", 0) or 0
+
+        return build_token_usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=int(tt) if isinstance(tt, int) else None,
+            cached_tokens=int(cached_tokens) if isinstance(cached_tokens, int) else 0,
+            reasoning_tokens=int(reasoning_tokens) if isinstance(reasoning_tokens, int) else 0,
         )

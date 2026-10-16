@@ -1,9 +1,16 @@
 """Google Gemini adapter."""
 
+from collections.abc import Sequence
 from typing import Any
 
-from evidor.models import GenerationRequest, GenerationResponse, ToolCall
-
+from evidor.models import GenerationRequest, GenerationResponse, Message, ToolCall
+from .base import (
+    BaseProvider,
+    build_token_usage,
+    extract_system_prompt,
+    safe_parse_tool_arguments,
+    sort_tools,
+)
 
 _ALLOWED_GEMINI_SCHEMA_KEYS = {
     "type",
@@ -40,17 +47,7 @@ _ALLOWED_GEMINI_SCHEMA_KEYS = {
 
 
 def _sanitize_gemini_schema(schema: Any, types_mod: Any) -> Any:
-    """Sanitize a JSON schema dictionary for Google GenAI types.Schema.
-
-    google-genai and Gemini API protobuf support only a strict subset of JSON Schema:
-    - Vendor extensions (x-*) and meta-schema keywords ($schema, $id, $comment) are stripped.
-    - Unsupported fields like additionalProperties and defs are stripped (unrecognized by Gemini API proto).
-    - Multi-type lists (e.g. type: ['string', 'number', 'boolean']) are converted to anyOf.
-    - const is converted to enum: [const].
-    - oneOf is converted to anyOf.
-    - items as a list is unwrapped or converted to anyOf.
-    - Property definitions in 'properties' are sanitized recursively.
-    """
+    """Sanitize a JSON schema dictionary for Google GenAI types.Schema."""
     if not isinstance(schema, dict):
         if isinstance(schema, list):
             return [_sanitize_gemini_schema(item, types_mod) for item in schema]
@@ -114,7 +111,9 @@ def _sanitize_gemini_schema(schema: Any, types_mod: Any) -> Any:
     return cleaned
 
 
-class GeminiProvider:
+class GeminiProvider(BaseProvider):
+    """Provider adapter for Google Gemini using the Interactions API."""
+
     def __init__(
         self,
         model: str,
@@ -122,28 +121,24 @@ class GeminiProvider:
         cached_content: str | None = None,
         thinking: Any = None,
     ) -> None:
-        self._model = model
-        self._api_key = api_key
-        self._cached_content = cached_content
         if thinking is not None:
             from evidor.models import GeminiThinkingConfig
 
-            self._thinking: GeminiThinkingConfig | None = (
+            thinking_cfg: GeminiThinkingConfig | None = (
                 thinking
                 if isinstance(thinking, GeminiThinkingConfig)
                 else GeminiThinkingConfig.from_value(thinking)
             )
-            self._thinking.validate()
+            thinking_cfg.validate()
         else:
-            self._thinking = None
+            thinking_cfg = None
+
+        super().__init__(model=model, api_key=api_key, thinking=thinking_cfg)
+        self._cached_content = cached_content
 
     @property
-    def model(self) -> str:
-        return self._model
-
-    @property
-    def thinking(self) -> Any:
-        return self._thinking
+    def context_strategy(self) -> str:
+        return "interaction_chain"
 
     @property
     def cached_content(self) -> str | None:
@@ -158,303 +153,158 @@ class GeminiProvider:
         )
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
+        client, types = self._get_client_and_types()
+        payload = self._build_request_payload(request, types)
+        response = client.interactions.create(**payload)
+        return self._parse_response(response)
+
+    def _get_client_and_types(self) -> tuple[Any, Any]:
         try:
             from google import genai
             from google.genai import types
         except ImportError as error:
             raise ImportError("Install Gemini support with: pip install 'evidor[gemini]'") from error
 
-        system_prompt = "\n\n".join(message.content for message in request.messages if message.role == "system")
-        contents: list[Any] = []
+        client = genai.Client(api_key=self._api_key)
+        if not hasattr(client, "interactions") or not hasattr(client.interactions, "create"):
+            raise RuntimeError(
+                "Modern Google GenAI Interactions API (client.interactions.create) is required. "
+                "Please update google-genai to the latest version."
+            )
+        return client, types
 
-        for message in request.messages:
+    def _build_request_payload(self, request: GenerationRequest, types: Any) -> dict[str, Any]:
+        system_prompt = extract_system_prompt(request)
+        input_steps = self._format_input_steps(request.messages)
+
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "input": input_steps,
+        }
+
+        if request.system:
+            payload["system_instruction"] = request.system
+        elif system_prompt:
+            payload["system_instruction"] = system_prompt
+
+        if request.previous_response_id:
+            payload["previous_interaction_id"] = request.previous_response_id
+        if request.store is not None:
+            payload["store"] = request.store
+        if self._cached_content:
+            payload["cached_content"] = self._cached_content
+
+        if request.tools:
+            sorted_tools = sort_tools(request.tools)
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": _sanitize_gemini_schema(t.parameters, types) if t.parameters else None,
+                }
+                for t in sorted_tools
+            ]
+
+        if self._thinking is not None:
+            gen_config: dict[str, Any] = {}
+            if self._thinking.enabled:
+                thinking_level = getattr(self._thinking, "thinking_level", None)
+                if thinking_level:
+                    gen_config["thinking_level"] = thinking_level
+                elif self._thinking.thinking_budget is not None:
+                    gen_config["thinking_level"] = "medium"
+                if getattr(self._thinking, "include_thoughts", True):
+                    gen_config["thinking_summaries"] = "auto"
+            else:
+                gen_config["thinking_level"] = "minimal"
+            if gen_config:
+                payload["generation_config"] = gen_config
+
+        return payload
+
+    def _format_input_steps(self, messages: Sequence[Message]) -> list[dict[str, Any]]:
+        input_steps: list[dict[str, Any]] = []
+        for message in messages:
             if message.role == "system":
                 continue
 
             if message.role == "tool":
-                part = types.Part.from_function_response(
-                    name=message.name or "tool",
-                    response={"result": message.content},
-                )
-                contents.append(types.Content(role="user", parts=[part]))
+                input_steps.append({
+                    "type": "function_result",
+                    "call_id": message.tool_call_id or "call_1",
+                    "name": message.name or "tool",
+                    "result": {"result": message.content},
+                })
             elif message.role == "assistant":
-                parts: list[Any] = []
-                replayed_fc_counts: dict[str, int] = {}
                 if message.thought_blocks:
                     for tb in message.thought_blocks:
-                        if hasattr(tb, "function_call") and tb.function_call:
-                            parts.append(tb)
-                            fc_name = getattr(tb.function_call, "name", None)
-                            if fc_name:
-                                replayed_fc_counts[fc_name] = replayed_fc_counts.get(fc_name, 0) + 1
-                        elif hasattr(tb, "text") and getattr(tb, "thought", False):
-                            parts.append(tb)
-                        elif isinstance(tb, dict):
-                            raw_p = tb.get("_raw_part")
-                            if raw_p is not None and (hasattr(raw_p, "function_call") or hasattr(raw_p, "text")):
-                                parts.append(raw_p)
-                                if hasattr(raw_p, "function_call") and raw_p.function_call:
-                                    fc_name = getattr(raw_p.function_call, "name", None)
-                                    if fc_name:
-                                        replayed_fc_counts[fc_name] = replayed_fc_counts.get(fc_name, 0) + 1
-                                continue
+                        if isinstance(tb, dict):
+                            tb_type = tb.get("type")
+                            sig = tb.get("thought_signature") or tb.get("thoughtSignature") or tb.get("signature")
+                            if tb_type == "thought" or tb.get("thought"):
+                                input_steps.append({
+                                    "type": "thought",
+                                    "signature": sig,
+                                    "summary": [{"type": "text", "text": tb.get("text", "")}],
+                                })
+                            elif tb_type == "function_call":
+                                fc_step: dict[str, Any] = {
+                                    "type": "function_call",
+                                    "id": tb.get("id") or tb.get("call_id") or "call_1",
+                                    "name": tb.get("name", ""),
+                                    "arguments": tb.get("args") or tb.get("arguments") or {},
+                                }
+                                if sig:
+                                    fc_step["signature"] = sig
+                                input_steps.append(fc_step)
+                        elif hasattr(tb, "type"):
+                            input_steps.append(tb)
 
-                            tb_sig = tb.get("thought_signature") or tb.get("thoughtSignature")
-                            is_fc = (
-                                tb.get("type") == "function_call"
-                                or "function_call" in tb
-                                or (("name" in tb or "args" in tb) and not tb.get("thought", False))
-                            )
-                            if is_fc:
-                                fc_name = tb.get("name") or (
-                                    tb["function_call"].get("name")
-                                    if isinstance(tb.get("function_call"), dict)
-                                    else ""
-                                )
-                                fc_args = tb.get("args") or (
-                                    tb["function_call"].get("args")
-                                    if isinstance(tb.get("function_call"), dict)
-                                    else {}
-                                )
-                                p = None
-                                try:
-                                    p = types.Part.from_function_call(name=fc_name, args=fc_args)
-                                    if tb_sig is not None:
-                                        p.thought_signature = tb_sig
-                                except Exception:
-                                    try:
-                                        fc_cls = getattr(types, "FunctionCall", None)
-                                        fc_obj = fc_cls(name=fc_name, args=fc_args) if fc_cls else None
-                                        p = types.Part(function_call=fc_obj, thought_signature=tb_sig)
-                                    except Exception:
-                                        p = types.Part.from_text(text="")
-                                        setattr(p, "function_call", {"name": fc_name, "args": fc_args})
-                                        if tb_sig is not None:
-                                            setattr(p, "thought_signature", tb_sig)
-                                if p is not None:
-                                    parts.append(p)
-                                    if fc_name:
-                                        replayed_fc_counts[fc_name] = replayed_fc_counts.get(fc_name, 0) + 1
-                            elif tb.get("thought", False) or tb.get("type") == "thought" or ("text" in tb and tb_sig is not None):
-                                tb_text = tb.get("text", "")
-                                try:
-                                    if tb_sig is not None:
-                                        p = types.Part(text=tb_text, thought=True, thought_signature=tb_sig)
-                                    else:
-                                        p = types.Part(text=tb_text, thought=True)
-                                except Exception:
-                                    p = types.Part.from_text(text=tb_text)
-                                    p.thought = True
-                                    if tb_sig is not None:
-                                        try:
-                                            setattr(p, "thought_signature", tb_sig)
-                                        except Exception:
-                                            pass
-                                parts.append(p)
-                            elif tb_sig is not None:
-                                try:
-                                    p = types.Part(thought_signature=tb_sig)
-                                except Exception:
-                                    p = types.Part.from_text(text="")
-                                    setattr(p, "thought_signature", tb_sig)
-                                parts.append(p)
-                        elif hasattr(tb, "text") or hasattr(tb, "function_call"):
-                            parts.append(tb)
-                if message.content and not parts:
-                    parts.append(types.Part.from_text(text=message.content))
-                elif message.content and parts and not any(
-                    getattr(p, "text", None) == message.content and not getattr(p, "thought", False) for p in parts
-                ):
-                    parts.append(types.Part.from_text(text=message.content))
                 if message.tool_calls:
+                    existing_call_ids = {
+                        step.get("id") for step in input_steps if isinstance(step, dict) and step.get("type") == "function_call"
+                    }
                     for tc in message.tool_calls:
-                        if replayed_fc_counts.get(tc.name, 0) > 0:
-                            replayed_fc_counts[tc.name] -= 1
-                        else:
-                            parts.append(types.Part.from_function_call(name=tc.name, args=tc.arguments))
-                contents.append(types.Content(role="model", parts=parts))
+                        if tc.id not in existing_call_ids:
+                            input_steps.append({
+                                "type": "function_call",
+                                "id": tc.id,
+                                "name": tc.name,
+                                "arguments": tc.arguments,
+                            })
+
+                if message.content:
+                    input_steps.append({
+                        "type": "model_output",
+                        "content": [{"type": "text", "text": message.content}],
+                    })
             else:
-                contents.append(
-                    types.Content(
-                        role="user",
-                        parts=[types.Part.from_text(text=message.content)],
-                    )
-                )
+                input_steps.append({
+                    "type": "user_input",
+                    "content": [{"type": "text", "text": message.content}],
+                })
+        return input_steps
 
-        gemini_tools: list[Any] | None = None
-        if request.tools:
-            sorted_tools = sorted(request.tools, key=lambda t: t.name)
-            declarations = [
-                types.FunctionDeclaration(
-                    name=t.name,
-                    description=t.description,
-                    parameters=_sanitize_gemini_schema(t.parameters, types) if t.parameters else None,
-                )
-                for t in sorted_tools
-            ]
-            gemini_tools = [types.Tool(function_declarations=declarations)]
+    def _parse_response(self, response: Any) -> GenerationResponse:
+        resp_id = getattr(response, "id", None)
+        resp_id = resp_id if isinstance(resp_id, str) else None
+        output_text = getattr(response, "output_text", None) or ""
 
-        config = None
-        config_kwargs: dict[str, Any] = {}
-        if system_prompt:
-            config_kwargs["system_instruction"] = system_prompt
-        if gemini_tools:
-            config_kwargs["tools"] = gemini_tools
-        if self._cached_content:
-            config_kwargs["cached_content"] = self._cached_content
+        text, tool_calls, thought_blocks, thought_parts = self._parse_steps(
+            getattr(response, "steps", None) or [], output_text
+        )
 
-        if self._thinking is not None:
-            thinking_budget = self._thinking.thinking_budget
-            if not self._thinking.enabled:
-                thinking_budget = 0
-            include_thoughts = self._thinking.include_thoughts if self._thinking.enabled else False
+        if not text and hasattr(response, "text") and isinstance(response.text, str):
+            text = response.text
+        if not text and not tool_calls and thought_parts:
+            text = "".join(thought_parts)
 
-            thinking_config_cls = getattr(types, "ThinkingConfig", None)
-            if thinking_config_cls is not None:
-                tc_kwargs: dict[str, Any] = {}
-                if thinking_budget is not None:
-                    tc_kwargs["thinking_budget"] = thinking_budget
-                tc_kwargs["include_thoughts"] = include_thoughts
-                config_kwargs["thinking_config"] = thinking_config_cls(**tc_kwargs)
-            else:
-                config_kwargs["thinking_config"] = {
-                    "thinking_budget": thinking_budget,
-                    "include_thoughts": include_thoughts,
-                }
-
-        if config_kwargs:
-            config = types.GenerateContentConfig(**config_kwargs)
-
-        http_options = None
-        http_options_cls = getattr(types, "HttpOptions", None)
-        retry_options_cls = getattr(types, "HttpRetryOptions", None)
-        if http_options_cls is not None and retry_options_cls is not None:
-            http_options = http_options_cls(retry_options=retry_options_cls(attempts=1))
-        elif http_options_cls is not None:
-            http_options = http_options_cls(retry_options={"attempts": 1})
-        else:
-            http_options = {"retry_options": {"attempts": 1}}
-
-        client = genai.Client(api_key=self._api_key, http_options=http_options)
-        response = client.models.generate_content(model=self._model, contents=contents, config=config)
-
-        # Parse text, thoughts, and tool calls.
-        text = ""
-        thinking_text = None
-        thought_blocks: list[Any] = []
-        tool_calls: list[ToolCall] = []
-
-        candidates = getattr(response, "candidates", None)
-        if isinstance(candidates, (list, tuple)) and candidates:
-            candidate = candidates[0]
-            content = getattr(candidate, "content", None)
-            parts = getattr(content, "parts", None) or []
-            text_chunks: list[str] = []
-            thought_chunks: list[str] = []
-            for part in parts:
-                part_text = getattr(part, "text", None)
-                is_thought = getattr(part, "thought", False)
-                sig = getattr(part, "thought_signature", None) or getattr(part, "thoughtSignature", None)
-                if isinstance(part_text, str):
-                    if not is_thought:
-                        text_chunks.append(part_text)
-                    else:
-                        thought_chunks.append(part_text)
-
-                fc = getattr(part, "function_call", None)
-                if fc:
-                    call_id = getattr(fc, "id", None) or f"call_{len(tool_calls)+1}"
-                    args = dict(fc.args) if getattr(fc, "args", None) else {}
-                    tool_calls.append(ToolCall(id=call_id, name=fc.name or "", arguments=args))
-                    if sig is not None:
-                        fc_dict: dict[str, Any] = {
-                            "type": "function_call",
-                            "name": fc.name or "",
-                            "args": args,
-                            "thought_signature": sig,
-                            "_raw_part": part,
-                        }
-                        thought_blocks.append(fc_dict)
-                elif is_thought:
-                    tb_dict: dict[str, Any] = {
-                        "type": "thought",
-                        "text": part_text or "",
-                        "thought": True,
-                        "_raw_part": part,
-                    }
-                    if sig is not None:
-                        tb_dict["thought_signature"] = sig
-                    thought_blocks.append(tb_dict)
-                elif sig is not None:
-                    gen_dict: dict[str, Any] = {
-                        "thought_signature": sig,
-                        "_raw_part": part,
-                    }
-                    if part_text:
-                        gen_dict["text"] = part_text
-                    thought_blocks.append(gen_dict)
-
-            if text_chunks:
-                text = "".join(text_chunks)
-            elif not tool_calls and thought_chunks:
-                text = "".join(thought_chunks)
-
-            if thought_chunks:
-                thinking_text = "".join(thought_chunks)
-
-        # Fallback for tool_calls if not extracted from candidates' parts
-        if not tool_calls and getattr(response, "function_calls", None):
-            raw_fc = response.function_calls
-            if isinstance(raw_fc, (list, tuple)):
-                for i, fc in enumerate(raw_fc):
-                    call_id = getattr(fc, "id", None) or f"call_{i+1}"
-                    args = dict(fc.args) if getattr(fc, "args", None) else {}
-                    tool_calls.append(ToolCall(id=call_id, name=fc.name or "", arguments=args))
-
-        # Fallback for text if response lacks candidate parts (e.g. mock objects)
-        if not text and not (isinstance(candidates, (list, tuple)) and candidates):
-            raw_text = getattr(response, "text", None)
-            if isinstance(raw_text, str):
-                text = raw_text
-
-        # Extract token usage metadata if available
-        usage = None
-        usage_metadata = getattr(response, "usage_metadata", None)
-        if usage_metadata is not None:
-            try:
-                from evidor.telemetry.events import TokenUsage
-
-                pt = getattr(usage_metadata, "prompt_token_count", None)
-                ct = getattr(usage_metadata, "candidates_token_count", None)
-                tt = getattr(usage_metadata, "total_token_count", None)
-                cached_tokens = getattr(usage_metadata, "cached_content_token_count", 0) or 0
-
-                reasoning_tokens = 0
-                ct_details = getattr(usage_metadata, "candidates_tokens_details", None)
-                if ct_details is not None:
-                    rt = getattr(ct_details, "reasoning_tokens", None) or getattr(ct_details, "thinking_token_count", None)
-                    if isinstance(rt, int):
-                        reasoning_tokens = rt
-                if not reasoning_tokens:
-                    ttc = getattr(usage_metadata, "thinking_token_count", None)
-                    if isinstance(ttc, int):
-                        reasoning_tokens = ttc
-
-                if isinstance(pt, int) or isinstance(ct, int) or isinstance(tt, int):
-                    prompt_tokens = int(pt) if isinstance(pt, int) else 0
-                    completion_tokens = int(ct) if isinstance(ct, int) else 0
-                    total_tokens = int(tt) if isinstance(tt, int) else (prompt_tokens + completion_tokens)
-                    usage = TokenUsage(
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        total_tokens=total_tokens,
-                        cached_tokens=int(cached_tokens) if isinstance(cached_tokens, int) else 0,
-                        reasoning_tokens=int(reasoning_tokens) if isinstance(reasoning_tokens, int) else 0,
-                    )
-            except Exception:
-                pass
+        thinking_text = "\n".join(thought_parts) if thought_parts else None
+        usage = self._parse_usage(getattr(response, "usage", None))
 
         return GenerationResponse(
+            id=resp_id,
             text=text,
             model=self._model,
             tool_calls=tuple(tool_calls),
@@ -463,3 +313,94 @@ class GeminiProvider:
             thought_blocks=tuple(thought_blocks),
         )
 
+    def _parse_steps(
+        self, steps: list[Any], initial_text: str
+    ) -> tuple[str, list[ToolCall], list[dict[str, Any]], list[str]]:
+        text = initial_text
+        tool_calls: list[ToolCall] = []
+        thought_blocks: list[dict[str, Any]] = []
+        thought_parts: list[str] = []
+
+        for step in steps:
+            step_type = getattr(step, "type", None) or (step.get("type") if isinstance(step, dict) else None)
+            if step_type == "function_call":
+                raw_call_id = getattr(step, "id", None) or (step.get("id") if isinstance(step, dict) else None)
+                call_id = raw_call_id or f"call_{len(tool_calls)+1}"
+                name = getattr(step, "name", None) or (step.get("name") if isinstance(step, dict) else "") or ""
+                raw_args = (
+                    getattr(step, "arguments", None)
+                    or (step.get("arguments") if isinstance(step, dict) else {})
+                    or {}
+                )
+                args = safe_parse_tool_arguments(raw_args)
+                sig = getattr(step, "signature", None) or (step.get("signature") if isinstance(step, dict) else None)
+
+                tool_calls.append(ToolCall(id=call_id, name=name, arguments=args))
+                thought_blocks.append({
+                    "type": "function_call",
+                    "id": call_id,
+                    "name": name,
+                    "args": args,
+                    "thought_signature": sig,
+                    "_raw_part": step,
+                })
+            elif step_type == "thought":
+                summary = getattr(step, "summary", None) or (step.get("summary") if isinstance(step, dict) else None)
+                sig = getattr(step, "signature", None) or (step.get("signature") if isinstance(step, dict) else None)
+                t_str = ""
+                if isinstance(summary, list):
+                    for s in summary:
+                        val = getattr(s, "text", None) if not isinstance(s, dict) else s.get("text")
+                        if val:
+                            t_str += val
+                elif isinstance(summary, str):
+                    t_str = summary
+                elif getattr(step, "text", None):
+                    t_str = getattr(step, "text")
+
+                if t_str:
+                    thought_parts.append(t_str)
+                thought_blocks.append({
+                    "type": "thought",
+                    "text": t_str,
+                    "thought": True,
+                    "thought_signature": sig,
+                    "_raw_part": step,
+                })
+            elif step_type == "model_output":
+                if not text:
+                    content = (
+                        getattr(step, "content", None)
+                        or (step.get("content") if isinstance(step, dict) else None)
+                    )
+                    if isinstance(content, list):
+                        for c in content:
+                            val = getattr(c, "text", None) if not isinstance(c, dict) else c.get("text")
+                            if val:
+                                text += val
+
+        return text, tool_calls, thought_blocks, thought_parts
+
+    def _parse_usage(self, usage_obj: Any) -> Any:
+        if usage_obj is None:
+            return None
+
+        pt = getattr(usage_obj, "total_input_tokens", None)
+        ct = getattr(usage_obj, "total_output_tokens", None)
+        tt = getattr(usage_obj, "total_tokens", None)
+        cached = getattr(usage_obj, "total_cached_tokens", 0) or 0
+        reasoning = getattr(usage_obj, "total_thought_tokens", 0) or 0
+
+        if not (isinstance(pt, int) or isinstance(ct, int) or isinstance(tt, int)):
+            return None
+
+        prompt_tokens = int(pt) if isinstance(pt, int) else 0
+        completion_tokens = int(ct) if isinstance(ct, int) else 0
+
+        return build_token_usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=int(tt) if isinstance(tt, int) else (prompt_tokens + completion_tokens),
+            cached_tokens=int(cached) if isinstance(cached, int) else 0,
+            reasoning_tokens=int(reasoning) if isinstance(reasoning, int) else 0,
+        )

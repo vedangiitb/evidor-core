@@ -1,11 +1,15 @@
 """Anthropic adapter."""
 
+from collections.abc import Sequence
 from typing import Any
 
-from evidor.models import GenerationRequest, GenerationResponse, ToolCall
+from evidor.models import GenerationRequest, GenerationResponse, Message, ToolCall
+from .base import BaseProvider, build_token_usage, extract_system_prompt, sort_tools
 
 
-class AnthropicProvider:
+class AnthropicProvider(BaseProvider):
+    """Provider adapter for Anthropic Claude using the Messages API."""
+
     def __init__(
         self,
         model: str,
@@ -14,20 +18,20 @@ class AnthropicProvider:
         enable_prompt_caching: bool = True,
         thinking: Any = None,
     ) -> None:
-        self._model = model
-        self._api_key = api_key
-        self._enable_prompt_caching = enable_prompt_caching
         if thinking is not None:
             from evidor.models import AnthropicThinkingConfig
 
-            self._thinking: AnthropicThinkingConfig | None = (
+            thinking_cfg: AnthropicThinkingConfig | None = (
                 thinking
                 if isinstance(thinking, AnthropicThinkingConfig)
                 else AnthropicThinkingConfig.from_value(thinking)
             )
-            self._thinking.validate()
+            thinking_cfg.validate()
         else:
-            self._thinking = None
+            thinking_cfg = None
+
+        super().__init__(model=model, api_key=api_key, thinking=thinking_cfg)
+        self._enable_prompt_caching = enable_prompt_caching
 
         if max_tokens is None:
             if self._thinking and self._thinking.enabled and self._thinking.budget_tokens:
@@ -37,12 +41,8 @@ class AnthropicProvider:
         self._max_tokens = max_tokens
 
     @property
-    def model(self) -> str:
-        return self._model
-
-    @property
-    def thinking(self) -> Any:
-        return self._thinking
+    def context_strategy(self) -> str:
+        return "prompt_caching"
 
     @property
     def enable_prompt_caching(self) -> bool:
@@ -58,20 +58,64 @@ class AnthropicProvider:
         )
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
+        client = self._get_client()
+        payload = self._build_request_payload(request)
+        response_msg = client.messages.create(**payload)
+        return self._parse_response(response_msg)
+
+    def _get_client(self) -> Any:
         try:
             from anthropic import Anthropic
         except ImportError as error:
             raise ImportError("Install Anthropic support with: pip install 'evidor[anthropic]'") from error
 
-        client = Anthropic(api_key=self._api_key, max_retries=0)
-        system_prompt = "\n\n".join(message.content for message in request.messages if message.role == "system")
+        return Anthropic(api_key=self._api_key)
 
-        formatted_messages: list[dict[str, Any]] = []
-        for message in request.messages:
+    def _build_request_payload(self, request: GenerationRequest) -> dict[str, Any]:
+        system_prompt = extract_system_prompt(request)
+        formatted_messages = self._format_messages(request.messages)
+
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": self._max_tokens,
+            "system": system_prompt or None,
+            "messages": formatted_messages,
+        }
+
+        if self._thinking and self._thinking.enabled:
+            if self._thinking.type == "adaptive":
+                payload["thinking"] = {"type": "adaptive"}
+                if self._thinking.effort:
+                    payload["output_config"] = {"effort": self._thinking.effort}
+            elif self._thinking.budget_tokens:
+                payload["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": self._thinking.budget_tokens,
+                }
+
+        if self._enable_prompt_caching:
+            payload["cache_control"] = {"type": "ephemeral"}
+
+        if request.tools:
+            sorted_tools = sort_tools(request.tools)
+            payload["tools"] = [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters,
+                }
+                for t in sorted_tools
+            ]
+
+        return payload
+
+    def _format_messages(self, messages: Sequence[Message]) -> list[dict[str, Any]]:
+        formatted: list[dict[str, Any]] = []
+        for message in messages:
             if message.role == "system":
                 continue
             if message.role == "tool":
-                formatted_messages.append({
+                formatted.append({
                     "role": "user",
                     "content": [
                         {
@@ -99,53 +143,43 @@ class AnthropicProvider:
                                 "name": tc.name,
                                 "input": tc.arguments,
                             })
-                    formatted_messages.append({"role": "assistant", "content": content_blocks})
+                    formatted.append({"role": "assistant", "content": content_blocks})
                 else:
-                    formatted_messages.append({"role": "assistant", "content": message.content})
+                    formatted.append({"role": "assistant", "content": message.content})
             else:
-                formatted_messages.append({"role": message.role, "content": message.content})
+                formatted.append({"role": message.role, "content": message.content})
+        return formatted
 
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "max_tokens": self._max_tokens,
-            "system": system_prompt or None,
-            "messages": formatted_messages,
-        }
+    def _parse_response(self, response_msg: Any) -> GenerationResponse:
+        msg_id = getattr(response_msg, "id", None)
+        msg_id = msg_id if isinstance(msg_id, str) else None
 
-        if self._thinking and self._thinking.enabled:
-            if self._thinking.type == "adaptive":
-                thinking_payload: dict[str, Any] = {"type": "adaptive"}
-                if self._thinking.effort:
-                    kwargs["output_config"] = {"effort": self._thinking.effort}
-                kwargs["thinking"] = thinking_payload
-            elif self._thinking.budget_tokens:
-                kwargs["thinking"] = {
-                    "type": "enabled",
-                    "budget_tokens": self._thinking.budget_tokens,
-                }
+        text, tool_calls, thought_blocks, thought_parts = self._parse_content_blocks(
+            getattr(response_msg, "content", [])
+        )
 
-        if self._enable_prompt_caching:
-            kwargs["cache_control"] = {"type": "ephemeral"}
+        thinking_text = "".join(thought_parts) if thought_parts else None
+        usage = self._parse_usage(getattr(response_msg, "usage", None))
 
-        if request.tools:
-            sorted_tools = sorted(request.tools, key=lambda t: t.name)
-            kwargs["tools"] = [
-                {
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": t.parameters,
-                }
-                for t in sorted_tools
-            ]
+        return GenerationResponse(
+            id=msg_id,
+            text=text,
+            model=self._model,
+            tool_calls=tuple(tool_calls),
+            usage=usage,
+            thinking=thinking_text,
+            thought_blocks=tuple(thought_blocks),
+        )
 
-        response_msg = client.messages.create(**kwargs)
-
+    def _parse_content_blocks(
+        self, content_blocks: list[Any]
+    ) -> tuple[str, list[ToolCall], list[dict[str, Any]], list[str]]:
         text_parts: list[str] = []
         thought_parts: list[str] = []
         thought_blocks: list[dict[str, Any]] = []
         tool_calls: list[ToolCall] = []
 
-        for block in getattr(response_msg, "content", []):
+        for block in content_blocks:
             block_type = getattr(block, "type", None)
             if block_type == "text":
                 text_parts.append(getattr(block, "text", ""))
@@ -170,37 +204,27 @@ class AnthropicProvider:
                     )
                 )
 
-        usage = None
-        raw_usage = getattr(response_msg, "usage", None)
-        if raw_usage is not None:
-            try:
-                from evidor.telemetry.events import TokenUsage
+        return "".join(text_parts), tool_calls, thought_blocks, thought_parts
 
-                it = getattr(raw_usage, "input_tokens", None)
-                ot = getattr(raw_usage, "output_tokens", None)
-                cache_read = getattr(raw_usage, "cache_read_input_tokens", 0) or 0
-                cache_write = getattr(raw_usage, "cache_creation_input_tokens", 0) or 0
+    def _parse_usage(self, raw_usage: Any) -> Any:
+        if raw_usage is None:
+            return None
 
-                if isinstance(it, int) or isinstance(ot, int):
-                    prompt_tokens = (int(it) if isinstance(it, int) else 0) + cache_read
-                    completion_tokens = int(ot) if isinstance(ot, int) else 0
-                    total_tokens = prompt_tokens + completion_tokens
-                    usage = TokenUsage(
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        total_tokens=total_tokens,
-                        cached_tokens=cache_read,
-                        cache_creation_tokens=cache_write,
-                    )
-            except Exception:
-                pass
+        it = getattr(raw_usage, "input_tokens", None)
+        ot = getattr(raw_usage, "output_tokens", None)
+        cache_read = getattr(raw_usage, "cache_read_input_tokens", 0) or 0
+        cache_write = getattr(raw_usage, "cache_creation_input_tokens", 0) or 0
 
-        thinking_text = "".join(thought_parts) if thought_parts else None
-        return GenerationResponse(
-            text="".join(text_parts),
-            model=self._model,
-            tool_calls=tuple(tool_calls),
-            usage=usage,
-            thinking=thinking_text,
-            thought_blocks=tuple(thought_blocks),
+        if not (isinstance(it, int) or isinstance(ot, int)):
+            return None
+
+        prompt_tokens = (int(it) if isinstance(it, int) else 0) + cache_read
+        completion_tokens = int(ot) if isinstance(ot, int) else 0
+
+        return build_token_usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            cached_tokens=cache_read,
+            cache_creation_tokens=cache_write,
         )
