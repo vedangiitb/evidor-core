@@ -1,14 +1,14 @@
-"""The public conversational agent facade."""
+"""The public conversational agent and session facade."""
+
+from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
-from dataclasses import replace
 import secrets
 import time
 from typing import Any
 
 from ..models import GenerationRequest, GenerationResponse, Message, ToolCall
-from ..retry import DEFAULT_RETRY_CONFIG, RetryConfig, calculate_backoff_delay
 from ..telemetry import (
     AgentRunEndEvent,
     AgentRunStartEvent,
@@ -26,21 +26,17 @@ from ..telemetry import (
 )
 from ..tools import Tool
 from ..tools.core.tool_executor import ToolExecutor
-from .context.context import (
-    DEFAULT_CHAIN_MILESTONES,
-    DEFAULT_CONTEXT_WINDOW,
-    DEFAULT_HIGH_WATER_RATIO,
-    DEFAULT_LOW_WATER_RATIO,
-    DEFAULT_MAX_MESSAGES,
-    ConversationContext,
-)
-from .context.history import ConversationHistory
-from .context.summarization import ConversationSummarizer, resolve_summary_provider
 from .providers.base import ModelProvider
 
 
 class Agent:
-    """A conversational session coordinating a provider, history, context, tools, and telemetry."""
+    """A conversational session coordinating a provider, context state, tools, and telemetry.
+
+    Context management is provider-managed:
+    - OpenAI: Chained via `previous_response_id` (or `conversation_id`) in the Responses API.
+    - Gemini: Chained via `previous_interaction_id` in the Interactions API.
+    - Anthropic: Multi-turn messages with ephemeral prompt caching headers.
+    """
 
     def __init__(
         self,
@@ -52,39 +48,21 @@ class Agent:
         max_tool_iterations: int = 10,
         tool_timeout: float | None = None,
         system_prompt: str | None = None,
-        context_window: int = DEFAULT_CONTEXT_WINDOW,
-        max_messages: int = DEFAULT_MAX_MESSAGES,
-        high_water_ratio: float = DEFAULT_HIGH_WATER_RATIO,
-        low_water_ratio: float = DEFAULT_LOW_WATER_RATIO,
-        chain_milestones: bool = DEFAULT_CHAIN_MILESTONES,
-        summarization_model: str | ModelProvider | None = None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+        store: bool | None = None,
         telemetry: TelemetryRuntime | TelemetrySink | Sequence[TelemetrySink] | None = None,
-        retry_config: RetryConfig | bool | None = DEFAULT_RETRY_CONFIG,
-        max_retries: int | None = None,
     ) -> None:
-
         self._provider = provider
-        self._summary_provider = resolve_summary_provider(provider, summarization_model)
-        self._summarizer = ConversationSummarizer(
-            self._summary_provider,
-            generate_fn=lambda req: self._generate_with_telemetry(
-                req, provider=self._summary_provider, call_type="summarization"
-            ),
-            generate_async_fn=lambda req: self._generate_with_telemetry_async(
-                req, provider=self._summary_provider, call_type="summarization"
-            ),
-        )
-        self._context = ConversationContext(
-            context_window=context_window,
-            max_messages=max_messages,
-            high_water_ratio=high_water_ratio,
-            low_water_ratio=low_water_ratio,
-            chain_milestones=chain_milestones,
-        )
         self._system_prompt = system_prompt
-        self._history = ConversationHistory(system_prompt)
-        # Retained for compatibility with callers that inspect or seed test history.
-        self._messages = self._history.messages
+        self._last_response_id = previous_response_id
+        self._conversation_id = conversation_id
+        self._store = store
+
+        self._messages: list[Message] = []
+        if system_prompt:
+            self._messages.append(Message(role="system", content=system_prompt))
+
         self._max_tool_iterations = max_tool_iterations
         self._tool_timeout = tool_timeout
 
@@ -115,35 +93,45 @@ class Agent:
             self._telemetry = None
             self._owns_telemetry = False
 
-        if retry_config is False:
-            self._retry_config = RetryConfig(max_retries=0)
-        elif retry_config is None and max_retries is None:
-            self._retry_config = RetryConfig(max_retries=0)
-        elif isinstance(retry_config, RetryConfig):
-            if max_retries is not None:
-                self._retry_config = replace(retry_config, max_retries=max_retries)
-            else:
-                self._retry_config = retry_config
-        elif retry_config is True or (retry_config is None and max_retries is not None):
-            mr = max_retries if max_retries is not None else 3
-            self._retry_config = RetryConfig(max_retries=mr)
-        else:
-            raise TypeError(f"Invalid retry_config: {retry_config}")
+    @property
+    def provider(self) -> ModelProvider:
+        """The underlying model provider."""
+        return self._provider
 
     @property
-    def retry_config(self) -> RetryConfig:
-        """The retry configuration configured on this agent."""
-        return self._retry_config
+    def strategy(self) -> str:
+        """The context management strategy employed by this provider:
+        - 'response_chain': OpenAI Responses API chaining
+        - 'interaction_chain': Gemini Interactions API chaining
+        - 'prompt_caching': Anthropic prompt caching
+        - 'stateless_replay': Replays message history
+        """
+        return getattr(self._provider, "context_strategy", "stateless_replay")
+
+    @property
+    def last_response_id(self) -> str | None:
+        """The identifier of the last response or interaction in this conversation."""
+        return self._last_response_id
+
+    @property
+    def conversation_id(self) -> str | None:
+        """The conversation identifier, if attached to an external conversation resource."""
+        return self._conversation_id
+
+    @property
+    def system_prompt(self) -> str | None:
+        """The optional system instructions configured for this agent."""
+        return self._system_prompt
+
 
     @property
     def telemetry(self) -> TelemetryRuntime | None:
         """The TelemetryRuntime configured on this agent, if any."""
         return self._telemetry
 
-
     @property
     def messages(self) -> tuple[Message, ...]:
-        """The retained conversation, including any generated summary message."""
+        """The recorded conversation history."""
         return tuple(self._messages)
 
     @property
@@ -156,6 +144,22 @@ class Agent:
     def mcp_client(self) -> Any:
         """The MCPClient associated with this agent, if configured."""
         return self._mcp_client
+
+    @property
+    def tool_timeout(self) -> float | None:
+        """Default per-tool execution timeout in seconds, if configured."""
+        return self._tool_timeout
+
+    def clear_history(self) -> None:
+        """Clear conversation history and reset provider state identifiers."""
+        self._last_response_id = None
+        self._messages = []
+        if self._system_prompt:
+            self._messages.append(Message(role="system", content=self._system_prompt))
+
+    def reset(self) -> None:
+        """Alias for clear_history."""
+        self.clear_history()
 
     def _sync_mcp_tools(self, force: bool = False) -> None:
         """Synchronize tools from any configured MCP client into the executor."""
@@ -179,23 +183,12 @@ class Agent:
         self._tools = self._tool_executor.tools
         self._mcp_tools_synced = True
 
-    @property
-    def tool_timeout(self) -> float | None:
-        """Default per-tool execution timeout in seconds, if configured."""
-        return self._tool_timeout
-
-    @property
-    def summary_provider(self) -> ModelProvider:
-        """The provider used for compacting and summarizing conversations."""
-        return self._summary_provider
-
     def _emit_llm_start(
         self,
         llm_ctx: TraceContext,
         provider_name: str,
         model_name: str,
         request: GenerationRequest,
-        attempt: int,
         call_type: str = "generation",
     ) -> None:
         input_messages = tuple({"role": m.role, "content": m.content} for m in request.messages)
@@ -209,7 +202,6 @@ class Agent:
                 tools_count=len(request.tools),
                 input_prompt=request.prompt,
                 input_messages=input_messages,
-                retry_attempt=attempt,
             )
         )
 
@@ -220,7 +212,6 @@ class Agent:
         model_name: str,
         response: GenerationResponse,
         duration_ms: float,
-        attempt: int,
         call_type: str = "generation",
     ) -> None:
         output_tool_calls = tuple(
@@ -242,7 +233,6 @@ class Agent:
                 output_text=response.text,
                 output_tool_calls=output_tool_calls,
                 thinking_text=thinking_text,
-                retry_attempt=attempt,
             )
         )
 
@@ -253,44 +243,21 @@ class Agent:
         model_name: str,
         err: Exception,
         duration_ms: float,
-        attempt: int,
-        max_retries: int,
-        is_retryable: bool,
-        delay: float | None = None,
         call_type: str = "generation",
     ) -> None:
         err_msg = str(err)
-        if attempt < max_retries and is_retryable and delay is not None:
-            emit_event(
-                ErrorEvent(
-                    trace_context=llm_ctx,
-                    error_type=type(err).__name__,
-                    message=err_msg,
-                    retry_count=attempt + 1,
-                    outcome="retrying",
-                    details={
-                        "retry_delay_seconds": delay,
-                        "max_retries": max_retries,
-                        "provider": provider_name,
-                        "model": model_name,
-                    },
-                )
+        emit_event(
+            ErrorEvent(
+                trace_context=llm_ctx,
+                error_type=type(err).__name__,
+                message=err_msg,
+                outcome="failed",
+                details={
+                    "provider": provider_name,
+                    "model": model_name,
+                },
             )
-        else:
-            emit_event(
-                ErrorEvent(
-                    trace_context=llm_ctx,
-                    error_type=type(err).__name__,
-                    message=err_msg,
-                    retry_count=attempt,
-                    outcome="exhausted" if attempt > 0 else "failed",
-                    details={
-                        "max_retries": max_retries,
-                        "provider": provider_name,
-                        "model": model_name,
-                    },
-                )
-            )
+        )
         emit_event(
             LLMCallEndEvent(
                 trace_context=llm_ctx,
@@ -300,7 +267,6 @@ class Agent:
                 status="error",
                 duration_ms=duration_ms,
                 error=err_msg,
-                retry_attempt=attempt,
             )
         )
 
@@ -313,56 +279,30 @@ class Agent:
         target_provider = provider if provider is not None else self._provider
         provider_name = getattr(target_provider, "__class__", type(target_provider)).__name__
         model_name = getattr(target_provider, "model", "unknown")
-        max_retries = self._retry_config.max_retries
-        total_attempts = 1 + max_retries
 
-        for attempt in range(total_attempts):
-            llm_ctx = create_child_trace_context()
-            self._emit_llm_start(llm_ctx, provider_name, model_name, request, attempt, call_type=call_type)
-            t0 = time.perf_counter()
-            with trace_scope(llm_ctx):
-                # Narrow retry boundary: strictly wrap target_provider.generate
-                try:
-                    response = target_provider.generate(request)
-                except Exception as err:
-                    duration_ms = (time.perf_counter() - t0) * 1000
-                    is_retryable = self._retry_config.is_retryable(err)
-                    if attempt < max_retries and is_retryable:
-                        delay = calculate_backoff_delay(attempt, self._retry_config, err)
-                        self._emit_llm_error(
-                            llm_ctx,
-                            provider_name,
-                            model_name,
-                            err,
-                            duration_ms,
-                            attempt,
-                            max_retries,
-                            is_retryable,
-                            delay,
-                            call_type=call_type,
-                        )
-                        self._retry_config.sleep_fn(delay)
-                        continue
-                    else:
-                        self._emit_llm_error(
-                            llm_ctx,
-                            provider_name,
-                            model_name,
-                            err,
-                            duration_ms,
-                            attempt,
-                            max_retries,
-                            is_retryable,
-                            call_type=call_type,
-                        )
-                        raise
-
-                # Provider call succeeded; response processing & success telemetry are outside retry block
+        llm_ctx = create_child_trace_context()
+        self._emit_llm_start(llm_ctx, provider_name, model_name, request, call_type=call_type)
+        t0 = time.perf_counter()
+        with trace_scope(llm_ctx):
+            try:
+                response = target_provider.generate(request)
+            except Exception as err:
                 duration_ms = (time.perf_counter() - t0) * 1000
-                self._emit_llm_success(
-                    llm_ctx, provider_name, model_name, response, duration_ms, attempt, call_type=call_type
+                self._emit_llm_error(
+                    llm_ctx,
+                    provider_name,
+                    model_name,
+                    err,
+                    duration_ms,
+                    call_type=call_type,
                 )
-                return response
+                raise
+
+            duration_ms = (time.perf_counter() - t0) * 1000
+            self._emit_llm_success(
+                llm_ctx, provider_name, model_name, response, duration_ms, call_type=call_type
+            )
+            return response
 
     async def _generate_with_telemetry_async(
         self,
@@ -373,63 +313,33 @@ class Agent:
         target_provider = provider if provider is not None else self._provider
         provider_name = getattr(target_provider, "__class__", type(target_provider)).__name__
         model_name = getattr(target_provider, "model", "unknown")
-        max_retries = self._retry_config.max_retries
-        total_attempts = 1 + max_retries
 
-        for attempt in range(total_attempts):
-            llm_ctx = create_child_trace_context()
-            self._emit_llm_start(llm_ctx, provider_name, model_name, request, attempt, call_type=call_type)
-            t0 = time.perf_counter()
-            with trace_scope(llm_ctx):
-                # Narrow retry boundary: strictly wrap target_provider.generate
-                try:
-                    response = await asyncio.to_thread(target_provider.generate, request)
-                except Exception as err:
-                    duration_ms = (time.perf_counter() - t0) * 1000
-                    is_retryable = self._retry_config.is_retryable(err)
-                    if attempt < max_retries and is_retryable:
-                        delay = calculate_backoff_delay(attempt, self._retry_config, err)
-                        self._emit_llm_error(
-                            llm_ctx,
-                            provider_name,
-                            model_name,
-                            err,
-                            duration_ms,
-                            attempt,
-                            max_retries,
-                            is_retryable,
-                            delay,
-                            call_type=call_type,
-                        )
-                        sleep_res = self._retry_config.sleep_async_fn(delay)
-                        if asyncio.iscoroutine(sleep_res) or hasattr(sleep_res, "__await__"):
-                            await sleep_res
-                        continue
-                    else:
-                        self._emit_llm_error(
-                            llm_ctx,
-                            provider_name,
-                            model_name,
-                            err,
-                            duration_ms,
-                            attempt,
-                            max_retries,
-                            is_retryable,
-                            call_type=call_type,
-                        )
-                        raise
-
-                # Provider call succeeded; response processing & success telemetry are outside retry block
+        llm_ctx = create_child_trace_context()
+        self._emit_llm_start(llm_ctx, provider_name, model_name, request, call_type=call_type)
+        t0 = time.perf_counter()
+        with trace_scope(llm_ctx):
+            try:
+                response = await asyncio.to_thread(target_provider.generate, request)
+            except Exception as err:
                 duration_ms = (time.perf_counter() - t0) * 1000
-                self._emit_llm_success(
-                    llm_ctx, provider_name, model_name, response, duration_ms, attempt, call_type=call_type
+                self._emit_llm_error(
+                    llm_ctx,
+                    provider_name,
+                    model_name,
+                    err,
+                    duration_ms,
+                    call_type=call_type,
                 )
-                return response
+                raise
 
-
+            duration_ms = (time.perf_counter() - t0) * 1000
+            self._emit_llm_success(
+                llm_ctx, provider_name, model_name, response, duration_ms, call_type=call_type
+            )
+            return response
 
     def send(self, message: str) -> GenerationResponse:
-        """Advance one user turn and execute any requested tool calls."""
+        """Advance one user turn, coordinating provider-native context and tool calls."""
         run_id = f"run_{secrets.token_hex(6)}"
         current_ctx = get_current_trace_context()
         root_ctx = current_ctx.child() if current_ctx is not None else TraceContext.new_root()
@@ -447,14 +357,49 @@ class Agent:
             iterations = 0
             try:
                 self._sync_mcp_tools()
-                self._history.add_user(message)
+                user_msg = Message(role="user", content=message)
+                self._messages.append(user_msg)
+
+                strategy = self.strategy
+                is_stateful_chain = strategy in ("response_chain", "interaction_chain")
+                current_turn_messages = [user_msg]
+                response = None
+
                 for _ in range(self._max_tool_iterations):
                     iterations += 1
-                    self._compact()
-                    response = self._generate_with_telemetry(
-                        GenerationRequest(messages=self._messages, tools=self._tools)
+                    if is_stateful_chain:
+                        req = GenerationRequest(
+                            messages=current_turn_messages,
+                            tools=self._tools,
+                            previous_response_id=self._last_response_id,
+                            conversation_id=self._conversation_id,
+                            store=self._store,
+                            system=self._system_prompt,
+                        )
+                    else:
+                        req = GenerationRequest(
+                            messages=self._messages,
+                            tools=self._tools,
+                            system=self._system_prompt,
+                        )
+
+                    response = self._generate_with_telemetry(req)
+                    if response.id:
+                        self._last_response_id = response.id
+
+                    asst_content = response.text
+                    if (not asst_content or not asst_content.strip()) and not response.tool_calls and not response.thought_blocks:
+                        asst_content = "Done."
+                    self._messages.append(
+                        Message(
+                            role="assistant",
+                            content=asst_content,
+                            tool_calls=response.tool_calls,
+                            thinking=response.thinking,
+                            thought_blocks=response.thought_blocks,
+                        )
                     )
-                    self._history.add_assistant(response)
+
                     if not response.tool_calls:
                         duration_ms = (time.perf_counter() - t0) * 1000
                         emit_event(
@@ -468,13 +413,42 @@ class Agent:
                             )
                         )
                         return response
-                    self._execute_tool_calls(response.tool_calls)
 
+                    # Execute tool calls
+                    tool_results: list[Message] = []
+                    for call in response.tool_calls:
+                        result = self._tool_executor.execute(call)
+                        t_msg = Message(
+                            role="tool",
+                            content=result,
+                            tool_call_id=call.id,
+                            name=call.name,
+                        )
+                        self._messages.append(t_msg)
+                        tool_results.append(t_msg)
+
+                    current_turn_messages = tool_results
+
+                # Exceeded max iterations; request final non-tool completion
                 iterations += 1
-                self._compact()
-                final_response = self._generate_with_telemetry(
-                    GenerationRequest(messages=self._messages, tools=())
-                )
+                if is_stateful_chain:
+                    final_req = GenerationRequest(
+                        messages=current_turn_messages,
+                        tools=(),
+                        previous_response_id=self._last_response_id,
+                        conversation_id=self._conversation_id,
+                        store=self._store,
+                        system=self._system_prompt,
+                    )
+                else:
+                    final_req = GenerationRequest(
+                        messages=self._messages,
+                        tools=(),
+                        system=self._system_prompt,
+                    )
+                final_response = self._generate_with_telemetry(final_req)
+                if final_response.id:
+                    self._last_response_id = final_response.id
                 result = self._finalize_loop_expiry(final_response, response)
                 duration_ms = (time.perf_counter() - t0) * 1000
                 emit_event(
@@ -511,7 +485,7 @@ class Agent:
                 raise
 
     async def send_async(self, message: str) -> GenerationResponse:
-        """Asynchronously advance one user turn and execute requested tool calls."""
+        """Asynchronously advance one user turn, coordinating provider-native context and tool calls."""
         run_id = f"run_{secrets.token_hex(6)}"
         current_ctx = get_current_trace_context()
         root_ctx = current_ctx.child() if current_ctx is not None else TraceContext.new_root()
@@ -529,14 +503,49 @@ class Agent:
             iterations = 0
             try:
                 await self._sync_mcp_tools_async()
-                self._history.add_user(message)
+                user_msg = Message(role="user", content=message)
+                self._messages.append(user_msg)
+
+                strategy = self.strategy
+                is_stateful_chain = strategy in ("response_chain", "interaction_chain")
+                current_turn_messages = [user_msg]
+                response = None
+
                 for _ in range(self._max_tool_iterations):
                     iterations += 1
-                    await self._compact_async()
-                    response = await self._generate_with_telemetry_async(
-                        GenerationRequest(messages=self._messages, tools=self._tools),
+                    if is_stateful_chain:
+                        req = GenerationRequest(
+                            messages=current_turn_messages,
+                            tools=self._tools,
+                            previous_response_id=self._last_response_id,
+                            conversation_id=self._conversation_id,
+                            store=self._store,
+                            system=self._system_prompt,
+                        )
+                    else:
+                        req = GenerationRequest(
+                            messages=self._messages,
+                            tools=self._tools,
+                            system=self._system_prompt,
+                        )
+
+                    response = await self._generate_with_telemetry_async(req)
+                    if response.id:
+                        self._last_response_id = response.id
+
+                    asst_content = response.text
+                    if (not asst_content or not asst_content.strip()) and not response.tool_calls and not response.thought_blocks:
+                        asst_content = "Done."
+                    self._messages.append(
+                        Message(
+                            role="assistant",
+                            content=asst_content,
+                            tool_calls=response.tool_calls,
+                            thinking=response.thinking,
+                            thought_blocks=response.thought_blocks,
+                        )
                     )
-                    self._history.add_assistant(response)
+
                     if not response.tool_calls:
                         duration_ms = (time.perf_counter() - t0) * 1000
                         emit_event(
@@ -550,13 +559,41 @@ class Agent:
                             )
                         )
                         return response
-                    await self._execute_tool_calls_async(response.tool_calls)
+
+                    # Execute tool calls asynchronously
+                    tool_results: list[Message] = []
+                    for call in response.tool_calls:
+                        result = await self._tool_executor.execute_async(call)
+                        t_msg = Message(
+                            role="tool",
+                            content=result,
+                            tool_call_id=call.id,
+                            name=call.name,
+                        )
+                        self._messages.append(t_msg)
+                        tool_results.append(t_msg)
+
+                    current_turn_messages = tool_results
 
                 iterations += 1
-                await self._compact_async()
-                final_response = await self._generate_with_telemetry_async(
-                    GenerationRequest(messages=self._messages, tools=()),
-                )
+                if is_stateful_chain:
+                    final_req = GenerationRequest(
+                        messages=current_turn_messages,
+                        tools=(),
+                        previous_response_id=self._last_response_id,
+                        conversation_id=self._conversation_id,
+                        store=self._store,
+                        system=self._system_prompt,
+                    )
+                else:
+                    final_req = GenerationRequest(
+                        messages=self._messages,
+                        tools=(),
+                        system=self._system_prompt,
+                    )
+                final_response = await self._generate_with_telemetry_async(final_req)
+                if final_response.id:
+                    self._last_response_id = final_response.id
                 result = self._finalize_loop_expiry(final_response, response)
                 duration_ms = (time.perf_counter() - t0) * 1000
                 emit_event(
@@ -612,43 +649,29 @@ class Agent:
             if self._owns_telemetry:
                 self._telemetry.close()
 
-    def __enter__(self) -> "Agent":
+    def __enter__(self) -> Agent:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
 
-    async def __aenter__(self) -> "Agent":
+    async def __aenter__(self) -> Agent:
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         await self.close_async()
 
-    def clear_history(self) -> None:
-        """Clear the conversation while retaining the optional system prompt."""
-        self._history.clear()
-
-    def _compact(self) -> None:
-        self._history.replace(self._context.compact(self._messages, self._summarizer.summarize))
-
-    async def _compact_async(self) -> None:
-        compacted = await self._context.compact_async(self._messages, self._summarizer.summarize_async)
-        self._history.replace(compacted)
-
-    def _execute_tool_calls(self, calls: Sequence[ToolCall]) -> None:
-        for call in calls:
-            self._history.add_tool_result(call, self._tool_executor.execute(call))
-
-    async def _execute_tool_calls_async(self, calls: Sequence[ToolCall]) -> None:
-        for call in calls:
-            result = await self._tool_executor.execute_async(call)
-            self._history.add_tool_result(call, result)
-
     def _finalize_loop_expiry(
-        self, final_response: GenerationResponse, last_response: GenerationResponse
+        self, final_response: GenerationResponse, last_response: GenerationResponse | None
     ) -> GenerationResponse:
-        final_text = (final_response.text or "").strip() or (last_response.text or "").strip()
+        final_text = (final_response.text or "").strip()
+        if not final_text and last_response:
+            final_text = (last_response.text or "").strip()
         if not final_text:
             final_text = f"Reached maximum tool iterations ({self._max_tool_iterations}) without a final response."
         self._messages.append(Message(role="assistant", content=final_text))
-        return GenerationResponse(text=final_text, model=final_response.model or last_response.model)
+        return GenerationResponse(
+            id=final_response.id or (last_response.id if last_response else None),
+            text=final_text,
+            model=final_response.model or (last_response.model if last_response else "unknown"),
+        )

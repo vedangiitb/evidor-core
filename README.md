@@ -1,6 +1,6 @@
 # Evidor
 
-Evidor is an open-source, provider-agnostic runtime for building AI agents. It provides a clean, unified interface for conversational agents across multiple model providers, with built-in context window management and automatic summarization.
+Evidor is an open-source, provider-agnostic runtime for building AI agents. It provides a clean, modern interface for conversational agents across multiple model providers, with first-class support for **stateless LLM calls** and native **provider-managed conversations**.
 
 ## Install
 
@@ -21,16 +21,109 @@ response = agent.send("Give a one-sentence explanation of dependency inversion."
 print(response.text)
 ```
 
-## Core Usage
+## Core Architecture: Two Execution Paradigms
+
+Evidor cleanly separates AI execution into two paradigms:
+
+1. **Stateless LLM Calls**: Direct single-turn or user-managed multi-turn requests with tools, structured outputs, and raw message histories (`provider.generate(request)`). Evidor does not automatically manage, mutate, or store conversation state.
+2. **Provider-Managed Conversations**: A unified Evidor interface (`Agent`) over native provider state and context features, exposing provider-specific differences clearly without doing custom client-side token slicing or summarization.
+
+---
+
+## 1. Stateless LLM Calls
+
+In the stateless paradigm, you interact directly with the underlying `ModelProvider` using `GenerationRequest`. Evidor executes the call directly against modern provider endpoints without maintaining or mutating any hidden conversation state.
+
+### Simple Requests
+
+```python
+from evidor import GenerationRequest, Message, OpenAIProvider
+
+provider = OpenAIProvider(model="gpt-6-astra")
+
+# Single-prompt shortcut
+response = provider.generate(GenerationRequest(prompt="Explain Raft consensus in one paragraph."))
+print(response.text)
+
+# Multi-message request
+request = GenerationRequest(
+    messages=[
+        Message(role="system", content="You are a distributed systems expert."),
+        Message(role="user", content="What is quorum?"),
+    ]
+)
+response = provider.generate(request)
+print(response.text)
+```
+
+### User-Managed Message History
+
+When your application handles its own persistence (e.g. database, chat storage, or custom state machine), you maintain the message list and pass it directly to `provider.generate()`. Evidor never modifies, prunes, or summarises your messages behind your back:
+
+```python
+from evidor import GenerationRequest, Message, OpenAIProvider
+
+provider = OpenAIProvider(model="gpt-6-astra")
+chat_history: list[Message] = [
+    Message(role="system", content="You are a concise coding assistant."),
+]
+
+# Turn 1
+chat_history.append(Message(role="user", content="Recommend a fast key-value store in Go."))
+response = provider.generate(GenerationRequest(messages=chat_history))
+chat_history.append(Message(role="assistant", content=response.text))
+print(f"Assistant: {response.text}")
+
+# Turn 2
+chat_history.append(Message(role="user", content="Does it support persistence?"))
+response = provider.generate(GenerationRequest(messages=chat_history))
+chat_history.append(Message(role="assistant", content=response.text))
+print(f"Assistant: {response.text}")
+```
+
+### Stateless Tool Calling
+
+You can supply tool definitions directly in a `GenerationRequest`. The model emits tool calls if needed, which you can execute statelessly in your own application loop:
+
+```python
+from evidor import GenerationRequest, Message, OpenAIProvider, Tool
+
+tool_def = Tool(
+    name="get_stock_price",
+    description="Get the current price for a stock ticker.",
+    parameters={
+        "type": "object",
+        "properties": {"ticker": {"type": "string"}},
+        "required": ["ticker"],
+    },
+    func=lambda ticker: f"${ticker.upper()} is $150.00",
+)
+
+request = GenerationRequest(
+    messages=[Message(role="user", content="What is the price of AAPL?")],
+    tools=(tool_def,),
+)
+response = provider.generate(request)
+
+if response.tool_calls:
+    for call in response.tool_calls:
+        print(f"Model requested tool: {call.name} with args {call.arguments}")
+```
+
+---
+
+## 2. Provider-Managed Conversations
+
+Modern LLM providers (OpenAI, Google Gemini, Anthropic) provide native server-side context and session management. Rather than running error-prone client-side token counters, sliding windows, or summarization loops, Evidor delegates context management directly to each provider's native mechanism via `Agent`.
 
 ### Multi-turn Conversations
 
-The `Agent` maintains session state across conversation turns. Use `send()` to advance the conversation:
+The `Agent` maintains session state across conversation turns using the underlying provider's native strategy. Use `send()` (or `send_async()`) to advance the conversation:
 
 ```python
 from evidor import Agent, AnthropicProvider
 
-agent = Agent(AnthropicProvider(model="claude-3-5-sonnet-20241022"))
+agent = Agent(AnthropicProvider(model="claude-3-7-sonnet-20250219"))
 
 agent.send("My favorite color is navy blue.")
 response = agent.send("What color did I say I like?")
@@ -39,13 +132,13 @@ print(response.text)
 
 ### System Prompts
 
-You can configure an initial system prompt when creating an `Agent`. The system prompt is preserved across conversation compaction and history resets:
+Configure an initial system prompt when creating an `Agent`. Evidor delivers the instructions natively to the provider backend across turns:
 
 ```python
 from evidor import Agent, GeminiProvider
 
 agent = Agent(
-    GeminiProvider(model="gemini-2.5-flash"),
+    GeminiProvider(model="gemini-3.8-flash"),
     system_prompt="You are a concise technical writer. Avoid buzzwords and respond in bullet points.",
 )
 
@@ -53,158 +146,48 @@ response = agent.send("How does a TCP handshake work?")
 print(response.text)
 ```
 
-### Context Window Management & Cache-Aware Summarization
+### How Provider Context Management Works
 
-`Agent` automatically manages message history to stay within token and message limits using `ConversationContext`:
+Evidor exposes each provider's context management strategy through `agent.strategy`:
 
-```python
-from evidor import Agent, OpenAIProvider
+| Provider | Strategy (`agent.strategy`) | Native Mechanism | How It Works |
+| :--- | :--- | :--- | :--- |
+| **OpenAIProvider** | `"response_chain"` | Responses API (`previous_response_id`) | Each turn sends only the delta messages / tool outputs chained to `previous_response_id` (and optional `conversation_id`). OpenAI manages the full context chain server-side. |
+| **GeminiProvider** | `"interaction_chain"` | Interactions API (`previous_interaction_id`) | Each turn chains to the prior `interaction_id`. Gemini manages the conversation history server-side. |
+| **AnthropicProvider** | `"prompt_caching"` | Ephemeral Prompt Caching | Replays conversation turns while setting ephemeral prompt caching headers (`cache_control={"type": "ephemeral"}`). Anthropic caches the common prefix with up to 90% cost/latency reduction. |
 
-agent = Agent(
-    OpenAIProvider(model="gpt-4.1-mini"),
-    context_window=32_000,  # Max token budget (default: 32,000)
-    max_messages=50,        # Max messages retained before compaction (default: 50)
-    high_water_ratio=0.85,  # Trigger compaction at 85% capacity (default: 0.85)
-    low_water_ratio=0.45,   # Batch-prune down to 45% capacity (default: 0.45)
-    chain_milestones=True,  # Retain milestone summaries as immutable prefix (default: True)
-)
-```
+### Inspecting and Resetting Provider State
 
-#### Summarization Strategy
-
-Evidor uses a prompt-cache-friendly compaction strategy designed to sustain high cache hit rates:
-- **Generational Hysteresis (Batch Pruning)**: Rather than evicting one message per turn (which repeatedly invalidates KV prefix caches), compaction triggers only when the conversation reaches `high_water_ratio` (85%) and batch-prunes down to `low_water_ratio` (45%). This creates a wide turn buffer where subsequent turns are strictly append-only.
-- **Append-Only Milestone Chaining (`chain_milestones=True`)**: Prior milestone summaries are kept immutable at the head of the context rather than being rewritten. Because the prefix remains identical, provider prompt caching (Anthropic, Gemini, OpenAI) hits the cache for earlier conversation turns.
-- **System Isolation**: Permanent system instructions and developer guidelines are excluded from the summarizer transcript, preventing persona duplication or instruction bleed into dialog summaries.
-- **Recent Dialog Preserved**: The most recent conversational turns and tool outputs remain intact as raw messages for full fidelity.
-
-### Configurable Summarization Model
-
-By default, the agent uses its primary provider and model for summarization during compaction. You can configure a specific model name string or a separate `ModelProvider` instance (e.g. to use a faster, lighter model for background summaries):
+You can inspect provider identifiers, strategy, or reset the conversation at any time:
 
 ```python
-from evidor import Agent, GeminiProvider, OpenAIProvider
+agent = Agent(OpenAIProvider(model="gpt-6-astra"))
+agent.send("Hello!")
 
-# Option 1: Configure a different model name on the same provider
-agent = Agent(
-    OpenAIProvider(model="gpt-4.1"),
-    summarization_model="gpt-4.1-mini",
-)
+# Inspect provider context strategy
+print(agent.strategy)  # "response_chain"
 
-# Option 2: Provide an entirely separate ModelProvider instance
-agent = Agent(
-    OpenAIProvider(model="gpt-4.1"),
-    summarization_model=GeminiProvider(model="gemini-2.5-flash"),
-)
+# Inspect the latest provider response/interaction ID
+print(agent.last_response_id)  # e.g. "resp_12345"
+
+# Inspect the message history captured during this session
+for msg in agent.messages:
+    print(f"{msg.role}: {msg.content}")
+
+# Reset the conversation state and provider response chain
+agent.reset()  # or agent.clear_history()
+print(agent.last_response_id)  # None
 ```
 
-### Inspecting and Clearing History
+---
 
-You can inspect the retained conversation history or reset turns at any time:
+## Provider Retries & Capabilities
 
-```python
-# Inspect current history (tuple of Message objects)
-for message in agent.messages:
-    prefix = "[SUMMARY] " if message.is_summary else ""
-    print(f"{prefix}{message.role}: {message.content}")
-
-# Clear conversation turns while keeping the original system prompt
-agent.clear_history()
-```
-
-### Automatic LLM Retries & Exponential Backoff
-
-When requests to an LLM provider fail due to transient network or provider issues, `Agent` automatically retries with exponential backoff and jitter.
-
-By default, an `Agent` retries up to **3 times** starting with an initial delay of **0.5 seconds** (doubling on each attempt: ~0.5s, ~1.0s, ~2.0s) when encountering network errors (e.g. `ConnectionError`, `TimeoutError`) or provider rate limits/server errors (e.g. HTTP 429, 500, 502, 503, 504). Programming errors (such as `ValueError`, `TypeError`, or 400 Bad Request) fail immediately without retrying.
-
-#### Quick Configuration
-
-You can adjust the maximum retries or disable them entirely directly on the `Agent`:
-
-```python
-from evidor import Agent, OpenAIProvider
-
-# Custom retry count
-agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), max_retries=5)
-
-# Disable retries entirely
-agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), max_retries=0)
-# or:
-agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), retry_config=None)
-agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), retry_config=False)
-```
-
-#### Fine-Grained Control with `RetryConfig`
-
-For advanced tuning, pass a `RetryConfig` object:
-
-```python
-from evidor import Agent, OpenAIProvider, RetryConfig
-
-agent = Agent(
-    OpenAIProvider(model="gpt-4.1-mini"),
-    retry_config=RetryConfig(
-        max_retries=3,              # Max retry attempts (default: 3)
-        initial_delay=0.5,          # Initial delay in seconds (default: 0.5)
-        max_delay=60.0,             # Maximum backoff cap in seconds (default: 60.0)
-        backoff_factor=2.0,         # Exponential multiplier (default: 2.0)
-        jitter=True,                # Full jitter to prevent thundering herds (default: True)
-        retryable_exceptions=None,  # None = auto-detect transient network/provider errors (default)
-    ),
-)
-```
-
-#### Custom Retryable Exceptions & Retry-After Support
-
-By default (`retryable_exceptions=None`), Evidor automatically filters for transient network and provider errors using `is_network_or_provider_error()`. When a provider returns a `Retry-After` delay header or exception attribute (such as on HTTP 429), Evidor automatically respects the requested delay up to `max_delay`. You can also specify exact exception types to retry if desired:
-
-```python
-from evidor import Agent, OpenAIProvider, RetryConfig
-
-agent = Agent(
-    OpenAIProvider(model="gpt-4.1-mini"),
-    retry_config=RetryConfig(
-        max_retries=3,
-        retryable_exceptions=(ConnectionError, TimeoutError),
-    ),
-)
-```
-
-#### Coordinated Retry Budget & Async Non-Blocking Backoff
-
-- **Single Coordinated Budget**: `OpenAIProvider`, `AnthropicProvider`, and `GeminiProvider` disable underlying SDK client retries (`max_retries=0` for OpenAI/Anthropic, `HttpOptions(retry_options=HttpRetryOptions(attempts=1))` for Gemini), ensuring Evidor's `Agent` exclusively owns the unified retry budget and telemetry reflects exact attempt counts without multiplied SDK attempts.
-- **Async Non-Blocking Backoff**: In `send_async()`, retry backoffs await `asyncio.sleep()` directly on the event loop rather than occupying thread pool workers, allowing clean cancellation.
-- **Summarization Retries**: Conversation compaction and transcript summarization share the configured retry policy and telemetry runtime seamlessly.
-
-### Low-level Generation with `GenerationRequest`
-
-
-For direct provider calls without stateful session management, instantiate messages and requests directly:
-
-```python
-from evidor import GenerationRequest, Message, OpenAIProvider
-
-provider = OpenAIProvider(model="gpt-4.1-mini")
-
-# Multi-message request
-request = GenerationRequest(
-    messages=[
-        Message(role="system", content="You are a helpful assistant."),
-        Message(role="user", content="Explain Raft consensus in one paragraph."),
-    ]
-)
-response = provider.generate(request)
-print(response.text)
-
-# Single-prompt compatibility shortcut
-simple_request = GenerationRequest(prompt="Hello!")
-response = provider.generate(simple_request)
-```
+Evidor delegates retry handling directly to the underlying model provider SDKs (`openai`, `google-genai`, `anthropic`). Each provider SDK automatically handles transient network disruptions, connection resets, and rate limits using its native retry policies out of the box, avoiding redundant application-level retry wraps.
 
 ### Configurable Thinking & Reasoning Mode
 
-Evidor provides first-class support for reasoning models across **OpenAI** (`o1`, `o3-mini`), **Anthropic** (`claude-3-7-sonnet-20250219`), and **Gemini** (`gemini-2.5-flash`, `gemini-2.5-pro`). Thinking can be configured either using provider-specific typed configuration classes or natural shorthands.
+Evidor provides first-class support for reasoning models across **OpenAI** (`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna`), **Anthropic** (`claude-3-7-sonnet-20250219`), and **Gemini** (`gemini-3.8-flash`, `gemini-3.8-live-extended-thinking`, `gemini-3.1-pro-preview`). Thinking can be configured either using provider-specific typed configuration classes or natural shorthands.
 
 ```python
 from evidor import (
@@ -217,11 +200,11 @@ from evidor import (
     OpenAIThinkingConfig,
 )
 
-# 1. OpenAI: Configure reasoning effort ('low', 'medium', 'high')
+# 1. OpenAI: Configure reasoning effort ('low', 'medium', 'high', 'xhigh', 'max')
 # Via shorthand:
-provider = OpenAIProvider(model="o3-mini", thinking="high")
+provider = OpenAIProvider(model="gpt-6-astra", thinking="high")
 # Or via typed config:
-provider = OpenAIProvider(model="o3-mini", thinking=OpenAIThinkingConfig(effort="high"))
+provider = OpenAIProvider(model="gpt-6-astra", thinking=OpenAIThinkingConfig(effort="high"))
 
 # 2. Anthropic: Configure token budget or adaptive effort
 # Shorthand int (sets budget_tokens >= 1024; auto-bumps max_tokens if needed):
@@ -234,15 +217,15 @@ provider = AnthropicProvider(
     thinking=AnthropicThinkingConfig(budget_tokens=4096),
 )
 
-# 3. Gemini: Configure token budget or disable thinking
-# Shorthand int (budget tokens):
-provider = GeminiProvider(model="gemini-2.5-flash", thinking=2048)
-# Shorthand bool (False disables thinking budget; True enables dynamic thinking):
-provider = GeminiProvider(model="gemini-2.5-flash", thinking=False)
+# 3. Gemini: Configure thinking level ('minimal', 'low', 'medium', 'high') or budget
+# Shorthand string (Gemini 3.x thinking_level):
+provider = GeminiProvider(model="gemini-3.8-flash", thinking="high")
+# Shorthand bool (False disables thinking; True enables dynamic thinking):
+provider = GeminiProvider(model="gemini-3.8-flash", thinking=False)
 # Or via typed config:
 provider = GeminiProvider(
-    model="gemini-2.5-flash",
-    thinking=GeminiThinkingConfig(thinking_budget=2048, include_thoughts=True),
+    model="gemini-3.8-flash",
+    thinking=GeminiThinkingConfig(thinking_level="high", include_thoughts=True),
 )
 ```
 
@@ -309,7 +292,7 @@ def search_database(query: str) -> list[str]:
     return [f"Record 1 matching '{query}'", f"Record 2 matching '{query}'"]
 
 agent = Agent(
-    GeminiProvider(model="gemini-2.5-flash"),
+    GeminiProvider(model="gemini-3.8-flash"),
     tools=[search_database],
     max_tool_iterations=10,  # Maximum tool execution turns per send() (default: 10)
 )
@@ -335,7 +318,7 @@ async def fetch_webpage(url: str) -> str:
 
 # Configure an agent with a default timeout for all its tools
 agent = Agent(
-    GeminiProvider(model="gemini-2.5-flash"),
+    GeminiProvider(model="gemini-3.8-flash"),
     tools=[fetch_webpage],
     tool_timeout=10.0,      # Default tool timeout in seconds
     max_tool_iterations=10, # Max tool turns before forcing final synthesis
@@ -474,7 +457,7 @@ from evidor import Agent, EvidenceStore, GeminiProvider
 store = EvidenceStore()
 
 # store.tools provides record_evidence, list_evidence, and compare_evidence
-agent = Agent(GeminiProvider(model="gemini-2.5-flash"), tools=[*store.tools])
+agent = Agent(GeminiProvider(model="gemini-3.8-flash"), tools=[*store.tools])
 agent.send("Analyze trade-offs between PostgreSQL and SQLite and record your findings.")
 
 # Inspect structured findings in Python or format as Markdown
@@ -537,7 +520,7 @@ from evidor import Agent, AnthropicProvider
 
 async def main():
     async with Agent(
-        AnthropicProvider(model="claude-3-5-sonnet-20241022"),
+        AnthropicProvider(model="claude-3-7-sonnet-20250219"),
         mcp_servers={
             "amazon": {
                 "command": "npx",
@@ -586,7 +569,7 @@ Connect multiple MCP servers simultaneously. Evidor automatically prevents tool 
 from evidor import Agent, GeminiProvider, MCPServerConfig
 
 agent = Agent(
-    GeminiProvider(model="gemini-2.5-flash"),
+    GeminiProvider(model="gemini-3.8-flash"),
     mcp_servers=[
         # Stdio server
         MCPServerConfig.stdio(
@@ -817,19 +800,13 @@ metrics_text = prom_sink.export_text()
 print(metrics_text)
 ```
 
-Key retry metrics:
-* `evidor_llm_retries_total`: Counter tracking retry attempts partitioned by `provider` and `model`.
-
----
-
 #### Span Tree & Semantic Attributes
 
-Evidor automatically builds the full execution tree, capturing intermediate retry attempts as separate spans or span events:
+Evidor automatically builds the full execution tree across agent runs, LLM generations, and tool calls:
 ```
-agent.run                           [openinference.span.kind = "AGENT"]
-  ├── llm.gpt-4.1-mini (attempt 0)  [openinference.span.kind = "LLM", status = "error", event = "retry"]
-  ├── llm.gpt-4.1-mini (attempt 1)  [openinference.span.kind = "LLM", status = "ok", evidor.retry.count = 1]
-  └── tool.search_docs              [openinference.span.kind = "TOOL"]
+agent.run                     [openinference.span.kind = "AGENT"]
+  ├── llm.gpt-4.1-mini        [openinference.span.kind = "LLM", status = "ok"]
+  └── tool.search_docs        [openinference.span.kind = "TOOL"]
         └── mcp.docs_server.search  [openinference.span.kind = "TOOL"]
 ```
 
@@ -840,7 +817,6 @@ Standard attributes automatically populated:
 * `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.total_tokens`
 * `llm.input_prompt`, `llm.input_messages`, `llm.output_text`, `llm.output_tool_calls`
 * `evidor.agent.run_id`, `evidor.tool.name`, `evidor.mcp.server_name`
-* `evidor.retry.count`, `evidor.retry.outcome`
 
 
 ---
@@ -965,11 +941,18 @@ Supported providers, example models, and reasoning/thinking support:
 
 | Provider | Example Models | Thinking Support | Environment Variable | Extra Install |
 | --- | --- | --- | --- | --- |
-| `OpenAIProvider` | `gpt-4.1-mini`, `o3-mini`, `o1` | `reasoning_effort` (`"low"`, `"medium"`, `"high"`) | `OPENAI_API_KEY` | `evidor[openai]` |
-| `AnthropicProvider` | `claude-3-5-sonnet`, `claude-3-7-sonnet` | Extended budget (`budget_tokens >= 1024`) or adaptive | `ANTHROPIC_API_KEY` | `evidor[anthropic]` |
-| `GeminiProvider` | `gemini-2.5-flash`, `gemini-2.5-pro` | `thinking_budget` (tokens, `0` to disable, `None` dynamic) | `GEMINI_API_KEY` | `evidor[gemini]` |
+| `OpenAIProvider` | `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna`, `gpt-4.1-mini` | `reasoning_effort` (`"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`) | `OPENAI_API_KEY` | `evidor[openai]` |
+| `AnthropicProvider` | `claude-3-7-sonnet` | Extended budget (`budget_tokens >= 1024`) or adaptive | `ANTHROPIC_API_KEY` | `evidor[anthropic]` |
+| `GeminiProvider` | `gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview` | `thinking_level` (`"minimal"`, `"low"`, `"medium"`, `"high"`) or budget | `GEMINI_API_KEY` | `evidor[gemini]` |
 
 API keys can be supplied explicitly via the `api_key` constructor argument or read automatically from environment variables.
+
+### Modern Provider APIs & Zero Legacy Fallbacks
+
+Evidor is in active beta and embraces breaking changes to maintain clean, modern integrations:
+- **Google Gemini (`GeminiProvider`)**: Exclusively uses Google GenAI's modern Interactions API (`client.interactions.create`) from the official `google-genai` SDK (`from google import genai`). All legacy `generate_content` / `generate_content_stream` fallbacks and outdated candidate-parsing logic have been removed. Requires `google-genai>=1.0.0`.
+- **OpenAI (`OpenAIProvider`)**: Exclusively uses OpenAI's modern Responses API (`client.responses.create`) with full support for `previous_response_id` chaining, reasoning models (`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna`), and modern tool schemas. Legacy Chat Completions methods have been removed. Requires `openai>=1.0.0`.
+- **Anthropic (`AnthropicProvider`)**: Modern Messages API with native ephemeral prompt caching (`cache_control={"type": "ephemeral"}`) and adaptive/budget-based extended thinking.
 
 ### Custom Providers
 
@@ -995,9 +978,9 @@ class CustomProvider:
 
 | Extra | Purpose | Included Packages |
 | :--- | :--- | :--- |
-| `evidor[openai]` | OpenAI models (`gpt-4.1-mini`, `gpt-4o`) | `openai` |
-| `evidor[anthropic]` | Anthropic Claude models (`claude-3-5-sonnet`) | `anthropic` |
-| `evidor[gemini]` | Google Gemini models (`gemini-2.5-flash`) | `google-genai` |
+| `evidor[openai]` | OpenAI models (`gpt-6-astra`, `gpt-4.1-mini`) | `openai` |
+| `evidor[anthropic]` | Anthropic Claude models (`claude-3-7-sonnet`) | `anthropic` |
+| `evidor[gemini]` | Google Gemini models (`gemini-3.8-flash`, `gemini-3.5-flash-lite`) | `google-genai` |
 | `evidor[mcp]` | Model Context Protocol servers | `mcp` |
 | `evidor[otel]` | OpenTelemetry distributed tracing | `opentelemetry-api`, `opentelemetry-sdk` |
 | `evidor[langfuse]` | Langfuse traces, generations & evaluation | `langfuse` |

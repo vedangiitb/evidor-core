@@ -2,6 +2,30 @@
 
 <!-- version list -->
 
+## v1.7.0-dev.1 (2026-10-16)
+
+### Chores
+
+- Gitignore updates
+  ([`d97c104`](https://github.com/vedangiitb/evidor-core/commit/d97c1048668bce1c4062cf0f7bed765f108b9dd3))
+
+### Documentation
+
+- Adding agent.md file for info for agents
+  ([`9547399`](https://github.com/vedangiitb/evidor-core/commit/9547399a3d8d78ad15c772053b93dac6de8684f8))
+
+- **agent**: Readme updates for latest llm provider related changes
+  ([`ff264fa`](https://github.com/vedangiitb/evidor-core/commit/ff264fa8e18ef5021228102652aaa2663a9931ff))
+
+### Features
+
+- **agent**: Updating agent provider codes to be compatible with latest provider sdk changes
+  ([`167a886`](https://github.com/vedangiitb/evidor-core/commit/167a88638a998cd13c4281a5c76b1f5349268d9d))
+
+- **agent**: Updating agent provider codes to be compatible with latest provider sdk changes
+  ([`c39dfbb`](https://github.com/vedangiitb/evidor-core/commit/c39dfbb6cebe3bef3f7cc6f75681aa34a70df368))
+
+
 ## v1.6.3 (2026-10-15)
 
 

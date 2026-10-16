@@ -27,7 +27,7 @@ class ThinkingConfig:
 
 @dataclass(frozen=True, slots=True)
 class OpenAIThinkingConfig(ThinkingConfig):
-    """Configuration for OpenAI reasoning models (o1, o3-mini, etc.)."""
+    """Configuration for OpenAI reasoning models (GPT-6 Astra, GPT-6.1 Sol, GPT-6 Luna, etc.)."""
 
     effort: ThinkingEffort = "medium"
     summary: str | None = None
@@ -74,9 +74,10 @@ class AnthropicThinkingConfig(ThinkingConfig):
 
 @dataclass(frozen=True, slots=True)
 class GeminiThinkingConfig(ThinkingConfig):
-    """Configuration for Google Gemini thinking models (Gemini 2.0/2.5/3.8)."""
+    """Configuration for Google Gemini thinking models (Gemini 3.8 Flash, 3.8 Live, 3.7 Flash, etc.)."""
 
-    thinking_budget: int | None = None  # None = dynamic, 0 = off, >0 = token budget cap
+    thinking_level: str | None = None  # Recommended in Gemini 3.x: 'minimal', 'low', 'medium', 'high'
+    thinking_budget: int | None = None  # None = dynamic, 0 = off, >0 = token budget cap (legacy)
     include_thoughts: bool = True
 
     def validate(self) -> None:
@@ -90,6 +91,8 @@ class GeminiThinkingConfig(ThinkingConfig):
             return cls(enabled=value, thinking_budget=None if value else 0, include_thoughts=value)
         if isinstance(value, int):
             return cls(enabled=value > 0, thinking_budget=value)
+        if isinstance(value, str):
+            return cls(enabled=True, thinking_level=value)
         raise TypeError(f"Cannot coerce {type(value).__name__} to GeminiThinkingConfig")
 
 
@@ -153,6 +156,10 @@ class GenerationRequest:
 
     messages: tuple[Message, ...]
     tools: tuple[Tool, ...]
+    previous_response_id: str | None
+    conversation_id: str | None
+    store: bool | None
+    system: str | None
 
     def __init__(
         self,
@@ -160,6 +167,10 @@ class GenerationRequest:
         *,
         messages: Sequence[Message] | None = None,
         tools: Sequence[Tool] | None = None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+        store: bool | None = None,
+        system: str | None = None,
     ) -> None:
         if prompt is not None and messages is not None:
             raise ValueError("provide either prompt or messages, not both")
@@ -171,6 +182,10 @@ class GenerationRequest:
             raise ValueError("messages must not be empty")
         object.__setattr__(self, "messages", tuple(messages))
         object.__setattr__(self, "tools", tuple(tools or ()))
+        object.__setattr__(self, "previous_response_id", previous_response_id)
+        object.__setattr__(self, "conversation_id", conversation_id)
+        object.__setattr__(self, "store", store)
+        object.__setattr__(self, "system", system)
 
     @property
     def prompt(self) -> str:
@@ -184,6 +199,7 @@ class GenerationResponse:
 
     text: str
     model: str
+    id: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
     usage: Any = None
     thinking: str | None = None

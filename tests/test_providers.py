@@ -49,7 +49,7 @@ def test_openai_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
     response = provider.generate(request)
 
     assert response == GenerationResponse(text="OpenAI generated text", model="gpt-4.1-mini")
-    mock_openai.OpenAI.assert_called_once_with(api_key="key", max_retries=0)
+    mock_openai.OpenAI.assert_called_once_with(api_key="key")
     mock_client.responses.create.assert_called_once_with(
         model="gpt-4.1-mini",
         input=[
@@ -106,7 +106,7 @@ def test_anthropic_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
     response = provider.generate(request)
 
     assert response == GenerationResponse(text="Claude response", model="claude-3-5")
-    mock_anthropic.Anthropic.assert_called_once_with(api_key="key", max_retries=0)
+    mock_anthropic.Anthropic.assert_called_once_with(api_key="key")
     mock_client.messages.create.assert_called_once_with(
         model="claude-3-5",
         max_tokens=500,
@@ -155,16 +155,12 @@ def test_gemini_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_genai = types.ModuleType("google.genai")
     mock_types = types.ModuleType("google.genai.types")
 
-    mock_types.Content = MagicMock(side_effect=lambda role, parts: {"role": role, "parts": parts})  # type: ignore[attr-defined]
-    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
-    mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
-    mock_types.GenerateContentConfig = MagicMock(side_effect=lambda system_instruction: f"config:{system_instruction}")  # type: ignore[attr-defined]
     mock_types.HttpOptions = MagicMock(side_effect=lambda **kw: {"http_options": kw})  # type: ignore[attr-defined]
     mock_types.HttpRetryOptions = MagicMock(side_effect=lambda **kw: {"retry_options": kw})  # type: ignore[attr-defined]
 
     mock_client = MagicMock()
-    mock_response = MagicMock(text="Gemini generated response")
-    mock_client.models.generate_content.return_value = mock_response
+    mock_response = MagicMock(output_text="Gemini generated response", id="int_123", steps=[])
+    mock_client.interactions.create.return_value = mock_response
     mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
     mock_genai.types = mock_types  # type: ignore[attr-defined]
     mock_google.genai = mock_genai  # type: ignore[attr-defined]
@@ -173,7 +169,7 @@ def test_gemini_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
 
-    provider = GeminiProvider(model="gemini-2.5-flash", api_key="key")
+    provider = GeminiProvider(model="gemini-3.8-flash", api_key="key")
     request = GenerationRequest(
         messages=[
             Message(role="system", content="gemini system"),
@@ -184,18 +180,15 @@ def test_gemini_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
 
     response = provider.generate(request)
 
-    assert response == GenerationResponse(text="Gemini generated response", model="gemini-2.5-flash")
-    mock_genai.Client.assert_called_once_with(
-        api_key="key",
-        http_options={"http_options": {"retry_options": {"retry_options": {"attempts": 1}}}},
-    )
-    mock_client.models.generate_content.assert_called_once_with(
-        model="gemini-2.5-flash",
-        contents=[
-            {"role": "user", "parts": ["part:hello"]},
-            {"role": "model", "parts": ["part:prior reply"]},
+    assert response == GenerationResponse(id="int_123", text="Gemini generated response", model="gemini-3.8-flash")
+    mock_genai.Client.assert_called_once_with(api_key="key")
+    mock_client.interactions.create.assert_called_once_with(
+        model="gemini-3.8-flash",
+        input=[
+            {"type": "user_input", "content": [{"type": "text", "text": "hello"}]},
+            {"type": "model_output", "content": [{"type": "text", "text": "prior reply"}]},
         ],
-        config="config:gemini system",
+        system_instruction="gemini system",
     )
 
 
@@ -204,15 +197,11 @@ def test_gemini_provider_generate_no_system_and_none_text(monkeypatch: pytest.Mo
     mock_genai = types.ModuleType("google.genai")
     mock_types = types.ModuleType("google.genai.types")
 
-    mock_types.Content = MagicMock(side_effect=lambda role, parts: {"role": role, "parts": parts})  # type: ignore[attr-defined]
-    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
-    mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
-    mock_types.GenerateContentConfig = MagicMock()  # type: ignore[attr-defined]
     mock_types.HttpOptions = MagicMock(side_effect=lambda **kw: {"http_options": kw})  # type: ignore[attr-defined]
     mock_types.HttpRetryOptions = MagicMock(side_effect=lambda **kw: {"retry_options": kw})  # type: ignore[attr-defined]
 
     mock_client = MagicMock()
-    mock_client.models.generate_content.return_value = MagicMock(text=None)
+    mock_client.interactions.create.return_value = MagicMock(output_text=None, text="", id="int_none", steps=[])
     mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
     mock_genai.types = mock_types  # type: ignore[attr-defined]
     mock_google.genai = mock_genai  # type: ignore[attr-defined]
@@ -221,11 +210,12 @@ def test_gemini_provider_generate_no_system_and_none_text(monkeypatch: pytest.Mo
     monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
 
-    provider = GeminiProvider(model="gemini-2.5-flash")
+    provider = GeminiProvider(model="gemini-3.8-flash")
     response = provider.generate(GenerationRequest(prompt="hello"))
 
-    assert response == GenerationResponse(text="", model="gemini-2.5-flash")
-    assert mock_client.models.generate_content.call_args.kwargs["config"] is None
+    assert response == GenerationResponse(id="int_none", text="", model="gemini-3.8-flash")
+    assert "system_instruction" not in mock_client.interactions.create.call_args.kwargs
+
 
 
 def test_gemini_provider_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -238,24 +228,22 @@ def test_gemini_provider_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- Provider Tool Calling Tests ---
 
 
-def test_openai_provider_chat_completions_with_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_openai_provider_responses_api_with_tool_calling(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_openai = types.ModuleType("openai")
-    # Client without responses attribute -> triggers chat.completions fallback
-    mock_client = MagicMock(spec=["chat"])
+    mock_client = MagicMock()
     mock_tc = MagicMock()
+    mock_tc.type = "function_call"
     mock_tc.id = "call_abc"
-    mock_tc.function.name = "get_weather"
-    mock_tc.function.arguments = '{"location": "Tokyo"}'
+    mock_tc.name = "get_weather"
+    mock_tc.arguments = '{"location": "Tokyo"}'
 
-    mock_choice_msg = MagicMock(content="Checking weather", tool_calls=[mock_tc])
-    mock_choice = MagicMock(message=mock_choice_msg)
-    mock_response = MagicMock(choices=[mock_choice])
-    mock_client.chat.completions.create.return_value = mock_response
+    mock_response = MagicMock(output_text="Checking weather", output=[mock_tc], id="resp_tool_1")
+    mock_client.responses.create.return_value = mock_response
     mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, "openai", mock_openai)
 
-    provider = OpenAIProvider(model="gpt-4o", api_key="test-key")
+    provider = OpenAIProvider(model="gpt-6-astra", api_key="test-key")
     tool_def = Tool(
         name="get_weather",
         description="Get weather",
@@ -276,15 +264,25 @@ def test_openai_provider_chat_completions_with_tools(monkeypatch: pytest.MonkeyP
     )
     resp = provider.generate(request)
     assert resp.text == "Checking weather"
+    assert resp.id == "resp_tool_1"
     assert len(resp.tool_calls) == 1
     assert resp.tool_calls[0] == ToolCall(id="call_abc", name="get_weather", arguments={"location": "Tokyo"})
 
-    call_args = mock_client.chat.completions.create.call_args.kwargs
-    assert call_args["model"] == "gpt-4o"
+    call_args = mock_client.responses.create.call_args.kwargs
+    assert call_args["model"] == "gpt-6-astra"
     assert len(call_args["tools"]) == 1
-    assert call_args["tools"][0]["function"]["name"] == "get_weather"
-    assert call_args["messages"][1]["tool_calls"][0]["id"] == "call_abc"
-    assert call_args["messages"][2] == {"role": "tool", "tool_call_id": "call_abc", "content": "sunny"}
+    assert call_args["tools"][0]["name"] == "get_weather"
+    assert call_args["input"][1] == {
+        "type": "function_call",
+        "call_id": "call_abc",
+        "name": "get_weather",
+        "arguments": '{"location": "Tokyo"}',
+    }
+    assert call_args["input"][2] == {
+        "type": "function_call_output",
+        "call_id": "call_abc",
+        "output": "sunny",
+    }
 
 
 def test_openai_provider_responses_api_with_tools(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -378,23 +376,18 @@ def test_gemini_provider_tools_and_function_calls(monkeypatch: pytest.MonkeyPatc
     mock_genai = types.ModuleType("google.genai")
     mock_types = types.ModuleType("google.genai.types")
 
-    mock_types.Content = MagicMock(side_effect=lambda role, parts: {"role": role, "parts": parts})  # type: ignore[attr-defined]
-    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
-    mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
-    mock_types.Part.from_function_response = MagicMock(side_effect=lambda name, response: f"resp:{name}:{response}")
-    mock_types.Part.from_function_call = MagicMock(side_effect=lambda name, args: f"fc:{name}:{args}")
-    mock_types.FunctionDeclaration = MagicMock(side_effect=lambda name, description, parameters: f"fd:{name}")  # type: ignore[attr-defined]
-    mock_types.Tool = MagicMock(side_effect=lambda function_declarations: f"tool:{function_declarations}")  # type: ignore[attr-defined]
-    mock_types.GenerateContentConfig = MagicMock(side_effect=lambda **kwargs: kwargs)  # type: ignore[attr-defined]
+    mock_types.HttpOptions = MagicMock(side_effect=lambda **kw: {"http_options": kw})  # type: ignore[attr-defined]
+    mock_types.HttpRetryOptions = MagicMock(side_effect=lambda **kw: {"retry_options": kw})  # type: ignore[attr-defined]
 
-    mock_fc = MagicMock()
-    mock_fc.id = "call_gemini_1"
-    mock_fc.name = "lookup"
-    mock_fc.args = {"id": 42}
-
-    mock_response = MagicMock(text="Looking it up", function_calls=[mock_fc])
+    mock_step = {
+        "type": "function_call",
+        "id": "call_gemini_1",
+        "name": "lookup",
+        "arguments": {"id": 42},
+    }
+    mock_response = MagicMock(output_text="Looking it up", steps=[mock_step], id="int_tool_1")
     mock_client = MagicMock()
-    mock_client.models.generate_content.return_value = mock_response
+    mock_client.interactions.create.return_value = mock_response
     mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
     mock_genai.types = mock_types  # type: ignore[attr-defined]
     mock_google.genai = mock_genai  # type: ignore[attr-defined]
@@ -403,7 +396,7 @@ def test_gemini_provider_tools_and_function_calls(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
 
-    provider = GeminiProvider(model="gemini-2.5-flash")
+    provider = GeminiProvider(model="gemini-3.8-flash")
     tool_def = Tool(
         name="lookup",
         description="Lookup ID",
@@ -418,12 +411,13 @@ def test_gemini_provider_tools_and_function_calls(monkeypatch: pytest.MonkeyPatc
                 content="ok",
                 tool_calls=(ToolCall(id="call_gemini_1", name="lookup", arguments={"id": 42}),),
             ),
-            Message(role="tool", content="data", name="lookup"),
+            Message(role="tool", content="data", name="lookup", tool_call_id="call_gemini_1"),
         ],
         tools=(tool_def,),
     )
     resp = provider.generate(request)
     assert resp.text == "Looking it up"
+    assert resp.id == "int_tool_1"
     assert resp.tool_calls == (ToolCall(id="call_gemini_1", name="lookup", arguments={"id": 42}),)
 
 
@@ -432,22 +426,12 @@ def test_gemini_provider_sanitizes_vendor_mcp_extensions_in_tool_schema(monkeypa
     mock_genai = types.ModuleType("google.genai")
     mock_types = types.ModuleType("google.genai.types")
 
-    captured_params: dict[str, Any] = {}
+    mock_types.HttpOptions = MagicMock(side_effect=lambda **kw: {"http_options": kw})  # type: ignore[attr-defined]
+    mock_types.HttpRetryOptions = MagicMock(side_effect=lambda **kw: {"retry_options": kw})  # type: ignore[attr-defined]
 
-    def mock_function_declaration(name: str, description: str, parameters: Any) -> str:
-        captured_params[name] = parameters
-        return f"fd:{name}"
-
-    mock_types.Content = MagicMock(side_effect=lambda role, parts: {"role": role, "parts": parts})  # type: ignore[attr-defined]
-    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
-    mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
-    mock_types.FunctionDeclaration = MagicMock(side_effect=mock_function_declaration)  # type: ignore[attr-defined]
-    mock_types.Tool = MagicMock(side_effect=lambda function_declarations: f"tool:{function_declarations}")  # type: ignore[attr-defined]
-    mock_types.GenerateContentConfig = MagicMock(side_effect=lambda **kwargs: kwargs)  # type: ignore[attr-defined]
-
-    mock_response = MagicMock(text="Triage done", candidates=[])
+    mock_response = MagicMock(output_text="Triage done", steps=[], id="int_schema_1")
     mock_client = MagicMock()
-    mock_client.models.generate_content.return_value = mock_response
+    mock_client.interactions.create.return_value = mock_response
     mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
     mock_genai.types = mock_types  # type: ignore[attr-defined]
     mock_google.genai = mock_genai  # type: ignore[attr-defined]
@@ -456,7 +440,7 @@ def test_gemini_provider_sanitizes_vendor_mcp_extensions_in_tool_schema(monkeypa
     monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
 
-    provider = GeminiProvider(model="gemini-2.5-flash")
+    provider = GeminiProvider(model="gemini-3.8-flash")
     tool_def = Tool(
         name="github_mcp_tool",
         description="GitHub tool",
@@ -498,7 +482,8 @@ def test_gemini_provider_sanitizes_vendor_mcp_extensions_in_tool_schema(monkeypa
     resp = provider.generate(request)
     assert resp.text == "Triage done"
 
-    sanitized = captured_params["github_mcp_tool"]
+    call_tools = mock_client.interactions.create.call_args.kwargs["tools"]
+    sanitized = call_tools[0]["parameters"]
     assert "$schema" not in sanitized
     assert "x-custom-meta" not in sanitized
     assert "x-mcp-header" not in sanitized["properties"]["owner"]
@@ -517,22 +502,17 @@ def test_gemini_provider_function_call_via_candidates(monkeypatch: pytest.Monkey
     mock_genai = types.ModuleType("google.genai")
     mock_types = types.ModuleType("google.genai.types")
 
-    mock_types.Content = MagicMock(side_effect=lambda role, parts: {"role": role, "parts": parts})  # type: ignore[attr-defined]
-    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
-    mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
-    mock_types.GenerateContentConfig = MagicMock()  # type: ignore[attr-defined]
-
-    mock_fc = MagicMock()
-    mock_fc.id = "call_gemini_2"
-    mock_fc.name = "query"
-    mock_fc.args = {"term": "python"}
-
-    mock_part = MagicMock(function_call=mock_fc)
-    mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]))
-    mock_response = MagicMock(text=None, function_calls=None, candidates=[mock_candidate])
+    mock_fc_step = MagicMock(
+        type="function_call",
+        id="call_gemini_2",
+        arguments={"term": "python"},
+        signature=None,
+    )
+    mock_fc_step.name = "query"
+    mock_response = MagicMock(output_text="", steps=[mock_fc_step], usage=None)
 
     mock_client = MagicMock()
-    mock_client.models.generate_content.return_value = mock_response
+    mock_client.interactions.create.return_value = mock_response
     mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
     mock_genai.types = mock_types  # type: ignore[attr-defined]
     mock_google.genai = mock_genai  # type: ignore[attr-defined]
@@ -541,7 +521,7 @@ def test_gemini_provider_function_call_via_candidates(monkeypatch: pytest.Monkey
     monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
 
-    provider = GeminiProvider(model="gemini-2.5-flash")
+    provider = GeminiProvider(model="gemini-3.8-flash")
     resp = provider.generate(GenerationRequest(prompt="query python"))
     assert resp.text == ""
     assert resp.tool_calls == (ToolCall(id="call_gemini_2", name="query", arguments={"term": "python"}),)
@@ -552,35 +532,20 @@ def test_gemini_provider_multiple_function_calls_avoids_response_text(monkeypatc
     mock_genai = types.ModuleType("google.genai")
     mock_types = types.ModuleType("google.genai.types")
 
-    mock_types.Content = MagicMock(side_effect=lambda role, parts: {"role": role, "parts": parts})  # type: ignore[attr-defined]
-    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
-    mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
-    mock_types.GenerateContentConfig = MagicMock()  # type: ignore[attr-defined]
-
-    # Create 4 function calls matching the user scenario
-    mock_fcs = []
+    mock_steps = []
     for i in range(1, 5):
-        fc = MagicMock()
-        fc.id = f"fc_{i}"
+        fc = MagicMock(
+            type="function_call",
+            id=f"fc_{i}",
+            arguments={"arg": i},
+            signature=None,
+        )
         fc.name = f"tool_{i}"
-        fc.args = {"arg": i}
-        mock_fcs.append(fc)
-    parts = [MagicMock(text=None, thought=False, function_call=fc) for fc in mock_fcs]
-    mock_candidate = MagicMock(content=MagicMock(parts=parts))
+        mock_steps.append(fc)
 
-    # Define a response object where accessing `.text` raises an AssertionError,
-    # proving that `.text` is never accessed when candidates are present.
-    class MockStrictResponse:
-        def __init__(self, candidates: list) -> None:
-            self.candidates = candidates
-
-        @property
-        def text(self) -> str:
-            raise AssertionError("response.text was accessed! This triggers the non-text parts warning in google-genai.")
-
-    mock_response = MockStrictResponse(candidates=[mock_candidate])
+    mock_response = MagicMock(output_text="", steps=mock_steps, usage=None)
     mock_client = MagicMock()
-    mock_client.models.generate_content.return_value = mock_response
+    mock_client.interactions.create.return_value = mock_response
     mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
     mock_genai.types = mock_types  # type: ignore[attr-defined]
     mock_google.genai = mock_genai  # type: ignore[attr-defined]
@@ -589,7 +554,7 @@ def test_gemini_provider_multiple_function_calls_avoids_response_text(monkeypatc
     monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
 
-    provider = GeminiProvider(model="gemini-2.5-flash")
+    provider = GeminiProvider(model="gemini-3.8-flash")
     resp = provider.generate(GenerationRequest(prompt="run multiple tools"))
     assert resp.text == ""
     assert len(resp.tool_calls) == 4
@@ -602,32 +567,30 @@ def test_gemini_provider_text_and_tools_with_thoughts(monkeypatch: pytest.Monkey
     mock_genai = types.ModuleType("google.genai")
     mock_types = types.ModuleType("google.genai.types")
 
-    mock_types.Content = MagicMock(side_effect=lambda role, parts: {"role": role, "parts": parts})  # type: ignore[attr-defined]
-    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
-    mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
-    mock_types.GenerateContentConfig = MagicMock()  # type: ignore[attr-defined]
+    thought_step = MagicMock(
+        type="thought",
+        signature="sig_1",
+        summary=[MagicMock(text="Let me plan this step.")],
+    )
+    model_output_step = MagicMock(
+        type="model_output",
+        content=[MagicMock(text="Here is what I will do.")],
+    )
+    fc_step = MagicMock(
+        type="function_call",
+        id="call_99",
+        arguments={"x": 10},
+        signature=None,
+    )
+    fc_step.name = "calculate"
 
-    thought_part = MagicMock(text="Let me plan this step.", thought=True, function_call=None)
-    text_part = MagicMock(text="Here is what I will do.", thought=False, function_call=None)
-    fc = MagicMock()
-    fc.id = "call_99"
-    fc.name = "calculate"
-    fc.args = {"x": 10}
-    fc_part = MagicMock(text=None, thought=False, function_call=fc)
-
-    mock_candidate = MagicMock(content=MagicMock(parts=[thought_part, text_part, fc_part]))
-
-    class MockStrictResponse:
-        def __init__(self, candidates: list) -> None:
-            self.candidates = candidates
-
-        @property
-        def text(self) -> str:
-            raise AssertionError("response.text was accessed!")
-
-    mock_response = MockStrictResponse(candidates=[mock_candidate])
+    mock_response = MagicMock(
+        output_text="Here is what I will do.",
+        steps=[thought_step, model_output_step, fc_step],
+        usage=None,
+    )
     mock_client = MagicMock()
-    mock_client.models.generate_content.return_value = mock_response
+    mock_client.interactions.create.return_value = mock_response
     mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
     mock_genai.types = mock_types  # type: ignore[attr-defined]
     mock_google.genai = mock_genai  # type: ignore[attr-defined]
@@ -636,40 +599,42 @@ def test_gemini_provider_text_and_tools_with_thoughts(monkeypatch: pytest.Monkey
     monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
 
-    provider = GeminiProvider(model="gemini-2.5-flash")
+    provider = GeminiProvider(model="gemini-3.8-flash")
     resp = provider.generate(GenerationRequest(prompt="do something"))
     assert resp.text == "Here is what I will do."
     assert resp.tool_calls == (ToolCall(id="call_99", name="calculate", arguments={"x": 10}),)
+    assert resp.thinking == "Let me plan this step."
 
 
 
 def test_openai_provider_handles_malformed_tool_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
-    from evidor.agent.providers.openai import _safe_parse_tool_arguments
+    from evidor.agent.providers.base import safe_parse_tool_arguments
 
-    assert _safe_parse_tool_arguments(None) == {}
-    assert _safe_parse_tool_arguments({"already": "dict"}) == {"already": "dict"}
-    assert _safe_parse_tool_arguments('{"valid": 123}') == {"valid": 123}
-    assert _safe_parse_tool_arguments('"string"') == {"__raw_args__": "string"}
+    assert safe_parse_tool_arguments(None) == {}
+    assert safe_parse_tool_arguments({"already": "dict"}) == {"already": "dict"}
+    assert safe_parse_tool_arguments('{"valid": 123}') == {"valid": 123}
+    assert safe_parse_tool_arguments('"string"') == {"__raw_args__": "string"}
     
-    malformed = _safe_parse_tool_arguments("{bad json")
+    malformed = safe_parse_tool_arguments("{bad json")
     assert "__decode_error__" in malformed
     assert malformed["__raw_args__"] == "{bad json"
 
-    # Test through chat.completions.create
+    # Test through responses.create
     mock_openai = types.ModuleType("openai")
-    mock_client = MagicMock(spec=["chat"])
+    mock_client = MagicMock()
     mock_tc = MagicMock()
+    mock_tc.type = "function_call"
     mock_tc.id = "c_bad"
-    mock_tc.function.name = "broken"
-    mock_tc.function.arguments = "{unclosed json"
+    mock_tc.name = "broken"
+    mock_tc.arguments = "{unclosed json"
 
-    mock_choice = MagicMock(message=MagicMock(content="test", tool_calls=[mock_tc]))
-    mock_client.chat.completions.create.return_value = MagicMock(choices=[mock_choice])
+    mock_response = MagicMock(output_text="test", output=[mock_tc], id="resp_bad")
+    mock_client.responses.create.return_value = mock_response
     mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, "openai", mock_openai)
 
-    provider = OpenAIProvider(model="gpt-4o")
+    provider = OpenAIProvider(model="gpt-6-astra")
     resp = provider.generate(GenerationRequest(prompt="call broken"))
     assert len(resp.tool_calls) == 1
     assert "__decode_error__" in resp.tool_calls[0].arguments
@@ -759,23 +724,22 @@ def test_anthropic_provider_disable_prompt_caching(monkeypatch: pytest.MonkeyPat
 
 def test_openai_provider_prompt_caching_and_tool_sorting(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_openai = types.ModuleType("openai")
-    mock_client = MagicMock(spec=["chat"])
+    mock_client = MagicMock()
     mock_usage = MagicMock(
         prompt_tokens=1200,
         completion_tokens=50,
         total_tokens=1250,
         prompt_tokens_details=MagicMock(cached_tokens=1024),
     )
-    mock_choice = MagicMock(message=MagicMock(content="OpenAI reply", tool_calls=None))
-    mock_response = MagicMock(choices=[mock_choice], usage=mock_usage)
-    mock_client.chat.completions.create.return_value = mock_response
+    mock_response = MagicMock(output_text="OpenAI reply", output=[], usage=mock_usage, id="resp_cache")
+    mock_client.responses.create.return_value = mock_response
     mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "openai", mock_openai)
 
     tool_z = Tool(name="z_tool", description="Z", parameters={}, func=lambda: "z")
     tool_a = Tool(name="a_tool", description="A", parameters={}, func=lambda: "a")
 
-    provider = OpenAIProvider(model="gpt-4o")
+    provider = OpenAIProvider(model="gpt-6-astra")
     req = GenerationRequest(
         messages=[Message(role="user", content="hello")],
         tools=[tool_z, tool_a],
@@ -787,27 +751,27 @@ def test_openai_provider_prompt_caching_and_tool_sorting(monkeypatch: pytest.Mon
     assert resp.usage.prompt_tokens == 1200
     assert resp.usage.cached_tokens == 1024
 
-    create_kwargs = mock_client.chat.completions.create.call_args.kwargs
+    create_kwargs = mock_client.responses.create.call_args.kwargs
     tools = create_kwargs["tools"]
-    assert tools[0]["function"]["name"] == "a_tool"
-    assert tools[1]["function"]["name"] == "z_tool"
+    assert tools[0]["name"] == "a_tool"
+    assert tools[1]["name"] == "z_tool"
 
 
 def test_openai_provider_deepseek_cached_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_openai = types.ModuleType("openai")
-    mock_client = MagicMock(spec=["chat"])
+    mock_client = MagicMock()
     mock_usage = MagicMock(
         prompt_tokens=1500,
         completion_tokens=100,
         total_tokens=1600,
         prompt_tokens_details=MagicMock(cached_tokens=0, prompt_cache_hit_tokens=1400),
     )
-    mock_response = MagicMock(choices=[MagicMock(message=MagicMock(content="DeepSeek reply", tool_calls=None))], usage=mock_usage)
-    mock_client.chat.completions.create.return_value = mock_response
+    mock_response = MagicMock(output_text="DeepSeek reply", output=[], usage=mock_usage, id="resp_ds")
+    mock_client.responses.create.return_value = mock_response
     mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "openai", mock_openai)
 
-    provider = OpenAIProvider(model="deepseek-chat")
+    provider = OpenAIProvider(model="gpt-6-astra")
     resp = provider.generate(GenerationRequest(prompt="hi"))
 
     assert resp.usage is not None
@@ -820,22 +784,20 @@ def test_gemini_provider_prompt_caching_and_cached_content(monkeypatch: pytest.M
     mock_genai = types.ModuleType("google.genai")
     mock_types = types.ModuleType("google.genai.types")
 
-    mock_types.Content = MagicMock(side_effect=lambda role, parts: {"role": role, "parts": parts})  # type: ignore[attr-defined]
-    mock_types.Part = MagicMock()  # type: ignore[attr-defined]
-    mock_types.Part.from_text = MagicMock(side_effect=lambda text: f"part:{text}")
-    mock_types.GenerateContentConfig = MagicMock(side_effect=lambda **kwargs: kwargs)  # type: ignore[attr-defined]
-    mock_types.HttpOptions = MagicMock(side_effect=lambda **kw: {"http_options": kw})  # type: ignore[attr-defined]
-    mock_types.HttpRetryOptions = MagicMock(side_effect=lambda **kw: {"retry_options": kw})  # type: ignore[attr-defined]
-
     mock_usage = MagicMock(
-        prompt_token_count=2000,
-        candidates_token_count=150,
-        total_token_count=2150,
-        cached_content_token_count=1800,
+        total_input_tokens=2000,
+        total_output_tokens=150,
+        total_tokens=2150,
+        total_cached_tokens=1800,
+        total_thought_tokens=0,
     )
     mock_client = MagicMock()
-    mock_response = MagicMock(text="Gemini cached reply", usage_metadata=mock_usage, candidates=None, function_calls=None)
-    mock_client.models.generate_content.return_value = mock_response
+    mock_response = MagicMock(
+        output_text="Gemini cached reply",
+        steps=[],
+        usage=mock_usage,
+    )
+    mock_client.interactions.create.return_value = mock_response
     mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
     mock_genai.types = mock_types  # type: ignore[attr-defined]
     mock_google.genai = mock_genai  # type: ignore[attr-defined]
@@ -844,10 +806,10 @@ def test_gemini_provider_prompt_caching_and_cached_content(monkeypatch: pytest.M
     monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
 
-    provider = GeminiProvider(model="gemini-1.5-pro", cached_content="cachedContents/abc123xyz")
+    provider = GeminiProvider(model="gemini-3.8-flash", cached_content="cachedContents/abc123xyz")
     assert provider.cached_content == "cachedContents/abc123xyz"
 
-    copied = provider.with_model("gemini-2.5-pro")
+    copied = provider.with_model("gemini-3.5-flash-lite")
     assert copied.cached_content == "cachedContents/abc123xyz"
 
     resp = provider.generate(GenerationRequest(prompt="hello cached gemini"))
@@ -857,7 +819,191 @@ def test_gemini_provider_prompt_caching_and_cached_content(monkeypatch: pytest.M
     assert resp.usage.prompt_tokens == 2000
     assert resp.usage.cached_tokens == 1800
 
-    config_call = mock_client.models.generate_content.call_args.kwargs["config"]
-    assert config_call["cached_content"] == "cachedContents/abc123xyz"
+    call_kwargs = mock_client.interactions.create.call_args.kwargs
+    assert call_kwargs["cached_content"] == "cachedContents/abc123xyz"
+
+
+# --- Gemini Interactions API Tests ---
+
+
+def test_gemini_provider_interactions_api_generate(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_google = types.ModuleType("google")
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    mock_client = MagicMock()
+    mock_usage = MagicMock(
+        total_input_tokens=15,
+        total_output_tokens=25,
+        total_tokens=40,
+        total_cached_tokens=5,
+        total_thought_tokens=0,
+    )
+    mock_response = MagicMock(
+        output_text="Gemini Interactions API response",
+        steps=[],
+        usage=mock_usage,
+    )
+    mock_client.interactions.create.return_value = mock_response
+    mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    mock_genai.types = mock_types  # type: ignore[attr-defined]
+    mock_google.genai = mock_genai  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google", mock_google)
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-3.8-flash", api_key="test-key")
+    request = GenerationRequest(
+        messages=[
+            Message(role="system", content="System instruction"),
+            Message(role="user", content="Hello Gemini"),
+        ]
+    )
+
+    response = provider.generate(request)
+
+    assert response.text == "Gemini Interactions API response"
+    assert response.model == "gemini-3.8-flash"
+    assert response.usage is not None
+    assert response.usage.prompt_tokens == 15
+    assert response.usage.completion_tokens == 25
+    assert response.usage.total_tokens == 40
+    assert response.usage.cached_tokens == 5
+
+    mock_client.interactions.create.assert_called_once_with(
+        model="gemini-3.8-flash",
+        input=[{"type": "user_input", "content": [{"type": "text", "text": "Hello Gemini"}]}],
+        system_instruction="System instruction",
+    )
+
+
+def test_gemini_provider_interactions_api_with_tools_and_multi_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_google = types.ModuleType("google")
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    mock_fc_step = MagicMock(
+        type="function_call",
+        id="call_gemini_int_1",
+        arguments={"user_id": 123},
+        signature="fc_sig_123",
+    )
+    mock_fc_step.name = "lookup_user"
+    mock_response = MagicMock(
+        output_text="",
+        steps=[mock_fc_step],
+        usage=None,
+    )
+
+    mock_client = MagicMock()
+    mock_client.interactions.create.return_value = mock_response
+    mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    mock_genai.types = mock_types  # type: ignore[attr-defined]
+    mock_google.genai = mock_genai  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google", mock_google)
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    tool_def = Tool(
+        name="lookup_user",
+        description="Lookup user by ID",
+        parameters={"type": "object", "properties": {"user_id": {"type": "integer"}}},
+        func=lambda user_id: "user data",
+    )
+
+    provider = GeminiProvider(model="gemini-3.8-flash", api_key="test-key")
+    request = GenerationRequest(
+        messages=[
+            Message(role="user", content="Find user 123"),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(ToolCall(id="call_gemini_int_1", name="lookup_user", arguments={"user_id": 123}),),
+            ),
+            Message(role="tool", content="found Alice", name="lookup_user", tool_call_id="call_gemini_int_1"),
+        ],
+        tools=(tool_def,),
+    )
+
+    response = provider.generate(request)
+
+    assert len(response.tool_calls) == 1
+    assert response.tool_calls[0] == ToolCall(id="call_gemini_int_1", name="lookup_user", arguments={"user_id": 123})
+    assert len(response.thought_blocks) == 1
+    assert response.thought_blocks[0]["type"] == "function_call"
+
+    call_kwargs = mock_client.interactions.create.call_args.kwargs
+    assert call_kwargs["model"] == "gemini-3.8-flash"
+    assert len(call_kwargs["tools"]) == 1
+    assert call_kwargs["tools"][0]["name"] == "lookup_user"
+    assert call_kwargs["tools"][0]["type"] == "function"
+    steps = call_kwargs["input"]
+    assert steps[0] == {"type": "user_input", "content": [{"type": "text", "text": "Find user 123"}]}
+    assert steps[1] == {"type": "function_call", "id": "call_gemini_int_1", "name": "lookup_user", "arguments": {"user_id": 123}}
+    assert steps[2] == {"type": "function_result", "call_id": "call_gemini_int_1", "name": "lookup_user", "result": {"result": "found Alice"}}
+
+
+def test_gemini_provider_interactions_api_with_thinking(monkeypatch: pytest.MonkeyPatch) -> None:
+    from evidor.models import GeminiThinkingConfig
+
+    mock_google = types.ModuleType("google")
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    mock_thought_content = MagicMock(text="Analyzing user query step by step.")
+    mock_thought_step = MagicMock(
+        type="thought",
+        signature="thought_sig_999",
+        summary=[mock_thought_content],
+    )
+    mock_output_content = MagicMock(text="Here is the detailed analysis.")
+    mock_model_output_step = MagicMock(
+        type="model_output",
+        content=[mock_output_content],
+    )
+    mock_usage = MagicMock(
+        total_input_tokens=100,
+        total_output_tokens=200,
+        total_tokens=300,
+        total_cached_tokens=0,
+        total_thought_tokens=80,
+    )
+    mock_response = MagicMock(
+        output_text="Here is the detailed analysis.",
+        steps=[mock_thought_step, mock_model_output_step],
+        usage=mock_usage,
+    )
+
+    mock_client = MagicMock()
+    mock_client.interactions.create.return_value = mock_response
+    mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    mock_genai.types = mock_types  # type: ignore[attr-defined]
+    mock_google.genai = mock_genai  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google", mock_google)
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(
+        model="gemini-3.8-flash",
+        thinking=GeminiThinkingConfig(thinking_level="high", include_thoughts=True),
+    )
+    request = GenerationRequest(prompt="Analyze this")
+    response = provider.generate(request)
+
+    assert response.text == "Here is the detailed analysis."
+    assert response.thinking == "Analyzing user query step by step."
+    assert len(response.thought_blocks) == 1
+    assert response.thought_blocks[0]["type"] == "thought"
+    assert response.thought_blocks[0]["text"] == "Analyzing user query step by step."
+    assert response.thought_blocks[0]["thought_signature"] == "thought_sig_999"
+    assert response.usage is not None
+    assert response.usage.reasoning_tokens == 80
+
+    call_kwargs = mock_client.interactions.create.call_args.kwargs
+    assert call_kwargs["generation_config"] == {"thinking_level": "high", "thinking_summaries": "auto"}
+
 
 

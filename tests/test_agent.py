@@ -51,109 +51,6 @@ def test_agent_with_system_prompt_and_clear_history() -> None:
     assert agent.messages[0] == Message(role="system", content="You are a helper")
 
 
-def test_default_summarization_uses_main_provider() -> None:
-    provider = FakeProvider(model="primary-model")
-    agent = Agent(provider, max_messages=3)
-
-    agent.send("turn 1")
-    agent.send("turn 2")
-    agent.send("turn 3")
-
-    # Compaction occurred: agent messages include a summary message
-    summary_messages = [m for m in agent.messages if m.is_summary]
-    assert len(summary_messages) == 1
-    assert "primary-model" in summary_messages[0].content
-
-
-def test_custom_summarization_model_as_string() -> None:
-    provider = FakeProvider(model="primary-model")
-    agent = Agent(provider, max_messages=3, summarization_model="cheap-summarizer")
-
-    assert agent.summary_provider.model == "cheap-summarizer"
-
-    agent.send("turn 1")
-    agent.send("turn 2")
-    agent.send("turn 3")
-
-    summary_messages = [m for m in agent.messages if m.is_summary]
-    assert len(summary_messages) == 1
-    assert "cheap-summarizer" in summary_messages[0].content
-
-
-def test_custom_summarization_model_as_provider_instance() -> None:
-    main_provider = FakeProvider(model="heavy-model")
-    summary_provider = FakeProvider(model="light-model")
-
-    agent = Agent(main_provider, max_messages=3, summarization_model=summary_provider)
-
-    assert agent.summary_provider is summary_provider
-
-    agent.send("turn 1")
-    agent.send("turn 2")
-    agent.send("turn 3")
-
-    # summary_provider received the summary request
-    assert len(summary_provider.requests) == 1
-    assert summary_provider.requests[0].messages[0].role == "system"
-    assert "Summarize" in summary_provider.requests[0].messages[0].content
-
-    # main_provider handled conversation turns
-    summary_messages = [m for m in agent.messages if m.is_summary]
-    assert len(summary_messages) == 1
-    assert "light-model" in summary_messages[0].content
-
-
-def test_summarization_model_fallback_with_api_key() -> None:
-    class ProviderWithKeyNoWithModel:
-        def __init__(self, model: str, api_key: str | None = None) -> None:
-            self.model = model
-            self._api_key = api_key
-
-        def generate(self, request: GenerationRequest) -> GenerationResponse:
-            return GenerationResponse(text="ok", model=self.model)
-
-    provider = ProviderWithKeyNoWithModel(model="main", api_key="secret-key")
-    agent = Agent(provider, summarization_model="summary-model")
-    assert agent.summary_provider.model == "summary-model"
-    assert agent.summary_provider._api_key == "secret-key"
-
-
-def test_summarization_model_fallback_without_api_key() -> None:
-    class ProviderWithoutKeyNoWithModel:
-        def __init__(self, model: str) -> None:
-            self.model = model
-
-        def generate(self, request: GenerationRequest) -> GenerationResponse:
-            return GenerationResponse(text="ok", model=self.model)
-
-    provider = ProviderWithoutKeyNoWithModel(model="main")
-    agent = Agent(provider, summarization_model="summary-model")
-    assert agent.summary_provider.model == "summary-model"
-
-
-def test_summarization_model_fallback_incompatible_raises() -> None:
-    class IncompatibleProvider:
-        def __init__(self, fixed_arg: int) -> None:
-            self.fixed = fixed_arg
-
-        def generate(self, request: GenerationRequest) -> GenerationResponse:
-            return GenerationResponse(text="ok", model="fixed")
-
-    provider = IncompatibleProvider(fixed_arg=42)
-    with pytest.raises(ValueError, match="Cannot configure summarization_model string 'summary-model'"):
-        Agent(provider, summarization_model="summary-model")
-
-
-def test_summarization_model_validation() -> None:
-    provider = FakeProvider()
-
-    with pytest.raises(ValueError, match="summarization_model must not be empty"):
-        Agent(provider, summarization_model="   ")
-
-    with pytest.raises(TypeError, match="summarization_model must be a model name string or ModelProvider"):
-        Agent(provider, summarization_model=123)  # type: ignore[arg-type]
-
-
 # --- Tool Calling Tests ---
 
 
@@ -304,42 +201,6 @@ def test_agent_max_tool_iterations() -> None:
     assert len(tool_messages) == 3
 
 
-def test_agent_summarization_with_tools() -> None:
-    @tool
-    def ping() -> str:
-        return "pong"
-
-    summaries = []
-
-    class SummarizeToolProvider:
-        def with_model(self, model: str) -> "SummarizeToolProvider":
-            return self
-
-        def generate(self, request: GenerationRequest) -> GenerationResponse:
-            # Check if this is a summarization request
-            if any(m.role == "system" and "Summarize the conversation" in m.content for m in request.messages):
-                summaries.append(request.messages[-1].content)
-                return GenerationResponse(text="Summary containing tool results", model="test")
-
-            # Normal turn: return text without tool call
-            return GenerationResponse(text=f"Reply to: {request.prompt}", model="test")
-
-    provider = SummarizeToolProvider()
-    agent = Agent(provider, tools=[ping], max_messages=3)
-
-    # Manually inject tool messages to test transcript formatting during compaction.
-    agent._messages.append(Message(role="assistant", content="calling ping", tool_calls=(ToolCall(id="c", name="ping", arguments={}),)))
-    agent._messages.append(Message(role="tool", content="pong", tool_call_id="c", name="ping"))
-
-    agent.send("next message")
-    agent.send("another message")
-
-    assert len(summaries) >= 1
-    summary_input = summaries[0]
-    assert "TOOL (ping): pong" in summary_input
-    assert "ASSISTANT (called tools: ping): calling ping" in summary_input
-
-
 class SequenceProvider:
     def __init__(self, responses: list[GenerationResponse]) -> None:
         self.responses = list(responses)
@@ -378,33 +239,6 @@ def test_tool_returning_custom_object() -> None:
     agent.send("run")
     assert agent.messages[-2].role == "tool"
     assert agent.messages[-2].content == "CustomResult"
-
-
-def test_summarize_with_empty_content_tool_call() -> None:
-    tool = Tool(
-        name="echo",
-        description="Echo",
-        parameters={"type": "object", "properties": {}},
-        func=lambda: "done",
-    )
-    summary_provider = SequenceProvider([GenerationResponse(text="summary text", model="test")])
-    agent = Agent(
-        provider=FakeProvider(),
-        summarization_model=summary_provider,
-        tools=[tool],
-    )
-    messages = [
-        Message(role="user", content="hello"),
-        Message(
-            role="assistant",
-            content="",
-            tool_calls=(ToolCall(id="c1", name="echo", arguments={}),),
-        ),
-        Message(role="tool", content="done", name="echo"),
-    ]
-    summary = agent._summarizer.summarize(messages)
-    assert summary == "summary text"
-    assert "ASSISTANT (called tools: echo):" in summary_provider.requests[0].messages[1].content
 
 
 def test_agent_handles_malformed_json_arguments() -> None:
