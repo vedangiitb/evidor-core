@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.7.1-dev.1 (2026-10-16)
+
+### Bug Fixes
+
+- **agent**: Enabling context compaction for openai and anthropic
+  ([`f09c398`](https://github.com/vedangiitb/evidor-core/commit/f09c398c0294ff97aebf5a93416a7d95b9251136))
+
+
 ## v1.7.0 (2026-10-16)
 
 
