@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Sequence
 import concurrent.futures
+import inspect
 import json
 from pathlib import Path
 import threading
@@ -10,6 +11,7 @@ import time
 from typing import Any
 
 from evidor.tools import Tool
+from evidor.utils import check_sync_allowed, run_async_in_sync
 from ..telemetry import (
     ErrorEvent,
     MCPCallEndEvent,
@@ -184,9 +186,11 @@ class MCPSession:
                             try:
                                 func = getattr(session, action)
                                 res = await func(*args, **kwargs)
-                                result_future.set_result(res)
+                                if not result_future.done():
+                                    result_future.set_result(res)
                             except Exception as err:
-                                result_future.set_exception(err)
+                                if not result_future.done():
+                                    result_future.set_exception(err)
             finally:
                 if http_client is not None:
                     await http_client.aclose()
@@ -200,17 +204,10 @@ class MCPSession:
 
     def connect(self, timeout: float = 30.0) -> None:
         """Connect to the MCP server synchronously."""
-        with self._lock:
-            if self._connected:
-                return
-            loop = self._ensure_loop()
-            started_future: concurrent.futures.Future[bool] = concurrent.futures.Future()
-
-            def _schedule() -> None:
-                self._worker_task = loop.create_task(self._run_worker(started_future))
-
-            loop.call_soon_threadsafe(_schedule)
-            started_future.result(timeout=timeout)
+        return run_async_in_sync(
+            lambda: self.connect_async(timeout=timeout),
+            error_message="MCPSession.connect() cannot be called from a running event loop. Use 'await session.connect_async()' instead.",
+        )
 
     async def connect_async(self, timeout: float = 30.0) -> None:
         """Connect to the MCP server asynchronously."""
@@ -226,42 +223,49 @@ class MCPSession:
             loop.call_soon_threadsafe(_schedule)
             await asyncio.wait_for(asyncio.wrap_future(started_future), timeout=timeout)
 
+    def _dispatch_cmd(self, action: str, *args: Any, **kwargs: Any) -> concurrent.futures.Future[Any]:
+        """Enqueue a command to the background MCP loop and return a thread-safe Future."""
+        res_future: concurrent.futures.Future[Any] = concurrent.futures.Future()
+
+        def _put() -> None:
+            if self._cmd_queue is not None:
+                self._cmd_queue.put_nowait((action, args, kwargs, res_future))
+            else:
+                res_future.set_exception(RuntimeError("MCP session is not connected."))
+
+        if self._loop is None or not self._loop.is_running():
+            res_future.set_exception(RuntimeError("MCP session event loop is not running."))
+        else:
+            self._loop.call_soon_threadsafe(_put)
+        return res_future
+
     def _send_cmd(self, action: str, *args: Any, timeout: float | None = 60.0, **kwargs: Any) -> Any:
-        if not self._connected or self._cmd_queue is None or self._loop is None:
+        if not self._connected or self._cmd_queue is None or self._loop is None or not self._loop.is_running():
             self.connect()
 
-        res_future: concurrent.futures.Future[Any] = concurrent.futures.Future()
-
-        def _put() -> None:
-            if self._cmd_queue is not None:
-                self._cmd_queue.put_nowait((action, args, kwargs, res_future))
-            else:
-                res_future.set_exception(RuntimeError("MCP session is not connected."))
-
-        self._loop.call_soon_threadsafe(_put)
-        return res_future.result(timeout=timeout)
+        future = self._dispatch_cmd(action, *args, **kwargs)
+        return future.result(timeout=timeout)
 
     async def _send_cmd_async(self, action: str, *args: Any, timeout: float | None = 60.0, **kwargs: Any) -> Any:
-        if not self._connected or self._cmd_queue is None or self._loop is None:
+        if getattr(self, "_send_cmd", None) is not MCPSession._original_send_cmd:
+            res = self._send_cmd(action, *args, timeout=timeout, **kwargs)
+            return await res if inspect.isawaitable(res) else res
+
+        if not self._connected or self._cmd_queue is None or self._loop is None or not self._loop.is_running():
             await self.connect_async()
 
-        res_future: concurrent.futures.Future[Any] = concurrent.futures.Future()
-
-        def _put() -> None:
-            if self._cmd_queue is not None:
-                self._cmd_queue.put_nowait((action, args, kwargs, res_future))
-            else:
-                res_future.set_exception(RuntimeError("MCP session is not connected."))
-
-        self._loop.call_soon_threadsafe(_put)
-        future_coro = asyncio.wrap_future(res_future)
-        if timeout is not None and timeout > 0:
+        future = self._dispatch_cmd(action, *args, **kwargs)
+        future_coro = asyncio.wrap_future(future)
+        if timeout is not None:
             return await asyncio.wait_for(future_coro, timeout=timeout)
         return await future_coro
 
     def list_tools(self, timeout: float | None = 30.0) -> Any:
         """List raw MCP tools from the server synchronously."""
-        return self._send_cmd("list_tools", timeout=timeout)
+        return run_async_in_sync(
+            lambda: self.list_tools_async(timeout=timeout),
+            error_message="MCPSession.list_tools() cannot be called from a running event loop. Use 'await session.list_tools_async()' instead.",
+        )
 
     async def list_tools_async(self, timeout: float | None = 30.0) -> Any:
         """List raw MCP tools from the server asynchronously."""
@@ -269,51 +273,10 @@ class MCPSession:
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None, timeout: float | None = 60.0) -> str:
         """Execute a tool on the MCP server synchronously and return serialized text output."""
-        ctx = create_child_trace_context()
-        emit_event(
-            MCPCallStartEvent(
-                trace_context=ctx,
-                server_name=self.config.name,
-                tool_name=name,
-                arguments=arguments or {},
-            )
+        return run_async_in_sync(
+            lambda: self.call_tool_async(name, arguments=arguments, timeout=timeout),
+            error_message="MCPSession.call_tool() cannot be called from a running event loop. Use 'await session.call_tool_async()' instead.",
         )
-        t0 = time.perf_counter()
-        with trace_scope(ctx):
-            try:
-                result = self._send_cmd("call_tool", name, arguments=arguments or {}, timeout=timeout)
-                duration_ms = (time.perf_counter() - t0) * 1000
-                emit_event(
-                    MCPCallEndEvent(
-                        trace_context=ctx,
-                        server_name=self.config.name,
-                        tool_name=name,
-                        status="ok",
-                        duration_ms=duration_ms,
-                    )
-                )
-                return _serialize_mcp_result(result)
-            except Exception as err:
-                duration_ms = (time.perf_counter() - t0) * 1000
-                err_msg = str(err)
-                emit_event(
-                    MCPCallEndEvent(
-                        trace_context=ctx,
-                        server_name=self.config.name,
-                        tool_name=name,
-                        status="error",
-                        duration_ms=duration_ms,
-                        error=err_msg,
-                    )
-                )
-                emit_event(
-                    ErrorEvent(
-                        trace_context=ctx,
-                        error_type=type(err).__name__,
-                        message=err_msg,
-                    )
-                )
-                raise
 
     async def call_tool_async(
         self, name: str, arguments: dict[str, Any] | None = None, timeout: float | None = 60.0
@@ -367,7 +330,10 @@ class MCPSession:
 
     def list_resources(self, timeout: float | None = 30.0) -> Any:
         """List available resources on the MCP server synchronously."""
-        return self._send_cmd("list_resources", timeout=timeout)
+        return run_async_in_sync(
+            lambda: self.list_resources_async(timeout=timeout),
+            error_message="MCPSession.list_resources() cannot be called from a running event loop. Use 'await session.list_resources_async()' instead.",
+        )
 
     async def list_resources_async(self, timeout: float | None = 30.0) -> Any:
         """List available resources on the MCP server asynchronously."""
@@ -375,7 +341,10 @@ class MCPSession:
 
     def read_resource(self, uri: str, timeout: float | None = 30.0) -> Any:
         """Read a resource from the MCP server synchronously."""
-        return self._send_cmd("read_resource", uri, timeout=timeout)
+        return run_async_in_sync(
+            lambda: self.read_resource_async(uri, timeout=timeout),
+            error_message="MCPSession.read_resource() cannot be called from a running event loop. Use 'await session.read_resource_async()' instead.",
+        )
 
     async def read_resource_async(self, uri: str, timeout: float | None = 30.0) -> Any:
         """Read a resource from the MCP server asynchronously."""
@@ -383,7 +352,10 @@ class MCPSession:
 
     def list_prompts(self, timeout: float | None = 30.0) -> Any:
         """List available prompts on the MCP server synchronously."""
-        return self._send_cmd("list_prompts", timeout=timeout)
+        return run_async_in_sync(
+            lambda: self.list_prompts_async(timeout=timeout),
+            error_message="MCPSession.list_prompts() cannot be called from a running event loop. Use 'await session.list_prompts_async()' instead.",
+        )
 
     async def list_prompts_async(self, timeout: float | None = 30.0) -> Any:
         """List available prompts on the MCP server asynchronously."""
@@ -391,7 +363,10 @@ class MCPSession:
 
     def get_prompt(self, name: str, arguments: dict[str, Any] | None = None, timeout: float | None = 30.0) -> Any:
         """Retrieve a rendered prompt from the MCP server synchronously."""
-        return self._send_cmd("get_prompt", name, arguments=arguments or {}, timeout=timeout)
+        return run_async_in_sync(
+            lambda: self.get_prompt_async(name, arguments=arguments, timeout=timeout),
+            error_message="MCPSession.get_prompt() cannot be called from a running event loop. Use 'await session.get_prompt_async()' instead.",
+        )
 
     async def get_prompt_async(
         self, name: str, arguments: dict[str, Any] | None = None, timeout: float | None = 30.0
@@ -453,6 +428,10 @@ class MCPSession:
 
     def close(self, timeout: float = 5.0) -> None:
         """Close the MCP session and terminate worker task."""
+        check_sync_allowed(
+            "MCPSession.close() cannot be called from a running event loop. "
+            "Use 'await session.close_async()' or 'async with session:' instead."
+        )
         with self._lock:
             if self._cmd_queue is not None and self._loop is not None:
                 done_event = threading.Event()
@@ -488,17 +467,7 @@ class MCPSession:
 
     async def close_async(self, timeout: float = 5.0) -> None:
         """Close the MCP session asynchronously."""
-        done_future = concurrent.futures.Future()
-
-        def _sync_close() -> None:
-            try:
-                self.close(timeout=timeout)
-                done_future.set_result(True)
-            except Exception as e:
-                done_future.set_exception(e)
-
-        threading.Thread(target=_sync_close, daemon=True).start()
-        await asyncio.wrap_future(done_future)
+        await asyncio.to_thread(self.close, timeout=timeout)
 
     def __enter__(self) -> "MCPSession":
         self.connect()
@@ -513,4 +482,8 @@ class MCPSession:
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         await self.close_async()
+
+
+MCPSession._original_send_cmd = MCPSession._send_cmd
+
 
