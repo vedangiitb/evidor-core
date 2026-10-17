@@ -1,9 +1,9 @@
-"""Anthropic adapter."""
-
+import asyncio
 from collections.abc import Sequence
 from typing import Any
 
 from evidor.models import GenerationRequest, GenerationResponse, Message, ToolCall
+from evidor.utils import check_sync_allowed
 from .base import BaseProvider, build_token_usage, extract_system_prompt, sort_tools
 
 
@@ -83,6 +83,11 @@ class AnthropicProvider(BaseProvider):
         )
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
+        check_sync_allowed(
+            "AnthropicProvider.generate() cannot be called from a running event loop. "
+            "Use 'await provider.generate_async()' instead."
+        )
+
         client = self._get_client()
         payload = self._build_request_payload(request)
         if self._compact_threshold is not None or self._compact_instructions is not None:
@@ -91,6 +96,17 @@ class AnthropicProvider(BaseProvider):
             response_msg = client.messages.create(**payload)
         return self._parse_response(response_msg)
 
+    async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+        client = self._get_async_client()
+        if client is not None:
+            payload = self._build_request_payload(request)
+            if self._compact_threshold is not None or self._compact_instructions is not None:
+                response_msg = await client.beta.messages.create(**payload)
+            else:
+                response_msg = await client.messages.create(**payload)
+            return self._parse_response(response_msg)
+        return await asyncio.to_thread(self.generate, request)
+
     def _get_client(self) -> Any:
         try:
             from anthropic import Anthropic
@@ -98,6 +114,28 @@ class AnthropicProvider(BaseProvider):
             raise ImportError("Install Anthropic support with: pip install 'evidor[anthropic]'") from error
 
         return Anthropic(api_key=self._api_key)
+
+    def _get_async_client(self) -> Any:
+        try:
+            from anthropic import AsyncAnthropic
+        except (ImportError, AttributeError):
+            return None
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None:
+            if not hasattr(self, "_async_clients"):
+                self._async_clients: dict[asyncio.AbstractEventLoop, Any] = {}
+            client = self._async_clients.get(loop)
+            if client is None or getattr(client, "is_closed", lambda: False)():
+                client = AsyncAnthropic(api_key=self._api_key)
+                self._async_clients[loop] = client
+        else:
+            client = AsyncAnthropic(api_key=self._api_key)
+        return client
 
     def _build_request_payload(self, request: GenerationRequest) -> dict[str, Any]:
         system_prompt = extract_system_prompt(request)
