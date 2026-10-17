@@ -139,12 +139,12 @@ def test_tool_multiline_docstring_arg() -> None:
 
 
 def test_tool_empty_union_and_failed_type_hints(monkeypatch: pytest.MonkeyPatch) -> None:
-    from evidor.tools import _python_type_to_json_type
+    from evidor.utils import python_type_to_json_type
 
     # Test Union with only NoneType args
     monkeypatch.setattr("evidor.utils.schema.get_origin", lambda _: Union)
     monkeypatch.setattr("evidor.utils.schema.get_args", lambda _: (type(None),))
-    assert _python_type_to_json_type(object) == "string"
+    assert python_type_to_json_type(object) == "string"
 
     # Test get_type_hints exception fallback
     monkeypatch.setattr("evidor.utils.schema.get_origin", get_origin)
@@ -248,9 +248,12 @@ def test_async_tool_preserves_contextvars() -> None:
         return test_var.get()
 
     async def _run() -> None:
-        # When executed synchronously inside an active loop (which dispatches to worker thread with context copy)
-        assert get_token.execute() == "custom_token_123"
+        # When executed synchronously inside an active loop, it raises RuntimeError
+        with pytest.raises(RuntimeError, match="Async tool cannot be executed synchronously from a running event loop"):
+            get_token.execute()
         # When executed asynchronously in native loop
         assert await get_token.execute_async() == "custom_token_123"
 
     asyncio.run(_run())
+    # When executed synchronously outside any active loop, it runs in a new loop and preserves contextvars
+    assert get_token.execute() == "custom_token_123"

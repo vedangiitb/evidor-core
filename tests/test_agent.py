@@ -3,10 +3,13 @@ import pytest
 
 from evidor import (
     Agent,
+    AnthropicProvider,
+    GeminiProvider,
     GenerationRequest,
     GenerationResponse,
     Message,
     ModelProvider,
+    OpenAIProvider,
     Tool,
     ToolCall,
     tool,
@@ -24,6 +27,9 @@ class FakeProvider:
     def generate(self, request: GenerationRequest) -> GenerationResponse:
         self.requests.append(request)
         return GenerationResponse(text=f"[{self.model}] {request.prompt}", model=self.model)
+
+    async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+        return self.generate(request)
 
 
 def test_agent_delegates_to_its_provider() -> None:
@@ -438,4 +444,85 @@ def test_agent_handles_empty_assistant_response_gracefully() -> None:
     resp = agent.send("hello")
     assert resp.text == ""
     assert agent.messages[-1].content == "Done."
+
+
+def test_agent_sync_methods_raise_in_running_event_loop() -> None:
+    agent = Agent(FakeProvider())
+
+    async def _run() -> None:
+        with pytest.raises(RuntimeError, match="Agent.send\\(\\) cannot be called from a running event loop"):
+            agent.send("test")
+
+    asyncio.run(_run())
+
+
+def test_agent_send_async_concurrent_tools() -> None:
+    execution_order: list[str] = []
+
+    @tool
+    async def fast_tool() -> str:
+        await asyncio.sleep(0.01)
+        execution_order.append("fast")
+        return "fast_done"
+
+    @tool
+    async def slow_tool() -> str:
+        await asyncio.sleep(0.03)
+        execution_order.append("slow")
+        return "slow_done"
+
+    class MultiToolProvider:
+        def __init__(self) -> None:
+            self.turn = 0
+            self.model = "multi-tool"
+
+        def with_model(self, model: str) -> "MultiToolProvider":
+            return self
+
+        async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+            self.turn += 1
+            if self.turn == 1:
+                return GenerationResponse(
+                    text="",
+                    model="multi-tool",
+                    tool_calls=(
+                        ToolCall(id="c1", name="slow_tool", arguments={}),
+                        ToolCall(id="c2", name="fast_tool", arguments={}),
+                    ),
+                )
+            return GenerationResponse(text="Both tools completed", model="multi-tool")
+
+    agent = Agent(MultiToolProvider(), tools=[slow_tool, fast_tool])
+
+    async def _run() -> None:
+        resp = await agent.send_async("run both")
+        assert resp.text == "Both tools completed"
+        # Since slow_tool takes 30ms and fast_tool takes 10ms and they run concurrently,
+        # fast_tool finishes first!
+        assert execution_order == ["fast", "slow"]
+        tool_msgs = [m for m in agent.messages if m.role == "tool"]
+        assert len(tool_msgs) == 2
+        assert tool_msgs[0].content == "slow_done"
+        assert tool_msgs[1].content == "fast_done"
+
+    asyncio.run(_run())
+
+
+def test_providers_generate_raise_inside_running_event_loop() -> None:
+    openai_p = OpenAIProvider(model="gpt-4.1-mini")
+    anthropic_p = AnthropicProvider(model="claude-3-5")
+    gemini_p = GeminiProvider(model="gemini-3.8-flash")
+    req = GenerationRequest(prompt="hi")
+
+    async def _run() -> None:
+        with pytest.raises(RuntimeError, match="OpenAIProvider.generate\\(\\) cannot be called from a running event loop"):
+            openai_p.generate(req)
+
+        with pytest.raises(RuntimeError, match="AnthropicProvider.generate\\(\\) cannot be called from a running event loop"):
+            anthropic_p.generate(req)
+
+        with pytest.raises(RuntimeError, match="GeminiProvider.generate\\(\\) cannot be called from a running event loop"):
+            gemini_p.generate(req)
+
+    asyncio.run(_run())
 
