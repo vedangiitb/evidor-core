@@ -1,6 +1,6 @@
 # Evidor
 
-Evidor is an open-source, provider-agnostic runtime for building AI agents. It provides a clean, modern interface for conversational agents across multiple model providers, with first-class support for **stateless LLM calls** and native **provider-managed conversations**.
+Evidor is an open-source, provider-agnostic runtime for building AI agents. It provides a clean, modern interface for conversational agents across multiple model providers, with first-class support for stateful and stateless conversations, MCP, agent observability, tool integrations, and a wide range of built-in tools.
 
 ## Install
 
@@ -25,14 +25,122 @@ print(response.text)
 
 Evidor cleanly separates AI execution into two paradigms:
 
-1. **Stateless LLM Calls**: Direct single-turn or user-managed multi-turn requests with tools, structured outputs, and raw message histories (`provider.generate(request)`). Evidor does not automatically manage, mutate, or store conversation state.
-2. **Provider-Managed Conversations**: A unified Evidor interface (`Agent`) over native provider state and context features, exposing provider-specific differences clearly without doing custom client-side token slicing or summarization.
+1. **Stateful Conversations (`Agent`) (Recommended)**: The primary and recommended way to build applications with Evidor. Conversations maintain state automatically across turns, so you don't have to pass the entire message history each time. Evidor manages session state, context continuation, and tool execution loops seamlessly under the hood.
+2. **Stateless LLM Calls (`provider.generate`)**: Direct single-turn or user-managed requests with tools, structured outputs, and raw message histories. Available when you need low-level control or want to manage message storage and persistence yourself.
 
 ---
 
-## 1. Stateless LLM Calls
+## 1. Stateful Multi-Turn Conversations (Recommended)
 
-In the stateless paradigm, you interact directly with the underlying `ModelProvider` using `GenerationRequest`. Evidor executes the call directly against modern provider endpoints without maintaining or mutating any hidden conversation state.
+Stateful conversations are the primary and recommended way to build agents in Evidor. With the `Agent` interface, conversations automatically remember context across turns—**you do not have to pass the entire message history each time**. Evidor handles session state, context tracking, and tool execution loops cleanly behind the scenes.
+
+### Basic Multi-Turn Conversation
+
+Use `send()` (or `send_async()`) to advance the conversation. Previous turns are remembered without re-passing the conversation history:
+
+```python
+from evidor import Agent, OpenAIProvider
+
+agent = Agent(OpenAIProvider(model="gpt-6-astra"))
+
+agent.send("My favorite color is navy blue.")
+response = agent.send("What color did I say I like?")
+print(response.text)
+```
+
+### System Prompts
+
+Configure an initial system prompt when creating an `Agent`. Evidor delivers the instructions natively across subsequent turns:
+
+```python
+from evidor import Agent, GeminiProvider
+
+agent = Agent(
+    GeminiProvider(model="gemini-3.8-flash"),
+    system_prompt="You are a concise technical writer. Avoid buzzwords and respond in bullet points.",
+)
+
+response = agent.send("How does a TCP handshake work?")
+print(response.text)
+```
+
+### How State and Context Are Handled Under the Hood
+
+Under the hood, Evidor transparently maps stateful conversations to each model provider's optimal context mechanism, ensuring efficient token usage without requiring you to manually re-send past messages:
+
+- **Server-Side State Chaining (OpenAI & Google Gemini)**:
+  - **OpenAI (`OpenAIProvider`)**: Uses the Responses API `previous_response_id` (and optional `conversation_id`). State is maintained server-side; on each turn, Evidor transmits only the newest turn's delta messages.
+  - **Google Gemini (`GeminiProvider`)**: Uses the Interactions API `previous_interaction_id`. State is maintained server-side; on each turn, Evidor transmits only the newest input step chained to the preceding interaction.
+- **Ephemeral Prompt Caching (Anthropic Claude)**:
+  - **Anthropic (`AnthropicProvider`)**: Claude's Messages API is stateless; `Agent` replays the message history locally on each turn (`"stateless_replay"`). Evidor automatically applies Anthropic's **Prompt Caching** (`cache_control={"type": "ephemeral"}`). The prompt prefix (system instructions, tools, and prior turns) is cached in KV-cache, reducing latency and cost by up to 90% without requiring server-side conversation storage.
+
+Evidor exposes each provider's context management strategy through `agent.strategy`:
+
+| Provider | Strategy (`agent.strategy`) | Context Architecture | Compaction Support | How It Works |
+| :--- | :--- | :--- | :--- | :--- |
+| **OpenAIProvider** | `"response_chain"` | Server-Side Chaining (Responses API `previous_response_id`) | Native Server-Side (`compact_threshold`) | Only the new turn's delta messages / tool outputs are sent. When `compact_threshold` is configured, OpenAI executes server-side compaction automatically when tokens cross the threshold and preserves state across chained turns. |
+| **GeminiProvider** | `"interaction_chain"` | Server-Side Chaining (Interactions API `previous_interaction_id`) | Managed in Interactions API | Only the new turn's delta messages are sent, linked by `previous_interaction_id`. Gemini maintains the conversation history on the server. |
+| **AnthropicProvider** | `"stateless_replay"` | Client-Replayed History + Ephemeral Prompt Caching | Native Threshold Compaction (`compact_threshold`) | Claude's Messages API is stateless; `Agent` replays the message history on each turn. When `compact_threshold` is set, Claude generates a native `compaction` summary block, and Evidor replays the compaction block on subsequent turns so Claude automatically prunes prior turns. Combined with prompt caching (`enable_prompt_caching=True`), this delivers maximum context efficiency. |
+
+### Native Provider Compaction (`compact_threshold`)
+
+For long-running agents and multi-turn workflows, both OpenAI and Anthropic provide native compaction to summarize older context at a token threshold rather than hitting context window limits:
+
+```python
+from evidor import Agent, OpenAIProvider, AnthropicProvider
+
+# 1. OpenAI: Automatic server-side compaction
+openai_agent = Agent(
+    OpenAIProvider(model="gpt-6-astra", compact_threshold=100000)
+)
+
+# 2. Anthropic Claude: Threshold compaction with optional custom instructions
+claude_agent = Agent(
+    AnthropicProvider(
+        model="claude-3-7-sonnet-20250219",
+        compact_threshold=150000,
+        compact_instructions="Focus on preserving key architecture decisions and code snippets.",
+    )
+)
+
+# You can also set compact_threshold directly on the Agent facade
+agent = Agent(OpenAIProvider(model="gpt-6-astra"), compact_threshold=100000)
+```
+
+When compaction is triggered:
+- **OpenAI**: Server-side compaction creates an opaque compaction item in the response stream. In Evidor's `response_chain` mode, passing `previous_response_id` carries this compaction forward seamlessly without manual pruning.
+- **Anthropic**: Claude produces a `compaction` block at the start of the assistant response. Evidor preserves this compaction block and automatically formats it into the assistant turn of subsequent replayed requests. Claude automatically drops all history prior to the compaction block, keeping prompts compact and cache-optimized.
+
+### Inspecting and Resetting State
+
+You can inspect provider identifiers, strategy, message history, or reset the conversation at any time:
+
+```python
+agent = Agent(OpenAIProvider(model="gpt-6-astra"))
+agent.send("Hello!")
+
+# Inspect provider context strategy
+print(agent.strategy)  # "response_chain"
+
+# Inspect the latest provider response/interaction ID
+print(agent.last_response_id)  # e.g. "resp_12345"
+
+# Inspect the message history captured during this session
+for msg in agent.messages:
+    print(f"{msg.role}: {msg.content}")
+
+# Reset the conversation state and provider response chain
+agent.reset()  # or agent.clear_history()
+print(agent.last_response_id)  # None
+```
+
+---
+
+## 2. Stateless LLM Calls
+
+While stateful conversations are recommended for most agent workflows, Evidor also supports direct stateless calls. In the stateless paradigm, you interact directly with the underlying `ModelProvider` using `GenerationRequest`. Evidor executes the call directly against modern provider endpoints without maintaining or mutating any hidden conversation state.
+
+This is useful for one-off tasks, single-turn generations, or when your application already has its own persistence layer (e.g. database, chat storage, or custom state machine) and you want to pass raw message lists explicitly.
 
 ### Simple Requests
 
@@ -58,7 +166,7 @@ print(response.text)
 
 ### User-Managed Message History
 
-When your application handles its own persistence (e.g. database, chat storage, or custom state machine), you maintain the message list and pass it directly to `provider.generate()`. Evidor never modifies, prunes, or summarises your messages behind your back:
+When your application handles its own persistence (e.g. database, chat storage, or custom state machine), you maintain the message list and pass it directly to `provider.generate()`. Unlike stateful `Agent` calls, in stateless mode you pass the full history on each request. Evidor never modifies, prunes, or summarises your messages behind your back:
 
 ```python
 from evidor import GenerationRequest, Message, OpenAIProvider
@@ -108,112 +216,6 @@ response = provider.generate(request)
 if response.tool_calls:
     for call in response.tool_calls:
         print(f"Model requested tool: {call.name} with args {call.arguments}")
-```
-
----
-
-## 2. Multi-turn Conversations & Context Management
-
-Evidor provides a unified interface for multi-turn conversational agents while exposing the underlying provider architectures with complete transparency:
-
-1. **Server-Side State Chaining (OpenAI & Google Gemini)**:
-   - **OpenAI (`OpenAIProvider`)**: Uses the Responses API `previous_response_id` (and optional `conversation_id`). State is managed server-side by OpenAI; on each turn, Evidor transmits only the newest turn's delta messages.
-   - **Google Gemini (`GeminiProvider`)**: Uses the Interactions API `previous_interaction_id`. State is managed server-side by Google GenAI; on each turn, Evidor transmits only the newest input step chained to the preceding interaction.
-
-2. **Stateless Replay with Prompt Caching (Anthropic Claude)**:
-   - **Anthropic (`AnthropicProvider`)**: The Anthropic Messages API is fundamentally **stateless** — it does not store conversation threads or chain from a conversation ID on the server. The `Agent` maintains the multi-turn message history locally and replays it on each turn (`"stateless_replay"`).
-   - **Prompt Caching Optimization**: To avoid redundant re-computation costs across replayed turns, Evidor automatically applies Anthropic's **Prompt Caching** (`cache_control={"type": "ephemeral"}`). Anthropic caches the prompt prefix (system instructions, tools, and prior turns) in ephemeral KV-cache, reducing input latency and cost by up to 90% without requiring server-side conversation storage.
-
-### Multi-turn Conversations
-
-The `Agent` maintains session state across conversation turns using the underlying provider's native strategy. Use `send()` (or `send_async()`) to advance the conversation:
-
-```python
-from evidor import Agent, OpenAIProvider
-
-agent = Agent(OpenAIProvider(model="gpt-6-astra"))
-
-agent.send("My favorite color is navy blue.")
-response = agent.send("What color did I say I like?")
-print(response.text)
-```
-
-### System Prompts
-
-Configure an initial system prompt when creating an `Agent`. Evidor delivers the instructions natively to the provider backend across turns:
-
-```python
-from evidor import Agent, GeminiProvider
-
-agent = Agent(
-    GeminiProvider(model="gemini-3.8-flash"),
-    system_prompt="You are a concise technical writer. Avoid buzzwords and respond in bullet points.",
-)
-
-response = agent.send("How does a TCP handshake work?")
-print(response.text)
-```
-
-### How Provider Context Management Works
-
-Evidor exposes each provider's context management strategy through `agent.strategy`:
-
-| Provider | Strategy (`agent.strategy`) | Context Architecture | Compaction Support | How It Works |
-| :--- | :--- | :--- | :--- | :--- |
-| **OpenAIProvider** | `"response_chain"` | Server-Side Chaining (Responses API `previous_response_id`) | Native Server-Side (`compact_threshold`) | Only the new turn's delta messages / tool outputs are sent. When `compact_threshold` is configured, OpenAI executes server-side compaction automatically when tokens cross the threshold and preserves state across chained turns. |
-| **GeminiProvider** | `"interaction_chain"` | Server-Side Chaining (Interactions API `previous_interaction_id`) | Managed in Interactions API | Only the new turn's delta messages are sent, linked by `previous_interaction_id`. Gemini maintains the conversation history on the server. |
-| **AnthropicProvider** | `"stateless_replay"` | Client-Replayed History + Ephemeral Prompt Caching | Native Threshold Compaction (`compact_threshold`) | Claude's Messages API is stateless; `Agent` replays the message history on each turn. When `compact_threshold` is set, Claude generates a native `compaction` summary block, and Evidor replays the compaction block on subsequent turns so Claude automatically prunes prior turns. Combined with prompt caching (`enable_prompt_caching=True`), this delivers maximum context efficiency. |
-
-### Native Provider Compaction (`compact_threshold`)
-
-For long-running agents and multi-turn workflows, both OpenAI and Anthropic provide native compaction to summarize older context at a token threshold rather than hitting context window limits:
-
-```python
-from evidor import Agent, OpenAIProvider, AnthropicProvider
-
-# 1. OpenAI: Automatic server-side compaction
-openai_agent = Agent(
-    OpenAIProvider(model="gpt-6-astra", compact_threshold=100000)
-)
-
-# 2. Anthropic Claude: Threshold compaction with optional custom instructions
-claude_agent = Agent(
-    AnthropicProvider(
-        model="claude-3-7-sonnet-20250219",
-        compact_threshold=150000,
-        compact_instructions="Focus on preserving key architecture decisions and code snippets.",
-    )
-)
-
-# You can also set compact_threshold directly on the Agent facade
-agent = Agent(OpenAIProvider(model="gpt-6-astra"), compact_threshold=100000)
-```
-
-When compaction is triggered:
-- **OpenAI**: Server-side compaction creates an opaque compaction item in the response stream. In Evidor's `response_chain` mode, passing `previous_response_id` carries this compaction forward seamlessly without manual pruning.
-- **Anthropic**: Claude produces a `compaction` block at the start of the assistant response. Evidor preserves this compaction block and automatically formats it into the assistant turn of subsequent replayed requests. Claude automatically drops all history prior to the compaction block, keeping prompts compact and cache-optimized.
-
-### Inspecting and Resetting Provider State
-
-You can inspect provider identifiers, strategy, or reset the conversation at any time:
-
-```python
-agent = Agent(OpenAIProvider(model="gpt-6-astra"))
-agent.send("Hello!")
-
-# Inspect provider context strategy
-print(agent.strategy)  # "response_chain"
-
-# Inspect the latest provider response/interaction ID
-print(agent.last_response_id)  # e.g. "resp_12345"
-
-# Inspect the message history captured during this session
-for msg in agent.messages:
-    print(f"{msg.role}: {msg.content}")
-
-# Reset the conversation state and provider response chain
-agent.reset()  # or agent.clear_history()
-print(agent.last_response_id)  # None
 ```
 
 ---
