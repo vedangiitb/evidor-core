@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
+import inspect
 import secrets
 import time
 from typing import Any
@@ -26,6 +27,7 @@ from ..telemetry import (
 )
 from ..tools import Tool
 from ..tools.core.tool_executor import ToolExecutor
+from ..utils import run_async_in_sync
 from .providers.base import ModelProvider
 
 
@@ -136,7 +138,6 @@ class Agent:
         """The configured token threshold for provider-native compaction, if any."""
         return self._compact_threshold
 
-
     @property
     def telemetry(self) -> TelemetryRuntime | None:
         """The TelemetryRuntime configured on this agent, if any."""
@@ -180,10 +181,13 @@ class Agent:
             return
         if self._mcp_tools_synced and not force:
             return
-        mcp_tools = self._mcp_client.get_tools()
-        self._tool_executor = ToolExecutor([*self._user_tools, *mcp_tools], self._tool_timeout)
-        self._tools = self._tool_executor.tools
-        self._mcp_tools_synced = True
+        run_async_in_sync(
+            lambda: self._sync_mcp_tools_async(force=force),
+            error_message=(
+                "Cannot synchronize MCP tools synchronously from a running event loop. "
+                "Access agent.tools outside an event loop or run an async agent turn first."
+            ),
+        )
 
     async def _sync_mcp_tools_async(self, force: bool = False) -> None:
         """Asynchronously synchronize tools from any configured MCP client into the executor."""
@@ -283,40 +287,6 @@ class Agent:
             )
         )
 
-    def _generate_with_telemetry(
-        self,
-        request: GenerationRequest,
-        provider: ModelProvider | None = None,
-        call_type: str = "generation",
-    ) -> GenerationResponse:
-        target_provider = provider if provider is not None else self._provider
-        provider_name = getattr(target_provider, "__class__", type(target_provider)).__name__
-        model_name = getattr(target_provider, "model", "unknown")
-
-        llm_ctx = create_child_trace_context()
-        self._emit_llm_start(llm_ctx, provider_name, model_name, request, call_type=call_type)
-        t0 = time.perf_counter()
-        with trace_scope(llm_ctx):
-            try:
-                response = target_provider.generate(request)
-            except Exception as err:
-                duration_ms = (time.perf_counter() - t0) * 1000
-                self._emit_llm_error(
-                    llm_ctx,
-                    provider_name,
-                    model_name,
-                    err,
-                    duration_ms,
-                    call_type=call_type,
-                )
-                raise
-
-            duration_ms = (time.perf_counter() - t0) * 1000
-            self._emit_llm_success(
-                llm_ctx, provider_name, model_name, response, duration_ms, call_type=call_type
-            )
-            return response
-
     async def _generate_with_telemetry_async(
         self,
         request: GenerationRequest,
@@ -332,7 +302,11 @@ class Agent:
         t0 = time.perf_counter()
         with trace_scope(llm_ctx):
             try:
-                response = await asyncio.to_thread(target_provider.generate, request)
+                gen_async = getattr(target_provider, "generate_async", None)
+                if callable(gen_async) and inspect.iscoroutinefunction(gen_async):
+                    response = await gen_async(request)
+                else:
+                    response = await asyncio.to_thread(target_provider.generate, request)
             except Exception as err:
                 duration_ms = (time.perf_counter() - t0) * 1000
                 self._emit_llm_error(
@@ -352,156 +326,11 @@ class Agent:
             return response
 
     def send(self, message: str) -> GenerationResponse:
-        """Advance one user turn, coordinating provider-native context and tool calls."""
-        run_id = f"run_{secrets.token_hex(6)}"
-        current_ctx = get_current_trace_context()
-        root_ctx = current_ctx.child() if current_ctx is not None else TraceContext.new_root()
-
-        with telemetry_scope(self._telemetry), trace_scope(root_ctx):
-            emit_event(
-                AgentRunStartEvent(
-                    trace_context=root_ctx,
-                    run_id=run_id,
-                    user_prompt=message,
-                    system_prompt=self._system_prompt,
-                )
-            )
-            t0 = time.perf_counter()
-            iterations = 0
-            try:
-                self._sync_mcp_tools()
-                user_msg = Message(role="user", content=message)
-                self._messages.append(user_msg)
-
-                strategy = self.strategy
-                is_stateful_chain = strategy in ("response_chain", "interaction_chain")
-                current_turn_messages = [user_msg]
-                response = None
-
-                for _ in range(self._max_tool_iterations):
-                    iterations += 1
-                    if is_stateful_chain:
-                        req = GenerationRequest(
-                            messages=current_turn_messages,
-                            tools=self._tools,
-                            previous_response_id=self._last_response_id,
-                            conversation_id=self._conversation_id,
-                            store=self._store,
-                            system=self._system_prompt,
-                        )
-                    else:
-                        req = GenerationRequest(
-                            messages=self._messages,
-                            tools=self._tools,
-                            system=self._system_prompt,
-                        )
-
-                    response = self._generate_with_telemetry(req)
-                    if response.id:
-                        self._last_response_id = response.id
-
-                    asst_content = response.text
-                    if (
-                        (not asst_content or not asst_content.strip())
-                        and not response.tool_calls
-                        and not response.thought_blocks
-                        and not getattr(response, "compaction", None)
-                    ):
-                        asst_content = "Done."
-                    self._messages.append(
-                        Message(
-                            role="assistant",
-                            content=asst_content,
-                            tool_calls=response.tool_calls,
-                            thinking=response.thinking,
-                            thought_blocks=response.thought_blocks,
-                            compaction=getattr(response, "compaction", None),
-                        )
-                    )
-
-                    if not response.tool_calls:
-                        duration_ms = (time.perf_counter() - t0) * 1000
-                        emit_event(
-                            AgentRunEndEvent(
-                                trace_context=root_ctx,
-                                run_id=run_id,
-                                status="ok",
-                                duration_ms=duration_ms,
-                                iterations=iterations,
-                                output_text=response.text,
-                            )
-                        )
-                        return response
-
-                    # Execute tool calls
-                    tool_results: list[Message] = []
-                    for call in response.tool_calls:
-                        result = self._tool_executor.execute(call)
-                        t_msg = Message(
-                            role="tool",
-                            content=result,
-                            tool_call_id=call.id,
-                            name=call.name,
-                        )
-                        self._messages.append(t_msg)
-                        tool_results.append(t_msg)
-
-                    current_turn_messages = tool_results
-
-                # Exceeded max iterations; request final non-tool completion
-                iterations += 1
-                if is_stateful_chain:
-                    final_req = GenerationRequest(
-                        messages=current_turn_messages,
-                        tools=(),
-                        previous_response_id=self._last_response_id,
-                        conversation_id=self._conversation_id,
-                        store=self._store,
-                        system=self._system_prompt,
-                    )
-                else:
-                    final_req = GenerationRequest(
-                        messages=self._messages,
-                        tools=(),
-                        system=self._system_prompt,
-                    )
-                final_response = self._generate_with_telemetry(final_req)
-                if final_response.id:
-                    self._last_response_id = final_response.id
-                result = self._finalize_loop_expiry(final_response, response)
-                duration_ms = (time.perf_counter() - t0) * 1000
-                emit_event(
-                    AgentRunEndEvent(
-                        trace_context=root_ctx,
-                        run_id=run_id,
-                        status="ok",
-                        duration_ms=duration_ms,
-                        iterations=iterations,
-                        output_text=result.text,
-                    )
-                )
-                return result
-            except Exception as err:
-                duration_ms = (time.perf_counter() - t0) * 1000
-                err_msg = str(err)
-                emit_event(
-                    AgentRunEndEvent(
-                        trace_context=root_ctx,
-                        run_id=run_id,
-                        status="error",
-                        duration_ms=duration_ms,
-                        iterations=max(1, iterations),
-                        error=err_msg,
-                    )
-                )
-                emit_event(
-                    ErrorEvent(
-                        trace_context=root_ctx,
-                        error_type=type(err).__name__,
-                        message=err_msg,
-                    )
-                )
-                raise
+        """Advance one user turn synchronously."""
+        return run_async_in_sync(
+            lambda: self.send_async(message),
+            error_message="Agent.send() cannot be called from a running event loop. Use 'await agent.send_async()' instead.",
+        )
 
     async def send_async(self, message: str) -> GenerationResponse:
         """Asynchronously advance one user turn, coordinating provider-native context and tool calls."""
@@ -585,19 +414,34 @@ class Agent:
                         )
                         return response
 
-                    # Execute tool calls asynchronously
-                    tool_results: list[Message] = []
-                    for call in response.tool_calls:
+                    # Execute tool calls asynchronously (concurrently if multiple)
+                    if len(response.tool_calls) == 1:
+                        call = response.tool_calls[0]
                         result = await self._tool_executor.execute_async(call)
-                        t_msg = Message(
-                            role="tool",
-                            content=result,
-                            tool_call_id=call.id,
-                            name=call.name,
-                        )
-                        self._messages.append(t_msg)
-                        tool_results.append(t_msg)
+                        tool_results = [
+                            Message(
+                                role="tool",
+                                content=result,
+                                tool_call_id=call.id,
+                                name=call.name,
+                            )
+                        ]
+                    else:
+                        async def _exec_tool_call(call: ToolCall) -> Message:
+                            res = await self._tool_executor.execute_async(call)
+                            return Message(
+                                role="tool",
+                                content=res,
+                                tool_call_id=call.id,
+                                name=call.name,
+                            )
 
+                        tool_results = list(
+                            await asyncio.gather(*(_exec_tool_call(c) for c in response.tool_calls))
+                        )
+
+                    for t_msg in tool_results:
+                        self._messages.append(t_msg)
                     current_turn_messages = tool_results
 
                 iterations += 1
@@ -657,12 +501,18 @@ class Agent:
     def close(self) -> None:
         """Close any associated MCP client connections and flush telemetry."""
         if self._mcp_client is not None:
-            self._mcp_client.close()
-            self._mcp_tools_synced = False
-        if self._telemetry is not None:
-            self._telemetry.flush()
-            if self._owns_telemetry:
-                self._telemetry.close()
+            run_async_in_sync(
+                self.close_async,
+                error_message=(
+                    "Agent.close() cannot be called from a running event loop. "
+                    "Use 'await agent.close_async()' or 'async with agent:' instead."
+                ),
+            )
+        else:
+            if self._telemetry is not None:
+                self._telemetry.flush()
+                if self._owns_telemetry:
+                    self._telemetry.close()
 
     async def close_async(self) -> None:
         """Asynchronously close any associated MCP client connections and flush telemetry."""

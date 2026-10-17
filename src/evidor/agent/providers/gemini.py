@@ -1,9 +1,9 @@
-"""Google Gemini adapter."""
-
+import asyncio
 from collections.abc import Sequence
 from typing import Any
 
 from evidor.models import GenerationRequest, GenerationResponse, Message, ToolCall
+from evidor.utils import check_sync_allowed
 from .base import (
     BaseProvider,
     build_token_usage,
@@ -153,10 +153,23 @@ class GeminiProvider(BaseProvider):
         )
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
+        check_sync_allowed(
+            "GeminiProvider.generate() cannot be called from a running event loop. "
+            "Use 'await provider.generate_async()' instead."
+        )
+
         client, types = self._get_client_and_types()
         payload = self._build_request_payload(request, types)
         response = client.interactions.create(**payload)
         return self._parse_response(response)
+
+    async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+        client, types = self._get_client_and_types()
+        payload = self._build_request_payload(request, types)
+        if hasattr(client, "aio") and hasattr(client.aio, "interactions") and hasattr(client.aio.interactions, "create"):
+            response = await client.aio.interactions.create(**payload)
+            return self._parse_response(response)
+        return await asyncio.to_thread(self.generate, request)
 
     def _get_client_and_types(self) -> tuple[Any, Any]:
         try:

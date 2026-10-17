@@ -1,39 +1,34 @@
 """Execution helpers for coroutine bridging and time-bounded callables."""
 
 import asyncio
-from collections.abc import Callable
-import concurrent.futures
-import contextvars
 from typing import Any
 
 
-def run_coroutine_sync(factory: Callable[[], Any]) -> Any:
-    """Run a coroutine factory synchronously, preserving context inside active loops."""
+def check_sync_allowed(error_message: str | None = None) -> None:
+    """Raise RuntimeError if called within an active event loop."""
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
-        loop = None
-    if loop is not None and loop.is_running():
-        context = contextvars.copy_context()
+        return
 
-        def worker() -> Any:
-            return context.run(asyncio.run, factory())
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(worker).result()
-    return asyncio.run(factory())
+    msg = error_message or (
+        "This sync method cannot be called from a running event loop. "
+        "Use its async equivalent instead."
+    )
+    raise RuntimeError(msg)
 
 
-def run_with_timeout(func: Callable[[], Any], timeout: float | None, error_message: str) -> Any:
-    """Execute a callable synchronously, enforcing a timeout if configured."""
-    if timeout is not None and timeout > 0:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(func)
-            try:
-                return future.result(timeout=timeout)
-            except concurrent.futures.TimeoutError as err:
-                raise TimeoutError(error_message) from err
-    return func()
+def run_async_in_sync(
+    target: Any,
+    error_message: str | None = None,
+) -> Any:
+    """Execute an async coroutine or coroutine factory synchronously.
+
+    Raises RuntimeError if called within an active event loop.
+    """
+    check_sync_allowed(error_message)
+    coro = target() if callable(target) else target
+    return asyncio.run(coro)
 
 
 async def run_with_timeout_async(coro: Any, timeout: float | None, error_message: str) -> Any:

@@ -2,12 +2,12 @@
 
 import asyncio
 from collections.abc import Sequence
-import concurrent.futures
 from pathlib import Path
 import threading
 from typing import Any
 
 from evidor.tools import Tool
+from evidor.utils import check_sync_allowed, run_async_in_sync
 
 from .config import MCPServerConfig
 from .session import MCPSession
@@ -195,22 +195,13 @@ class MCPClient:
 
     def connect(self, timeout: float = 60.0) -> None:
         """Connect to all configured MCP servers in parallel synchronously."""
-        with self._lock:
-            if self._connected:
-                return
-            loop = self._ensure_loop()
-            for name, cfg in self._configs.items():
-                if name not in self._sessions:
-                    self._sessions[name] = MCPSession(cfg, loop=loop)
-
-            async def _connect_all() -> None:
-                tasks = [session.connect_async(timeout=timeout) for session in self._sessions.values()]
-                if tasks:
-                    await asyncio.gather(*tasks)
-
-            future = asyncio.run_coroutine_threadsafe(_connect_all(), loop)
-            future.result(timeout=timeout)
-            self._connected = True
+        return run_async_in_sync(
+            lambda: self.connect_async(timeout=timeout),
+            error_message=(
+                "MCPClient.connect() cannot be called from a running event loop. "
+                "Use 'await client.connect_async()' instead."
+            ),
+        )
 
     async def connect_async(self, timeout: float = 60.0) -> None:
         """Connect to all configured MCP servers in parallel asynchronously."""
@@ -230,40 +221,13 @@ class MCPClient:
 
     def get_tools(self, force_refresh: bool = False) -> tuple[Tool, ...]:
         """Retrieve all Evidor Tool objects from all connected MCP servers in parallel."""
-        if not self._connected:
-            self.connect()
-
-        tools: list[Tool] = []
-        tool_counts: dict[str, int] = {}
-
-        # Fetch tools from all sessions in parallel
-        async def _fetch_all_tools() -> list[tuple[Tool, ...]]:
-            tasks = [session.get_evidor_tools(force_refresh=force_refresh) for session in self._sessions.values()]
-            return await asyncio.gather(*tasks) if tasks else []
-
-        future = asyncio.run_coroutine_threadsafe(_fetch_all_tools(), self._ensure_loop())
-        results = future.result(timeout=60.0)
-        all_server_tools = list(zip(self._sessions.keys(), results))
-
-        for _, st in all_server_tools:
-            for t in st:
-                tool_counts[t.name] = tool_counts.get(t.name, 0) + 1
-
-        for server_name, s_tools in all_server_tools:
-            for t in s_tools:
-                # If collision detected and not already prefixed, prefix with server name
-                if tool_counts[t.name] > 1 and not t.name.startswith(f"{server_name}_"):
-                    prefixed_name = f"{server_name}_{t.name}"
-                    t = Tool(
-                        name=prefixed_name,
-                        description=t.description,
-                        parameters=t.parameters,
-                        func=t.func,
-                        timeout=t.timeout,
-                    )
-                tools.append(t)
-
-        return tuple(tools)
+        return run_async_in_sync(
+            lambda: self.get_tools_async(force_refresh=force_refresh),
+            error_message=(
+                "MCPClient.get_tools() cannot be called from a running event loop. "
+                "Use 'await client.get_tools_async()' instead."
+            ),
+        )
 
     async def get_tools_async(self, force_refresh: bool = False) -> tuple[Tool, ...]:
         """Asynchronously retrieve all Evidor Tool objects from all connected MCP servers."""
@@ -298,6 +262,10 @@ class MCPClient:
 
     def close(self, timeout: float = 5.0) -> None:
         """Close all active MCP server sessions and shut down the client loop."""
+        check_sync_allowed(
+            "MCPClient.close() cannot be called from a running event loop. "
+            "Use 'await client.close_async()' or 'async with client:' instead."
+        )
         with self._lock:
             for session in self._sessions.values():
                 try:
@@ -317,17 +285,7 @@ class MCPClient:
 
     async def close_async(self, timeout: float = 5.0) -> None:
         """Close all active MCP server sessions asynchronously."""
-        done_future = concurrent.futures.Future()
-
-        def _sync_close() -> None:
-            try:
-                self.close(timeout=timeout)
-                done_future.set_result(True)
-            except Exception as e:
-                done_future.set_exception(e)
-
-        threading.Thread(target=_sync_close, daemon=True).start()
-        await asyncio.wrap_future(done_future)
+        await asyncio.to_thread(self.close, timeout=timeout)
 
     def __enter__(self) -> "MCPClient":
         self.connect()

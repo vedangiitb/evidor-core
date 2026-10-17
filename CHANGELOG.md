@@ -2,6 +2,31 @@
 
 <!-- version list -->
 
+## v1.8.0-dev.1 (2026-10-17)
+
+### Documentation
+
+- Readme update for async related changes
+  ([`c386311`](https://github.com/vedangiitb/evidor-core/commit/c386311b61a36082f6bc81dce2e6e1e1d075e6e7))
+
+### Features
+
+- **agent**: Async behaviour changes
+  ([`85e9800`](https://github.com/vedangiitb/evidor-core/commit/85e9800b591312bf2a36023a7c2b0ac4364d2ca6))
+
+- **agent**: Async behaviour changes for providers
+  ([`c85b8ad`](https://github.com/vedangiitb/evidor-core/commit/c85b8adabb860208238e15fbb7bb00e68e678e2e))
+
+- **mcp**: Async behaviour changes for mcp
+  ([`3b42fbb`](https://github.com/vedangiitb/evidor-core/commit/3b42fbb0577562503c7ff8f25e37c5a986b05f73))
+
+- **tools**: Async behaviour changes for tools
+  ([`cb3e4e1`](https://github.com/vedangiitb/evidor-core/commit/cb3e4e1a0a396b75715962b85e47434ba76d2f01))
+
+- **tools**: Async behaviour changes for tools
+  ([`9ebac60`](https://github.com/vedangiitb/evidor-core/commit/9ebac601717a12e08395ab67fd17490809c93b16))
+
+
 ## v1.7.1 (2026-10-16)
 
 

@@ -2,6 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 import sys
+from typing import Any
 import pytest
 
 from evidor import (
@@ -489,3 +490,47 @@ def test_remote_hosted_mcp_server_sse() -> None:
         response = agent.send("Check CPU alarm")
         assert "Monitoring Status" in response.text
         assert "Alarm 'HighCPUUtilization' state: OK" in response.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_client_and_session_loop_guards() -> None:
+    """Ensure sync methods on MCPClient and MCPSession raise RuntimeError if called inside a running loop."""
+    config = MCPServerConfig.stdio("test-mock", command="python")
+    session = MCPSession(config)
+    client = MCPClient(servers=[config])
+
+    with pytest.raises(RuntimeError, match="MCPSession.connect\\(\\) cannot be called from a running event loop"):
+        session.connect()
+
+    with pytest.raises(RuntimeError, match="MCPSession.call_tool\\(\\) cannot be called from a running event loop"):
+        session.call_tool("echo", {})
+
+    with pytest.raises(RuntimeError, match="MCPSession.list_tools\\(\\) cannot be called from a running event loop"):
+        session.list_tools()
+
+    with pytest.raises(RuntimeError, match="MCPSession.close\\(\\) cannot be called from a running event loop"):
+        session.close()
+
+    with pytest.raises(RuntimeError, match="MCPClient.connect\\(\\) cannot be called from a running event loop"):
+        client.connect()
+
+    with pytest.raises(RuntimeError, match="MCPClient.get_tools\\(\\) cannot be called from a running event loop"):
+        client.get_tools()
+
+    with pytest.raises(RuntimeError, match="MCPClient.close\\(\\) cannot be called from a running event loop"):
+        client.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_mcp_close_loop_guard() -> None:
+    """Ensure agent.close() raises RuntimeError inside a running loop if an MCP client is attached."""
+    from evidor.agent.providers.base import BaseProvider
+
+    class DummyProvider(BaseProvider):
+        model = "dummy"
+        def generate(self, req: Any) -> Any: pass
+
+    agent = Agent(DummyProvider("dummy"), mcp_servers={"dummy": {"command": "python"}})
+    with pytest.raises(RuntimeError, match="Agent.close\\(\\) cannot be called from a running event loop"):
+        agent.close()
+

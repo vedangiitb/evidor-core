@@ -1,25 +1,15 @@
-"""Provider-neutral tool abstraction and decorator."""
-
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 import inspect
 from typing import Any
 
 from evidor.utils import (
-    TYPE_MAPPING,
     generate_parameters_schema,
     parse_docstring,
-    python_type_to_json_type,
-    run_coroutine_sync,
-    run_with_timeout,
+    run_async_in_sync,
     run_with_timeout_async,
 )
-
-# Backwards-compatible aliases for internal helpers
-_TYPE_MAPPING = TYPE_MAPPING
-_parse_docstring = parse_docstring
-_python_type_to_json_type = python_type_to_json_type
-_generate_parameters_schema = generate_parameters_schema
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,35 +45,28 @@ class Tool:
         return f"Tool '{self.name}' timed out after {self.timeout}s"
 
     def execute(self, **kwargs: Any) -> Any:
-        """Execute the tool function with the provided keyword arguments.
+        """Execute the tool function synchronously with the provided keyword arguments.
 
         Synchronously executes both standard and coroutine functions.
         Enforces self.timeout if configured.
         """
-        def _invoke() -> Any:
-            if self.is_async:
-                return self._run_coroutine_factory(lambda: self.func(**kwargs))
-            return self.func(**kwargs)
-
-        return run_with_timeout(_invoke, self.timeout, self._timeout_message())
+        return run_async_in_sync(
+            lambda: self.execute_async(**kwargs),
+            error_message="Async tool cannot be executed synchronously from a running event loop. Use 'await tool.execute_async()' instead.",
+        )
 
     async def execute_async(self, **kwargs: Any) -> Any:
         """Execute the tool function asynchronously, applying timeout if configured."""
         async def _invoke() -> Any:
             if self.is_async:
                 return await self.func(**kwargs)
-            return self.func(**kwargs)
+            return await asyncio.to_thread(self.func, **kwargs)
 
         return await run_with_timeout_async(_invoke(), self.timeout, self._timeout_message())
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Invoke the underlying function directly."""
         return self.func(*args, **kwargs)
-
-    @staticmethod
-    def _run_coroutine_factory(factory: Callable[[], Any]) -> Any:
-        """Run an asyncio coroutine factory in the current thread or a worker thread with context preserved."""
-        return run_coroutine_sync(factory)
 
 
 def tool(

@@ -366,7 +366,7 @@ If a tool times out, raises an error, or if the model emits malformed JSON argum
 
 ### Native Asynchronous Conversations (`send_async`)
 
-In async environments (like FastAPI, Tornado, or asynchronous data pipelines), use `await agent.send_async(...)`. When called, all async tools execute natively on the caller's event loop without thread transitions, cleanly preserving shared connection pools, locks, and `contextvars`:
+Evidor is built on an **async-first execution engine**. In async environments (like FastAPI, Starlette, Tornado, or asynchronous data pipelines), use `await agent.send_async(...)`. When called, all async tools execute natively on the caller's event loop without thread transitions, cleanly preserving shared connection pools, locks, and `contextvars`:
 
 ```python
 import asyncio
@@ -377,12 +377,19 @@ async def lookup_account(account_id: str) -> dict:
     return {"id": account_id, "status": "active"}
 
 async def main() -> None:
-    agent = Agent(OpenAIProvider(model="gpt-4.1-mini"), tools=[lookup_account])
-    response = await agent.send_async("Check status for account 1234")
-    print(response.text)
+    async with Agent(OpenAIProvider(model="gpt-4.1-mini"), tools=[lookup_account]) as agent:
+        response = await agent.send_async("Check status for account 1234")
+        print(response.text)
 
 asyncio.run(main())
 ```
+
+#### Key Async-First Features
+
+- **Concurrent Multi-Tool Execution**: When an LLM emits multiple tool calls in a single turn, Evidor executes them **concurrently via `asyncio.gather()`**. This significantly reduces turn latency for complex agent workflows.
+- **Native Async Provider Calls**: All bundled providers (`OpenAIProvider`, `AnthropicProvider`, `GeminiProvider`) implement native `generate_async()` using modern asynchronous client libraries.
+- **Event Loop Guards (`RuntimeError`)**: Synchronous methods (`agent.send()`, `agent.close()`, `tool.execute()`, `mcp.get_tools()`, etc.) are protected with event loop guards. Calling them from inside an active event loop raises an explicit `RuntimeError` immediately rather than hanging the loop, directing you to use `await agent.send_async()`, `await agent.close_async()`, etc.
+- **Non-blocking Teardown**: Clean up agents and background MCP sessions asynchronously using `await agent.close_async()` or the `async with agent:` context manager.
 
 ### Manual Tool Definition
 
@@ -685,6 +692,10 @@ async def main():
 
 asyncio.run(main())
 ```
+
+> [!TIP]
+> **Matching Synchronous & Asynchronous Methods:**  
+> `MCPClient` and `MCPSession` provide matching synchronous (`connect()`, `get_tools()`, `call_tool()`, `close()`) and asynchronous (`connect_async()`, `get_tools_async()`, `call_tool_async()`, `close_async()`) methods. Synchronous methods are protected with loop guards to prevent blocking the event loop; when called inside an event loop, they raise a `RuntimeError` prompting you to `await` the corresponding `_async` method.
 
 ## Telemetry & Observability
 
@@ -993,22 +1004,25 @@ Evidor is in active beta and embraces breaking changes to maintain clean, modern
 
 ### Custom Providers
 
-`Agent` depends only on the `ModelProvider` protocol. To support another LLM or backend, implement the `generate(request)` method:
+`Agent` depends on the `ModelProvider` protocol. You can implement either synchronous `generate(request)`, native asynchronous `generate_async(request)`, or both:
+
+- **Async-First**: If you implement `generate_async(request)`, the synchronous `generate(request)` is automatically derived for you via `run_async_in_sync()`.
+- **Sync Fallback**: If you only implement `generate(request)`, `generate_async(request)` automatically offloads execution using `asyncio.to_thread()` without blocking the caller's event loop.
 
 ```python
 from evidor import GenerationRequest, GenerationResponse, ModelProvider
 
-class CustomProvider:
+class CustomAsyncProvider(ModelProvider):
     def __init__(self, model: str = "custom-model") -> None:
         self.model = model
 
-    def with_model(self, model: str) -> "CustomProvider":
-        return CustomProvider(model=model)
+    def with_model(self, model: str) -> "CustomAsyncProvider":
+        return CustomAsyncProvider(model=model)
 
-    def generate(self, request: GenerationRequest) -> GenerationResponse:
+    async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+        # Asynchronously call your custom model backend
         prompt_text = request.prompt
-        # or iterate over request.messages
-        return GenerationResponse(text="Custom response", model=self.model)
+        return GenerationResponse(text="Custom async response", model=self.model)
 ```
 
 ### Optional Extras Summary

@@ -13,6 +13,7 @@ from ...telemetry import (
     emit_event,
     trace_scope,
 )
+from ...utils import run_async_in_sync
 from .tools import Tool, tool
 from .utils import format_tool_error, serialize_tool_result
 
@@ -37,67 +38,14 @@ class ToolExecutor:
         self._by_name = {configured.name: configured for configured in self.tools}
 
     def execute(self, call: ToolCall) -> str:
-        ctx = create_child_trace_context()
-        emit_event(
-            ToolCallStartEvent(
-                trace_context=ctx,
-                tool_name=call.name,
-                tool_call_id=call.id,
-                arguments=call.arguments,
-            )
+        """Execute a tool call synchronously."""
+        return run_async_in_sync(
+            lambda: self.execute_async(call),
+            error_message=(
+                "ToolExecutor.execute() cannot be called from a running event loop. "
+                "Use 'await executor.execute_async()' instead."
+            ),
         )
-        t0 = time.perf_counter()
-        with trace_scope(ctx):
-            target = self._resolve(call)
-            if isinstance(target, str):
-                duration_ms = (time.perf_counter() - t0) * 1000
-                emit_event(
-                    ToolCallEndEvent(
-                        trace_context=ctx,
-                        tool_name=call.name,
-                        tool_call_id=call.id,
-                        status="error",
-                        duration_ms=duration_ms,
-                        error=target,
-                    )
-                )
-                return target
-            try:
-                raw_result = target.execute(**call.arguments)
-                result = serialize_tool_result(raw_result)
-                duration_ms = (time.perf_counter() - t0) * 1000
-                emit_event(
-                    ToolCallEndEvent(
-                        trace_context=ctx,
-                        tool_name=call.name,
-                        tool_call_id=call.id,
-                        status="ok",
-                        duration_ms=duration_ms,
-                        result=result,
-                    )
-                )
-                return result
-            except Exception as err:
-                duration_ms = (time.perf_counter() - t0) * 1000
-                err_msg = str(err)
-                emit_event(
-                    ToolCallEndEvent(
-                        trace_context=ctx,
-                        tool_name=call.name,
-                        tool_call_id=call.id,
-                        status="error",
-                        duration_ms=duration_ms,
-                        error=err_msg,
-                    )
-                )
-                emit_event(
-                    ErrorEvent(
-                        trace_context=ctx,
-                        error_type=type(err).__name__,
-                        message=err_msg,
-                    )
-                )
-                return format_tool_error(call.name, err)
 
     async def execute_async(self, call: ToolCall) -> str:
         ctx = create_child_trace_context()

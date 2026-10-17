@@ -1,10 +1,10 @@
-"""The port and base class implemented by model-provider adapters."""
-
+import asyncio
 import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from evidor.models import GenerationRequest, GenerationResponse
+from evidor.utils import run_async_in_sync
 
 if TYPE_CHECKING:
     from evidor.tools.tool import Tool
@@ -15,7 +15,11 @@ class ModelProvider(Protocol):
     """Produces one normalized response from one normalized request."""
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
-        """Generate a response for the request."""
+        """Generate a response for the request synchronously."""
+        ...
+
+    async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+        """Generate a response for the request asynchronously."""
         ...
 
     def with_model(self, model: str) -> "ModelProvider":
@@ -55,6 +59,22 @@ class BaseProvider:
     def compact_threshold(self) -> int | None:
         """The token threshold for provider-native context compaction, if configured."""
         return getattr(self, "_compact_threshold", None)
+
+    async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+        """Generate a response asynchronously. Subclasses should override this natively."""
+        if type(self).generate != BaseProvider.generate:
+            return await asyncio.to_thread(self.generate, request)
+        raise NotImplementedError(f"{self.__class__.__name__} must implement generate_async")
+
+    def generate(self, request: GenerationRequest) -> GenerationResponse:
+        """Generate a response synchronously. Dispatches to generate_async via run_async_in_sync."""
+        return run_async_in_sync(
+            lambda: self.generate_async(request),
+            error_message=(
+                f"{self.__class__.__name__}.generate() cannot be called from a running event loop. "
+                "Use 'await provider.generate_async()' instead."
+            ),
+        )
 
 
 def extract_system_prompt(request: GenerationRequest) -> str:
