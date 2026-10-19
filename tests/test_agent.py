@@ -526,3 +526,57 @@ def test_providers_generate_raise_inside_running_event_loop() -> None:
 
     asyncio.run(_run())
 
+
+def test_agent_sync_send_reuses_background_loop() -> None:
+    captured_loops: list[asyncio.AbstractEventLoop] = []
+
+    class LoopTrackingProvider:
+        def __init__(self) -> None:
+            self.model = "tracker"
+
+        def with_model(self, model: str) -> "LoopTrackingProvider":
+            return self
+
+        async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+            captured_loops.append(asyncio.get_running_loop())
+            return GenerationResponse(text="tracked", model="tracker")
+
+    agent = Agent(LoopTrackingProvider())
+
+    assert agent._background_loop is None
+
+    agent.send("turn 1")
+    agent.send("turn 2")
+
+    # Both turns ran on the exact same persistent background event loop
+    assert len(captured_loops) == 2
+    assert captured_loops[0] is captured_loops[1]
+    assert agent._background_loop is not None
+    assert agent._background_loop.is_running
+
+    agent.close()
+    assert agent._background_loop is None
+
+
+def test_background_event_loop_lifecycle() -> None:
+    from evidor.utils import BackgroundEventLoop
+
+    bg = BackgroundEventLoop(name="TestLoop")
+    assert not bg.is_running
+
+    async def add(a: int, b: int) -> int:
+        return a + b
+
+    res1 = bg.run(lambda: add(1, 2))
+    assert res1 == 3
+    assert bg.is_running
+
+    res2 = bg.run(lambda: add(3, 4))
+    assert res2 == 7
+
+    bg.close()
+    assert not bg.is_running
+
+    with pytest.raises(RuntimeError, match="BackgroundEventLoop has been closed"):
+        bg.run(lambda: add(5, 6))
+

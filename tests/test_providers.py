@@ -1119,5 +1119,86 @@ def test_anthropic_provider_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
     }
 
 
+def test_gemini_client_reuse_and_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+    mock_client = MagicMock()
+    mock_response = MagicMock(interaction=MagicMock(id="int_1", model="gemini-3.8-flash", steps=[]))
+    mock_client.interactions.create.return_value = mock_response
+    mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-3.8-flash", api_key="gem_key")
+    req = GenerationRequest(prompt="hello")
+
+    provider.generate(req)
+    provider.generate(req)
+
+    # Client is initialized only once across multiple generation calls
+    assert mock_genai.Client.call_count == 1
+    assert mock_client.interactions.create.call_count == 2
+
+    # with_model preserves the cached client
+    new_provider = provider.with_model("gemini-3.5-flash-lite")
+    assert new_provider._client is mock_client
+
+    provider.close()
+    assert provider._client is None
+
+
+def test_openai_client_reuse_and_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_openai = types.ModuleType("openai")
+    mock_client = MagicMock()
+    mock_response = MagicMock(output_text="Text")
+    mock_client.responses.create.return_value = mock_response
+    mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    provider = OpenAIProvider(model="gpt-4.1-mini", api_key="key")
+    req = GenerationRequest(prompt="hello")
+
+    provider.generate(req)
+    provider.generate(req)
+
+    # Sync client is reused
+    assert mock_openai.OpenAI.call_count == 1
+    assert mock_client.responses.create.call_count == 2
+
+    new_provider = provider.with_model("gpt-6-astra")
+    assert new_provider._sync_client is mock_client
+
+    provider.close()
+    assert provider._sync_client is None
+
+
+def test_anthropic_client_reuse_and_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+    mock_response = MagicMock(content=[MagicMock(type="text", text="Hello")], model="claude-3-5")
+    mock_client.messages.create.return_value = mock_response
+    mock_anthropic.Anthropic = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(model="claude-3-5", api_key="key")
+    req = GenerationRequest(prompt="hello")
+
+    provider.generate(req)
+    provider.generate(req)
+
+    # Sync client is reused
+    assert mock_anthropic.Anthropic.call_count == 1
+    assert mock_client.messages.create.call_count == 2
+
+    new_provider = provider.with_model("claude-3-7-sonnet")
+    assert new_provider._sync_client is mock_client
+
+    provider.close()
+    assert provider._sync_client is None
+
+
 
 
