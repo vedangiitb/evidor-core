@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.9.0-dev.2 (2026-10-19)
+
+### Bug Fixes
+
+- **agent**: Fixing client caching issues
+  ([`cd434eb`](https://github.com/vedangiitb/evidor-core/commit/cd434eb268468e62f3d86cb08fcd0568a0be3a3a))
+
+
 ## v1.9.0-dev.1 (2026-10-19)
 
 ### Documentation
