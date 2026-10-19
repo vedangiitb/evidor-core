@@ -47,6 +47,8 @@ class AnthropicProvider(BaseProvider):
         self._enable_prompt_caching = enable_prompt_caching
         self._compact_threshold = compact_threshold
         self._compact_instructions = compact_instructions
+        self._sync_client: Any = None
+        self._default_async_client: Any = None
 
         if max_tokens is None:
             if self._thinking and self._thinking.enabled and self._thinking.budget_tokens:
@@ -72,7 +74,7 @@ class AnthropicProvider(BaseProvider):
         return self._compact_instructions
 
     def with_model(self, model: str) -> "AnthropicProvider":
-        return AnthropicProvider(
+        provider = AnthropicProvider(
             model=model,
             api_key=self._api_key,
             max_tokens=self._max_tokens,
@@ -81,6 +83,13 @@ class AnthropicProvider(BaseProvider):
             compact_threshold=self._compact_threshold,
             compact_instructions=self._compact_instructions,
         )
+        if getattr(self, "_sync_client", None) is not None:
+            provider._sync_client = self._sync_client
+        if hasattr(self, "_async_clients"):
+            provider._async_clients = self._async_clients
+        if getattr(self, "_default_async_client", None) is not None:
+            provider._default_async_client = self._default_async_client
+        return provider
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
         check_sync_allowed(
@@ -107,13 +116,44 @@ class AnthropicProvider(BaseProvider):
             return self._parse_response(response_msg)
         return await asyncio.to_thread(self.generate, request)
 
+    def close(self) -> None:
+        if getattr(self, "_sync_client", None) is not None:
+            try:
+                self._sync_client.close()
+            except Exception:
+                pass
+            self._sync_client = None
+
+    async def close_async(self) -> None:
+        self.close()
+        if hasattr(self, "_async_clients"):
+            for client in list(self._async_clients.values()):
+                try:
+                    await client.close()
+                except Exception:
+                    pass
+            self._async_clients.clear()
+        if getattr(self, "_default_async_client", None) is not None:
+            try:
+                await self._default_async_client.close()
+            except Exception:
+                pass
+            self._default_async_client = None
+
     def _get_client(self) -> Any:
+        if getattr(self, "_sync_client", None) is not None:
+            is_closed = getattr(self._sync_client, "is_closed", False)
+            if not (isinstance(is_closed, bool) and is_closed):
+                return self._sync_client
+
         try:
             from anthropic import Anthropic
         except ImportError as error:
             raise ImportError("Install Anthropic support with: pip install 'evidor[anthropic]'") from error
 
-        return Anthropic(api_key=self._api_key)
+        client = Anthropic(api_key=self._api_key)
+        self._sync_client = client
+        return client
 
     def _get_async_client(self) -> Any:
         try:
@@ -130,11 +170,16 @@ class AnthropicProvider(BaseProvider):
             if not hasattr(self, "_async_clients"):
                 self._async_clients: dict[asyncio.AbstractEventLoop, Any] = {}
             client = self._async_clients.get(loop)
-            if client is None or getattr(client, "is_closed", lambda: False)():
+            is_closed = getattr(client, "is_closed", False) if client is not None else False
+            if client is None or (isinstance(is_closed, bool) and is_closed):
                 client = AsyncAnthropic(api_key=self._api_key)
                 self._async_clients[loop] = client
         else:
-            client = AsyncAnthropic(api_key=self._api_key)
+            default_client = getattr(self, "_default_async_client", None)
+            is_closed = getattr(default_client, "is_closed", False) if default_client is not None else False
+            if default_client is None or (isinstance(is_closed, bool) and is_closed):
+                self._default_async_client = AsyncAnthropic(api_key=self._api_key)
+            client = self._default_async_client
         return client
 
     def _build_request_payload(self, request: GenerationRequest) -> dict[str, Any]:

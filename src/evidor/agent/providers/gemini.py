@@ -135,6 +135,8 @@ class GeminiProvider(BaseProvider):
 
         super().__init__(model=model, api_key=api_key, thinking=thinking_cfg)
         self._cached_content = cached_content
+        self._client: Any = None
+        self._types: Any = None
 
     @property
     def context_strategy(self) -> str:
@@ -145,12 +147,16 @@ class GeminiProvider(BaseProvider):
         return self._cached_content
 
     def with_model(self, model: str) -> "GeminiProvider":
-        return GeminiProvider(
+        provider = GeminiProvider(
             model=model,
             api_key=self._api_key,
             cached_content=self._cached_content,
             thinking=self._thinking,
         )
+        if self._client is not None:
+            provider._client = self._client
+            provider._types = self._types
+        return provider
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
         check_sync_allowed(
@@ -171,7 +177,32 @@ class GeminiProvider(BaseProvider):
             return self._parse_response(response)
         return await asyncio.to_thread(self.generate, request)
 
+    def close(self) -> None:
+        if getattr(self, "_client", None) is not None:
+            close_fn = getattr(self._client, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+            self._client = None
+            self._types = None
+
+    async def close_async(self) -> None:
+        if getattr(self, "_client", None) is not None:
+            aio_client = getattr(self._client, "aio", None)
+            close_async_fn = getattr(aio_client, "close", None)
+            if callable(close_async_fn):
+                try:
+                    await close_async_fn()
+                except Exception:
+                    pass
+            self.close()
+
     def _get_client_and_types(self) -> tuple[Any, Any]:
+        if getattr(self, "_client", None) is not None and getattr(self, "_types", None) is not None:
+            return self._client, self._types
+
         try:
             from google import genai
             from google.genai import types
@@ -184,7 +215,9 @@ class GeminiProvider(BaseProvider):
                 "Modern Google GenAI Interactions API (client.interactions.create) is required. "
                 "Please update google-genai to the latest version."
             )
-        return client, types
+        self._client = client
+        self._types = types
+        return self._client, self._types
 
     def _build_request_payload(self, request: GenerationRequest, types: Any) -> dict[str, Any]:
         system_prompt = extract_system_prompt(request)

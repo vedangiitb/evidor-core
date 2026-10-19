@@ -65,6 +65,8 @@ class OpenAIProvider(BaseProvider):
 
         super().__init__(model=model, api_key=api_key, thinking=thinking_cfg)
         self._compact_threshold = compact_threshold
+        self._sync_client: Any = None
+        self._default_async_client: Any = None
 
     @property
     def context_strategy(self) -> str:
@@ -75,12 +77,19 @@ class OpenAIProvider(BaseProvider):
         return self._compact_threshold
 
     def with_model(self, model: str) -> "OpenAIProvider":
-        return OpenAIProvider(
+        provider = OpenAIProvider(
             model=model,
             api_key=self._api_key,
             thinking=self._thinking,
             compact_threshold=self._compact_threshold,
         )
+        if getattr(self, "_sync_client", None) is not None:
+            provider._sync_client = self._sync_client
+        if hasattr(self, "_async_clients"):
+            provider._async_clients = self._async_clients
+        if getattr(self, "_default_async_client", None) is not None:
+            provider._default_async_client = self._default_async_client
+        return provider
 
     def generate(self, request: GenerationRequest) -> GenerationResponse:
         check_sync_allowed(
@@ -101,7 +110,36 @@ class OpenAIProvider(BaseProvider):
             return self._parse_response(response)
         return await asyncio.to_thread(self.generate, request)
 
+    def close(self) -> None:
+        if getattr(self, "_sync_client", None) is not None:
+            try:
+                self._sync_client.close()
+            except Exception:
+                pass
+            self._sync_client = None
+
+    async def close_async(self) -> None:
+        self.close()
+        if hasattr(self, "_async_clients"):
+            for client in list(self._async_clients.values()):
+                try:
+                    await client.close()
+                except Exception:
+                    pass
+            self._async_clients.clear()
+        if getattr(self, "_default_async_client", None) is not None:
+            try:
+                await self._default_async_client.close()
+            except Exception:
+                pass
+            self._default_async_client = None
+
     def _get_client(self) -> Any:
+        if getattr(self, "_sync_client", None) is not None:
+            is_closed = getattr(self._sync_client, "is_closed", False)
+            if not (isinstance(is_closed, bool) and is_closed):
+                return self._sync_client
+
         try:
             from openai import OpenAI
         except ImportError as error:
@@ -113,6 +151,7 @@ class OpenAIProvider(BaseProvider):
                 "Modern OpenAI Responses API (client.responses.create) is required. "
                 "Please update openai to the latest version."
             )
+        self._sync_client = client
         return client
 
     def _get_async_client(self) -> Any:
@@ -130,11 +169,16 @@ class OpenAIProvider(BaseProvider):
             if not hasattr(self, "_async_clients"):
                 self._async_clients: dict[asyncio.AbstractEventLoop, Any] = {}
             client = self._async_clients.get(loop)
-            if client is None or getattr(client, "is_closed", lambda: False)():
+            is_closed = getattr(client, "is_closed", False) if client is not None else False
+            if client is None or (isinstance(is_closed, bool) and is_closed):
                 client = AsyncOpenAI(api_key=self._api_key)
                 self._async_clients[loop] = client
         else:
-            client = AsyncOpenAI(api_key=self._api_key)
+            default_client = getattr(self, "_default_async_client", None)
+            is_closed = getattr(default_client, "is_closed", False) if default_client is not None else False
+            if default_client is None or (isinstance(is_closed, bool) and is_closed):
+                self._default_async_client = AsyncOpenAI(api_key=self._api_key)
+            client = self._default_async_client
 
         if not hasattr(client, "responses") or not hasattr(client.responses, "create"):
             return None

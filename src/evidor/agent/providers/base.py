@@ -76,6 +76,14 @@ class BaseProvider:
             ),
         )
 
+    def close(self) -> None:
+        """Close any cached synchronous client sessions."""
+        pass
+
+    async def close_async(self) -> None:
+        """Close any cached asynchronous or synchronous client sessions."""
+        self.close()
+
 
 def extract_system_prompt(request: GenerationRequest) -> str:
     """Extract and combine system instructions from request.system and system messages."""
