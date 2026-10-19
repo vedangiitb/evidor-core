@@ -18,6 +18,138 @@ def check_sync_allowed(error_message: str | None = None) -> None:
     raise RuntimeError(msg)
 
 
+class BackgroundEventLoop:
+    """Manages a persistent asyncio event loop running on a dedicated background daemon thread.
+
+    Provides coroutine bridging across repeated synchronous calls without destroying
+    underlying connection pools, SSL contexts, or event loops between invocations.
+    Compatible with Python 3.10+.
+    """
+
+    def __init__(self, name: str = "EvidorBackgroundLoop") -> None:
+        import contextvars
+        import threading
+
+        self._name = name
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._closed = False
+
+    @property
+    def is_running(self) -> bool:
+        """Return True if the background loop thread is active and running."""
+        with self._lock:
+            return self._loop is not None and self._loop.is_running() and not self._closed
+
+    def _ensure_running(self) -> asyncio.AbstractEventLoop:
+        import threading
+
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("BackgroundEventLoop has been closed.")
+
+            if self._loop is not None and self._loop.is_running():
+                return self._loop
+
+            loop = asyncio.new_event_loop()
+            started_event = threading.Event()
+
+            def _thread_target() -> None:
+                asyncio.set_event_loop(loop)
+                started_event.set()
+                try:
+                    loop.run_forever()
+                finally:
+                    try:
+                        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                        for task in pending:
+                            task.cancel()
+                        if pending:
+                            loop.run_until_complete(
+                                asyncio.gather(*pending, return_exceptions=True)
+                            )
+                    except Exception:
+                        pass
+                    try:
+                        loop.close()
+                    except Exception:
+                        pass
+
+            thread = threading.Thread(
+                target=_thread_target,
+                name=f"{self._name}-{threading.get_ident()}",
+                daemon=True,
+            )
+            thread.start()
+            started_event.wait()
+
+            self._loop = loop
+            self._thread = thread
+            return self._loop
+
+    def run(
+        self,
+        target: Any,
+        error_message: str | None = None,
+    ) -> Any:
+        """Run an async coroutine or coroutine factory synchronously on the background loop.
+
+        Raises RuntimeError if called from a running event loop on the current thread.
+        """
+        import contextvars
+
+        check_sync_allowed(error_message)
+        loop = self._ensure_running()
+
+        ctx = contextvars.copy_context()
+
+        async def _entrypoint() -> Any:
+            coro = target() if callable(target) else target
+            return await coro
+
+        future = asyncio.run_coroutine_threadsafe(ctx.run(_entrypoint), loop)
+        return future.result()
+
+    @property
+    def loop(self) -> asyncio.AbstractEventLoop | None:
+        """Return the active event loop, if running."""
+        with self._lock:
+            return self._loop
+
+    def close(self, timeout: float = 5.0) -> None:
+        """Stop the background event loop and join the worker thread."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            loop = self._loop
+            thread = self._thread
+            self._loop = None
+            self._thread = None
+
+        if loop is not None and loop.is_running():
+            import threading
+
+            def _stop_loop() -> None:
+                for task in asyncio.all_tasks(loop):
+                    if not task.done():
+                        task.cancel()
+                loop.stop()
+
+            loop.call_soon_threadsafe(_stop_loop)
+            if thread is not None and thread.is_alive() and thread != threading.current_thread():
+                thread.join(timeout=timeout)
+                if thread.is_alive():
+                    import warnings
+
+                    warnings.warn(
+                        f"Background event loop thread {thread.name} did not terminate within {timeout}s timeout.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+
+
 def run_async_in_sync(
     target: Any,
     error_message: str | None = None,

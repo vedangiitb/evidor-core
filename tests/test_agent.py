@@ -1,4 +1,6 @@
 import asyncio
+import threading
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from evidor import (
@@ -525,4 +527,170 @@ def test_providers_generate_raise_inside_running_event_loop() -> None:
             gemini_p.generate(req)
 
     asyncio.run(_run())
+
+
+def test_agent_sync_send_reuses_background_loop() -> None:
+    captured_loops: list[asyncio.AbstractEventLoop] = []
+
+    class LoopTrackingProvider:
+        def __init__(self) -> None:
+            self.model = "tracker"
+
+        def with_model(self, model: str) -> "LoopTrackingProvider":
+            return self
+
+        async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+            captured_loops.append(asyncio.get_running_loop())
+            return GenerationResponse(text="tracked", model="tracker")
+
+    agent = Agent(LoopTrackingProvider())
+
+    assert agent._background_loop is None
+
+    agent.send("turn 1")
+    agent.send("turn 2")
+
+    # Both turns ran on the exact same persistent background event loop
+    assert len(captured_loops) == 2
+    assert captured_loops[0] is captured_loops[1]
+    assert agent._background_loop is not None
+    assert agent._background_loop.is_running
+
+    agent.close()
+    assert agent._background_loop is None
+
+
+def test_background_event_loop_lifecycle() -> None:
+    from evidor.utils import BackgroundEventLoop
+
+    bg = BackgroundEventLoop(name="TestLoop")
+    assert not bg.is_running
+
+    async def add(a: int, b: int) -> int:
+        return a + b
+
+    res1 = bg.run(lambda: add(1, 2))
+    assert res1 == 3
+    assert bg.is_running
+
+    res2 = bg.run(lambda: add(3, 4))
+    assert res2 == 7
+
+    bg.close()
+    assert not bg.is_running
+
+    with pytest.raises(RuntimeError, match="BackgroundEventLoop has been closed"):
+        bg.run(lambda: add(5, 6))
+
+
+def test_agent_send_then_close_async() -> None:
+    captured_gen_loop = []
+    captured_close_loop = []
+
+    class RealLoopProvider(FakeProvider):
+        async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+            captured_gen_loop.append(asyncio.get_running_loop())
+            return await super().generate_async(request)
+
+        async def close_async(self) -> None:
+            captured_close_loop.append(asyncio.get_running_loop())
+
+    provider = RealLoopProvider(model="test")
+    provider.close = MagicMock()
+
+    agent = Agent(provider)
+    res = agent.send("hello")
+    assert res.text == "[test] hello"
+    assert agent._background_loop is not None
+    assert agent._background_loop.is_running
+    bg_loop = agent._background_loop.loop
+    assert len(captured_gen_loop) == 1
+    assert captured_gen_loop[0] is bg_loop
+
+    caller_loops = []
+
+    async def _close():
+        caller_loops.append(asyncio.get_running_loop())
+        await agent.close_async()
+
+    asyncio.run(_close())
+
+    assert agent._background_loop is None
+    # Caller loop is different from background loop
+    assert caller_loops[0] is not bg_loop
+    # Provider's close_async ran on the background loop that owned the resources!
+    assert len(captured_close_loop) == 1
+    assert captured_close_loop[0] is bg_loop
+    provider.close.assert_called_once()
+
+
+def test_agent_telemetry_flushed_and_closed_exactly_once() -> None:
+    from evidor.telemetry import TelemetrySink
+
+    sink = MagicMock(spec=TelemetrySink)
+    provider = FakeProvider(model="test")
+    agent = Agent(provider, telemetry=sink)
+    assert agent._owns_telemetry is True
+
+    agent.close()
+
+    assert agent._owns_telemetry is False
+    assert agent._telemetry._closed is True
+
+
+def test_agent_cleanup_resilient_to_mcp_failure() -> None:
+    provider = FakeProvider(model="test")
+    provider.close_async = AsyncMock()
+    provider.close = MagicMock()
+
+    mock_mcp = MagicMock()
+    mock_mcp.close_async = AsyncMock(side_effect=RuntimeError("MCP crash during shutdown"))
+
+    agent = Agent(provider, mcp_client=mock_mcp)
+    agent.close()
+
+    # Despite MCP failing, provider resources are still cleaned up
+    mock_mcp.close_async.assert_awaited_once()
+    assert agent._mcp_tools_synced is False
+    provider.close_async.assert_awaited_once()
+    provider.close.assert_called_once()
+
+
+def test_agent_close_without_background_loop_closes_async_resources() -> None:
+    provider = FakeProvider(model="test")
+    provider.close_async = AsyncMock()
+    provider.close = MagicMock()
+
+    agent = Agent(provider)
+    assert agent._background_loop is None
+
+    agent.close()
+
+    provider.close_async.assert_awaited_once()
+    provider.close.assert_called_once()
+
+
+def test_agent_concurrent_sync_send() -> None:
+    provider = FakeProvider(model="concurrent")
+    agent = Agent(provider)
+
+    errors = []
+
+    def _worker(msg: str):
+        try:
+            agent.send(msg)
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=_worker, args=(f"msg_{i}",)) for i in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    # 10 user messages and 10 assistant messages
+    assert len(agent.messages) == 20
+    agent.close()
+
 

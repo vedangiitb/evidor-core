@@ -5,7 +5,13 @@ from typing import Any
 
 from evidor.models import GenerationRequest, GenerationResponse, Message, ToolCall
 from evidor.utils import check_sync_allowed
-from .base import BaseProvider, build_token_usage, safe_parse_tool_arguments, sort_tools
+from .base import (
+    BaseProvider,
+    build_token_usage,
+    is_client_closed,
+    safe_parse_tool_arguments,
+    sort_tools,
+)
 
 
 def _extract_reasoning_texts(val: Any) -> list[str]:
@@ -65,6 +71,8 @@ class OpenAIProvider(BaseProvider):
 
         super().__init__(model=model, api_key=api_key, thinking=thinking_cfg)
         self._compact_threshold = compact_threshold
+        self._sync_client: Any = None
+        self._default_async_client: Any = None
 
     @property
     def context_strategy(self) -> str:
@@ -101,19 +109,67 @@ class OpenAIProvider(BaseProvider):
             return self._parse_response(response)
         return await asyncio.to_thread(self.generate, request)
 
-    def _get_client(self) -> Any:
-        try:
-            from openai import OpenAI
-        except ImportError as error:
-            raise ImportError("Install OpenAI support with: pip install 'evidor[openai]'") from error
+    def close(self) -> None:
+        with self._lock:
+            client = self._sync_client
+            self._sync_client = None
 
-        client = OpenAI(api_key=self._api_key)
-        if not hasattr(client, "responses") or not hasattr(client.responses, "create"):
-            raise RuntimeError(
-                "Modern OpenAI Responses API (client.responses.create) is required. "
-                "Please update openai to the latest version."
-            )
-        return client
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    async def close_async(self) -> None:
+        self.close()
+        current_loop = None
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
+        with self._lock:
+            clients_to_close = list(self._async_clients.items())
+            self._async_clients.clear()
+            default_client = self._default_async_client
+            self._default_async_client = None
+
+        for loop, client in clients_to_close:
+            try:
+                if loop is current_loop:
+                    await client.close()
+                elif loop.is_running():
+                    fut = asyncio.run_coroutine_threadsafe(client.close(), loop)
+                    await asyncio.wrap_future(fut)
+                else:
+                    await client.close()
+            except Exception:
+                pass
+
+        if default_client is not None:
+            try:
+                await default_client.close()
+            except Exception:
+                pass
+
+    def _get_client(self) -> Any:
+        with self._lock:
+            if not is_client_closed(self._sync_client):
+                return self._sync_client
+
+            try:
+                from openai import OpenAI
+            except ImportError as error:
+                raise ImportError("Install OpenAI support with: pip install 'evidor[openai]'") from error
+
+            client = OpenAI(api_key=self._api_key)
+            if not hasattr(client, "responses") or not hasattr(client.responses, "create"):
+                raise RuntimeError(
+                    "Modern OpenAI Responses API (client.responses.create) is required. "
+                    "Please update openai to the latest version."
+                )
+            self._sync_client = client
+            return client
 
     def _get_async_client(self) -> Any:
         try:
@@ -126,15 +182,24 @@ class OpenAIProvider(BaseProvider):
         except RuntimeError:
             loop = None
 
-        if loop is not None:
+        with self._lock:
             if not hasattr(self, "_async_clients"):
                 self._async_clients: dict[asyncio.AbstractEventLoop, Any] = {}
-            client = self._async_clients.get(loop)
-            if client is None or getattr(client, "is_closed", lambda: False)():
-                client = AsyncOpenAI(api_key=self._api_key)
-                self._async_clients[loop] = client
-        else:
-            client = AsyncOpenAI(api_key=self._api_key)
+
+            # Prune closed loops
+            dead_loops = [l for l in self._async_clients if l.is_closed()]
+            for l in dead_loops:
+                del self._async_clients[l]
+
+            if loop is not None:
+                client = self._async_clients.get(loop)
+                if is_client_closed(client):
+                    client = AsyncOpenAI(api_key=self._api_key)
+                    self._async_clients[loop] = client
+            else:
+                if is_client_closed(self._default_async_client):
+                    self._default_async_client = AsyncOpenAI(api_key=self._api_key)
+                client = self._default_async_client
 
         if not hasattr(client, "responses") or not hasattr(client.responses, "create"):
             return None

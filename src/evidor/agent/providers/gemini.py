@@ -135,6 +135,8 @@ class GeminiProvider(BaseProvider):
 
         super().__init__(model=model, api_key=api_key, thinking=thinking_cfg)
         self._cached_content = cached_content
+        self._client: Any = None
+        self._types: Any = None
 
     @property
     def context_strategy(self) -> str:
@@ -171,20 +173,61 @@ class GeminiProvider(BaseProvider):
             return self._parse_response(response)
         return await asyncio.to_thread(self.generate, request)
 
-    def _get_client_and_types(self) -> tuple[Any, Any]:
-        try:
-            from google import genai
-            from google.genai import types
-        except ImportError as error:
-            raise ImportError("Install Gemini support with: pip install 'evidor[gemini]'") from error
+    def close(self) -> None:
+        with self._lock:
+            client = self._client
+            self._client = None
+            self._types = None
 
-        client = genai.Client(api_key=self._api_key)
-        if not hasattr(client, "interactions") or not hasattr(client.interactions, "create"):
-            raise RuntimeError(
-                "Modern Google GenAI Interactions API (client.interactions.create) is required. "
-                "Please update google-genai to the latest version."
-            )
-        return client, types
+        if client is not None:
+            close_fn = getattr(client, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+
+    async def close_async(self) -> None:
+        with self._lock:
+            client = self._client
+            self._client = None
+            self._types = None
+
+        if client is not None:
+            aio_client = getattr(client, "aio", None)
+            close_async_fn = getattr(aio_client, "close", None)
+            if callable(close_async_fn):
+                try:
+                    await close_async_fn()
+                except Exception:
+                    pass
+            close_fn = getattr(client, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+
+    def _get_client_and_types(self) -> tuple[Any, Any]:
+        with self._lock:
+            if getattr(self, "_client", None) is not None and getattr(self, "_types", None) is not None:
+                return self._client, self._types
+
+            try:
+                from google import genai
+                from google.genai import types
+            except ImportError as error:
+                raise ImportError("Install Gemini support with: pip install 'evidor[gemini]'") from error
+
+            client = genai.Client(api_key=self._api_key)
+            if not hasattr(client, "interactions") or not hasattr(client.interactions, "create"):
+                raise RuntimeError(
+                    "Modern Google GenAI Interactions API (client.interactions.create) is required. "
+                    "Please update google-genai to the latest version."
+                )
+            self._client = client
+            self._types = types
+            return self._client, self._types
 
     def _build_request_payload(self, request: GenerationRequest, types: Any) -> dict[str, Any]:
         system_prompt = extract_system_prompt(request)

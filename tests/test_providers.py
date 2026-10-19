@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import types
 from typing import Any
@@ -1117,6 +1118,149 @@ def test_anthropic_provider_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
         "type": "text",
         "text": "Here is the continuation.",
     }
+
+
+def test_gemini_client_reuse_and_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+    mock_client = MagicMock()
+    mock_response = MagicMock(interaction=MagicMock(id="int_1", model="gemini-3.8-flash", steps=[]))
+    mock_client.interactions.create.return_value = mock_response
+    mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-3.8-flash", api_key="gem_key")
+    req = GenerationRequest(prompt="hello")
+
+    provider.generate(req)
+    provider.generate(req)
+
+    # Client is initialized only once across multiple generation calls
+    assert mock_genai.Client.call_count == 1
+    assert mock_client.interactions.create.call_count == 2
+
+    # with_model decouples client ownership so closing one does not invalidate the other
+    new_provider = provider.with_model("gemini-3.5-flash-lite")
+    provider.close()
+    assert provider._client is None
+
+    # Clone can generate independently
+    new_provider.generate(req)
+    assert mock_genai.Client.call_count == 2
+    new_provider.close()
+    assert new_provider._client is None
+
+
+def test_openai_client_reuse_and_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_openai = types.ModuleType("openai")
+    mock_client = MagicMock()
+    mock_response = MagicMock(output_text="Text")
+    mock_client.responses.create.return_value = mock_response
+    mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    provider = OpenAIProvider(model="gpt-4.1-mini", api_key="key")
+    req = GenerationRequest(prompt="hello")
+
+    provider.generate(req)
+    provider.generate(req)
+
+    # Sync client is reused
+    assert mock_openai.OpenAI.call_count == 1
+    assert mock_client.responses.create.call_count == 2
+
+    # with_model decouples client ownership so closing one does not invalidate the other
+    new_provider = provider.with_model("gpt-6-astra")
+    provider.close()
+    assert provider._sync_client is None
+
+    # Clone can generate independently
+    new_provider.generate(req)
+    assert mock_openai.OpenAI.call_count == 2
+    new_provider.close()
+    assert new_provider._sync_client is None
+
+
+def test_anthropic_client_reuse_and_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+    mock_response = MagicMock(content=[MagicMock(type="text", text="Hello")], model="claude-3-5")
+    mock_client.messages.create.return_value = mock_response
+    mock_anthropic.Anthropic = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(model="claude-3-5", api_key="key")
+    req = GenerationRequest(prompt="hello")
+
+    provider.generate(req)
+    provider.generate(req)
+
+    # Sync client is reused
+    assert mock_anthropic.Anthropic.call_count == 1
+    assert mock_client.messages.create.call_count == 2
+
+    # with_model decouples client ownership so closing one does not invalidate the other
+    new_provider = provider.with_model("claude-3-7-sonnet")
+    provider.close()
+    assert provider._sync_client is None
+
+    # Clone can generate independently
+    new_provider.generate(req)
+    assert mock_anthropic.Anthropic.call_count == 2
+    new_provider.close()
+    assert new_provider._sync_client is None
+
+
+def test_openai_prunes_closed_event_loops(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_openai = types.ModuleType("openai")
+    mock_client = MagicMock()
+    mock_client.is_closed = False
+    mock_openai.AsyncOpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    provider = OpenAIProvider(model="gpt-4.1-mini", api_key="key")
+
+    async def _fetch():
+        return provider._get_async_client()
+
+    loop1 = asyncio.new_event_loop()
+    client1 = loop1.run_until_complete(_fetch())
+    assert loop1 in provider._async_clients
+    loop1.close()
+
+    # Now on loop2, getting a client should prune loop1
+    loop2 = asyncio.new_event_loop()
+    client2 = loop2.run_until_complete(_fetch())
+    assert loop1 not in provider._async_clients
+    assert loop2 in provider._async_clients
+    loop2.close()
+
+
+def test_is_client_closed_detection() -> None:
+    from evidor.agent.providers.base import is_client_closed
+
+    class BoolPropClient:
+        is_closed = True
+
+    class OpenBoolPropClient:
+        is_closed = False
+
+    class MethodClient:
+        def __init__(self, closed: bool) -> None:
+            self._closed = closed
+        def is_closed(self) -> bool:
+            return self._closed
+
+    assert is_client_closed(BoolPropClient()) is True
+    assert is_client_closed(OpenBoolPropClient()) is False
+    assert is_client_closed(MethodClient(True)) is True
+    assert is_client_closed(MethodClient(False)) is False
+    assert is_client_closed(MagicMock()) is False
+
 
 
 

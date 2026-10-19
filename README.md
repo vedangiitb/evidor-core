@@ -390,8 +390,9 @@ asyncio.run(main())
 
 - **Concurrent Multi-Tool Execution**: When an LLM emits multiple tool calls in a single turn, Evidor executes them **concurrently via `asyncio.gather()`**. This significantly reduces turn latency for complex agent workflows.
 - **Native Async Provider Calls**: All bundled providers (`OpenAIProvider`, `AnthropicProvider`, `GeminiProvider`) implement native `generate_async()` using modern asynchronous client libraries.
+- **Persistent Connection Pooling (Sync & Async)**: Synchronous `agent.send()` transparently bridges calls through an encapsulated background daemon event loop. This preserves underlying HTTP/2 keep-alive connection pools across turns, eliminating TCP/TLS handshake latency on subsequent turns without tearing down sockets between calls.
 - **Event Loop Guards (`RuntimeError`)**: Synchronous methods (`agent.send()`, `agent.close()`, `tool.execute()`, `mcp.get_tools()`, etc.) are protected with event loop guards. Calling them from inside an active event loop raises an explicit `RuntimeError` immediately rather than hanging the loop, directing you to use `await agent.send_async()`, `await agent.close_async()`, etc.
-- **Non-blocking Teardown**: Clean up agents and background MCP sessions asynchronously using `await agent.close_async()` or the `async with agent:` context manager.
+- **Clean Lifecycle & Resource Teardown**: Clean up agents, persistent background loops, and attached MCP sessions using `agent.close()`, `await agent.close_async()`, or context managers (`with Agent(...) as agent:` / `async with Agent(...) as agent:`).
 
 ### Manual Tool Definition
 

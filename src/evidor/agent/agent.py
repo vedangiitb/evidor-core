@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable, Sequence
 import inspect
 import secrets
+import threading
 import time
 from typing import Any
 
@@ -27,7 +28,7 @@ from ..telemetry import (
 )
 from ..tools import Tool
 from ..tools.core.tool_executor import ToolExecutor
-from ..utils import run_async_in_sync
+from ..utils import BackgroundEventLoop, check_sync_allowed, run_async_in_sync
 from .providers.base import ModelProvider
 
 
@@ -103,6 +104,16 @@ class Agent:
         else:
             self._telemetry = None
             self._owns_telemetry = False
+
+        self._background_loop: BackgroundEventLoop | None = None
+        self._lock = threading.RLock()
+
+    @property
+    def _sync_loop(self) -> BackgroundEventLoop:
+        """The persistent background event loop for synchronous agent calls."""
+        if self._background_loop is None:
+            self._background_loop = BackgroundEventLoop(name=f"AgentLoop-{id(self)}")
+        return self._background_loop
 
     @property
     def provider(self) -> ModelProvider:
@@ -181,7 +192,7 @@ class Agent:
             return
         if self._mcp_tools_synced and not force:
             return
-        run_async_in_sync(
+        self._sync_loop.run(
             lambda: self._sync_mcp_tools_async(force=force),
             error_message=(
                 "Cannot synchronize MCP tools synchronously from a running event loop. "
@@ -327,10 +338,11 @@ class Agent:
 
     def send(self, message: str) -> GenerationResponse:
         """Advance one user turn synchronously."""
-        return run_async_in_sync(
-            lambda: self.send_async(message),
-            error_message="Agent.send() cannot be called from a running event loop. Use 'await agent.send_async()' instead.",
-        )
+        with self._lock:
+            return self._sync_loop.run(
+                lambda: self.send_async(message),
+                error_message="Agent.send() cannot be called from a running event loop. Use 'await agent.send_async()' instead.",
+            )
 
     async def send_async(self, message: str) -> GenerationResponse:
         """Asynchronously advance one user turn, coordinating provider-native context and tool calls."""
@@ -499,30 +511,114 @@ class Agent:
                 raise
 
     def close(self) -> None:
-        """Close any associated MCP client connections and flush telemetry."""
-        if self._mcp_client is not None:
-            run_async_in_sync(
-                self.close_async,
-                error_message=(
-                    "Agent.close() cannot be called from a running event loop. "
-                    "Use 'await agent.close_async()' or 'async with agent:' instead."
-                ),
-            )
-        else:
-            if self._telemetry is not None:
-                self._telemetry.flush()
-                if self._owns_telemetry:
-                    self._telemetry.close()
+        """Close any associated MCP client connections, background event loop, and flush telemetry."""
+        with self._lock:
+            try:
+                if self._background_loop is not None and self._background_loop.is_running:
+                    self._background_loop.run(
+                        self._close_async_resources,
+                        error_message=(
+                            "Agent.close() cannot be called from a running event loop. "
+                            "Use 'await agent.close_async()' or 'async with agent:' instead."
+                        ),
+                    )
+                else:
+                    running_loop = None
+                    try:
+                        running_loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        pass
+
+                    if running_loop is not None:
+                        if self._mcp_client is not None:
+                            check_sync_allowed(
+                                "Agent.close() cannot be called from a running event loop. "
+                                "Use 'await agent.close_async()' or 'async with agent:' instead."
+                            )
+                        running_loop.create_task(self._close_async_resources())
+                    else:
+                        run_async_in_sync(
+                            self._close_async_resources,
+                            error_message=(
+                                "Agent.close() cannot be called from a running event loop. "
+                                "Use 'await agent.close_async()' or 'async with agent:' instead."
+                            ),
+                        )
+                self._close_sync_resources()
+            finally:
+                self._flush_and_close_telemetry()
+                if self._background_loop is not None:
+                    self._background_loop.close()
+                    self._background_loop = None
 
     async def close_async(self) -> None:
-        """Asynchronously close any associated MCP client connections and flush telemetry."""
+        """Asynchronously close any associated MCP client connections, background event loop, and flush telemetry."""
+        try:
+            if self._background_loop is not None and self._background_loop.is_running:
+                bg_loop = self._background_loop.loop
+                current_loop = None
+                try:
+                    current_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    pass
+
+                if bg_loop is not None and bg_loop != current_loop:
+                    fut = asyncio.run_coroutine_threadsafe(self._close_async_resources(), bg_loop)
+                    await asyncio.wrap_future(fut)
+                else:
+                    await self._close_async_resources()
+            else:
+                await self._close_async_resources()
+        finally:
+            self._close_sync_resources()
+            self._flush_and_close_telemetry()
+            if self._background_loop is not None:
+                self._background_loop.close()
+                self._background_loop = None
+
+    async def _close_async_resources(self) -> None:
         if self._mcp_client is not None:
-            await self._mcp_client.close_async()
-            self._mcp_tools_synced = False
+            try:
+                await self._mcp_client.close_async()
+            except Exception:
+                pass
+            finally:
+                self._mcp_tools_synced = False
+
+        provider_close_async = getattr(self._provider, "close_async", None)
+        if callable(provider_close_async):
+            try:
+                await provider_close_async()
+            except Exception:
+                pass
+
+    def _close_sync_resources(self) -> None:
+        provider_close = getattr(self._provider, "close", None)
+        if callable(provider_close):
+            try:
+                provider_close()
+            except Exception:
+                pass
+
+    def _flush_and_close_telemetry(self) -> None:
         if self._telemetry is not None:
-            self._telemetry.flush()
+            try:
+                self._telemetry.flush()
+            except Exception:
+                pass
             if self._owns_telemetry:
-                self._telemetry.close()
+                try:
+                    self._telemetry.close()
+                except Exception:
+                    pass
+                self._owns_telemetry = False
+
+    def __del__(self) -> None:
+        if getattr(self, "_background_loop", None) is not None:
+            try:
+                self._background_loop.close()
+            except Exception:
+                pass
 
     def __enter__(self) -> Agent:
         return self
