@@ -8,6 +8,7 @@
 
 - **mcp**: Removing unused code
   ([`c42cfc3`](https://github.com/vedangiitb/evidor-core/commit/c42cfc3039fa2fcf05b045680674508036dde710))
+## v1.9.1 (2026-10-19)
 
 
 ## v1.9.1-dev.1 (2026-10-19)
