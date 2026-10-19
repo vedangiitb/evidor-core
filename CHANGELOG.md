@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.9.1-dev.1 (2026-10-19)
+
+### Bug Fixes
+
+- **telemetry**: Add missing cached token count to phoenix
+  ([`536d1fe`](https://github.com/vedangiitb/evidor-core/commit/536d1fed12a37bbc8bb96d008d0530daf578e918))
+
+
 ## v1.9.0 (2026-10-19)
 
 
