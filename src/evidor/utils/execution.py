@@ -111,7 +111,13 @@ class BackgroundEventLoop:
         future = asyncio.run_coroutine_threadsafe(ctx.run(_entrypoint), loop)
         return future.result()
 
-    def close(self) -> None:
+    @property
+    def loop(self) -> asyncio.AbstractEventLoop | None:
+        """Return the active event loop, if running."""
+        with self._lock:
+            return self._loop
+
+    def close(self, timeout: float = 5.0) -> None:
         """Stop the background event loop and join the worker thread."""
         with self._lock:
             if self._closed:
@@ -123,9 +129,25 @@ class BackgroundEventLoop:
             self._thread = None
 
         if loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(loop.stop)
-            if thread is not None and thread.is_alive():
-                thread.join(timeout=2.0)
+            import threading
+
+            def _stop_loop() -> None:
+                for task in asyncio.all_tasks(loop):
+                    if not task.done():
+                        task.cancel()
+                loop.stop()
+
+            loop.call_soon_threadsafe(_stop_loop)
+            if thread is not None and thread.is_alive() and thread != threading.current_thread():
+                thread.join(timeout=timeout)
+                if thread.is_alive():
+                    import warnings
+
+                    warnings.warn(
+                        f"Background event loop thread {thread.name} did not terminate within {timeout}s timeout.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
 
 
 def run_async_in_sync(

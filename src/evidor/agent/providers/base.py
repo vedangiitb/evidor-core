@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -8,6 +9,38 @@ from evidor.utils import run_async_in_sync
 
 if TYPE_CHECKING:
     from evidor.tools.tool import Tool
+
+
+def is_client_closed(client: Any) -> bool:
+    """Safely check if an SDK or HTTP client has been closed."""
+    if client is None:
+        return True
+    is_closed_attr = getattr(client, "is_closed", None)
+    if is_closed_attr is not None:
+        if callable(is_closed_attr):
+            try:
+                res = is_closed_attr()
+                if isinstance(res, bool):
+                    return res
+            except Exception:
+                pass
+        elif isinstance(is_closed_attr, bool):
+            return is_closed_attr
+
+    sub_client = getattr(client, "_client", None)
+    if sub_client is not None:
+        sub_is_closed = getattr(sub_client, "is_closed", None)
+        if sub_is_closed is not None:
+            if callable(sub_is_closed):
+                try:
+                    res = sub_is_closed()
+                    if isinstance(res, bool):
+                        return res
+                except Exception:
+                    pass
+            elif isinstance(sub_is_closed, bool):
+                return sub_is_closed
+    return False
 
 
 @runtime_checkable
@@ -39,6 +72,7 @@ class BaseProvider:
         self._model = model
         self._api_key = api_key
         self._thinking = thinking
+        self._lock = threading.Lock()
 
     @property
     def model(self) -> str:

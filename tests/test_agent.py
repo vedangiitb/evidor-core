@@ -1,4 +1,6 @@
 import asyncio
+import threading
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from evidor import (
@@ -579,4 +581,64 @@ def test_background_event_loop_lifecycle() -> None:
 
     with pytest.raises(RuntimeError, match="BackgroundEventLoop has been closed"):
         bg.run(lambda: add(5, 6))
+
+
+def test_agent_send_then_close_async() -> None:
+    provider = FakeProvider(model="test")
+    provider.close_async = AsyncMock()
+    provider.close = MagicMock()
+
+    agent = Agent(provider)
+    res = agent.send("hello")
+    assert res.text == "[test] hello"
+    assert agent._background_loop is not None
+    assert agent._background_loop.is_running
+
+    async def _close():
+        await agent.close_async()
+
+    asyncio.run(_close())
+
+    assert agent._background_loop is None
+    provider.close_async.assert_awaited_once()
+    provider.close.assert_called_once()
+
+
+def test_agent_close_without_background_loop_closes_async_resources() -> None:
+    provider = FakeProvider(model="test")
+    provider.close_async = AsyncMock()
+    provider.close = MagicMock()
+
+    agent = Agent(provider)
+    assert agent._background_loop is None
+
+    agent.close()
+
+    provider.close_async.assert_awaited_once()
+    provider.close.assert_called_once()
+
+
+def test_agent_concurrent_sync_send() -> None:
+    provider = FakeProvider(model="concurrent")
+    agent = Agent(provider)
+
+    errors = []
+
+    def _worker(msg: str):
+        try:
+            agent.send(msg)
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=_worker, args=(f"msg_{i}",)) for i in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    # 10 user messages and 10 assistant messages
+    assert len(agent.messages) == 20
+    agent.close()
+
 
