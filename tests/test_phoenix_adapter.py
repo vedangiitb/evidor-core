@@ -124,7 +124,14 @@ def test_phoenix_openinference_attributes_enrichment() -> None:
             model="gpt-4o",
             status="ok",
             duration_ms=210.0,
-            token_usage=TokenUsage(prompt_tokens=20, completion_tokens=10, total_tokens=30),
+            token_usage=TokenUsage(
+                prompt_tokens=20,
+                completion_tokens=10,
+                total_tokens=30,
+                cached_tokens=15,
+                cache_creation_tokens=5,
+                reasoning_tokens=8,
+            ),
             output_text="The answer is 4.",
         )
     ])
@@ -160,6 +167,9 @@ def test_phoenix_openinference_attributes_enrichment() -> None:
     assert llm_span.attributes.get("input.value") == "Calculate 2 + 2"
     assert llm_span.attributes.get("output.value") == "The answer is 4."
     assert llm_span.attributes.get("llm.token_count.total") == 30
+    assert llm_span.attributes.get("llm.token_count.prompt_details.cache_read") == 15
+    assert llm_span.attributes.get("llm.token_count.prompt_details.cache_write") == 5
+    assert llm_span.attributes.get("llm.token_count.completion_details.reasoning") == 8
 
     # Verify OpenInference attributes on agent span
     assert agent_span.attributes.get("openinference.span.kind") == "AGENT"

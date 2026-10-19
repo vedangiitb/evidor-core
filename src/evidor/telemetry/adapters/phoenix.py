@@ -217,6 +217,16 @@ class PhoenixSink(OpenTelemetrySink):
                             "llm.token_count.completion_details.reasoning",
                             event.token_usage.reasoning_tokens,
                         )
+                    if event.token_usage.cached_tokens > 0:
+                        span.set_attribute(
+                            "llm.token_count.prompt_details.cache_read",
+                            event.token_usage.cached_tokens,
+                        )
+                    if event.token_usage.cache_creation_tokens > 0:
+                        span.set_attribute(
+                            "llm.token_count.prompt_details.cache_write",
+                            event.token_usage.cache_creation_tokens,
+                        )
 
             elif isinstance(event, ToolCallEndEvent):
                 if self._capture_content and event.result is not None:
