@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v1.9.0-dev.1 (2026-10-19)
+
+### Documentation
+
+- Readme updates for conversation related stuff
+  ([`ea58896`](https://github.com/vedangiitb/evidor-core/commit/ea58896248bcd3ba4b5fb96f43178a60aba7d17b))
+
+- **agent**: Connection pool caching and reusing event loop
+  ([`3617b68`](https://github.com/vedangiitb/evidor-core/commit/3617b68f1ebad20f00a7cecc3979d2ffaf0f1794))
+
+### Features
+
+- **agent**: Adding connection pool caching and reusing event loop
+  ([`d89840a`](https://github.com/vedangiitb/evidor-core/commit/d89840ad6b8cead1b0e9aa4d5e66209f4991b4d7))
+
+- **agent**: Adding connection pool caching and reusing event loop
+  ([`ef15b9a`](https://github.com/vedangiitb/evidor-core/commit/ef15b9a428591881a96a8265fb6363974abaf7b0))
+
+
 ## v1.8.0 (2026-10-17)
 
 
