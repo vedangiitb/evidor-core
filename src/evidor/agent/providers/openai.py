@@ -122,15 +122,27 @@ class OpenAIProvider(BaseProvider):
 
     async def close_async(self) -> None:
         self.close()
+        current_loop = None
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
         with self._lock:
-            clients_to_close = [client for _, client in self._async_clients.items()]
+            clients_to_close = list(self._async_clients.items())
             self._async_clients.clear()
             default_client = self._default_async_client
             self._default_async_client = None
 
-        for client in clients_to_close:
+        for loop, client in clients_to_close:
             try:
-                await client.close()
+                if loop is current_loop:
+                    await client.close()
+                elif loop.is_running():
+                    fut = asyncio.run_coroutine_threadsafe(client.close(), loop)
+                    await asyncio.wrap_future(fut)
+                else:
+                    await client.close()
             except Exception:
                 pass
 

@@ -546,29 +546,51 @@ class Agent:
                         )
                 self._close_sync_resources()
             finally:
+                self._flush_and_close_telemetry()
                 if self._background_loop is not None:
                     self._background_loop.close()
                     self._background_loop = None
 
     async def close_async(self) -> None:
         """Asynchronously close any associated MCP client connections, background event loop, and flush telemetry."""
-        await self._close_async_resources()
-        self._close_sync_resources()
-        if self._background_loop is not None:
-            self._background_loop.close()
-            self._background_loop = None
+        try:
+            if self._background_loop is not None and self._background_loop.is_running:
+                bg_loop = self._background_loop.loop
+                current_loop = None
+                try:
+                    current_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    pass
+
+                if bg_loop is not None and bg_loop != current_loop:
+                    fut = asyncio.run_coroutine_threadsafe(self._close_async_resources(), bg_loop)
+                    await asyncio.wrap_future(fut)
+                else:
+                    await self._close_async_resources()
+            else:
+                await self._close_async_resources()
+        finally:
+            self._close_sync_resources()
+            self._flush_and_close_telemetry()
+            if self._background_loop is not None:
+                self._background_loop.close()
+                self._background_loop = None
 
     async def _close_async_resources(self) -> None:
         if self._mcp_client is not None:
-            await self._mcp_client.close_async()
-            self._mcp_tools_synced = False
+            try:
+                await self._mcp_client.close_async()
+            except Exception:
+                pass
+            finally:
+                self._mcp_tools_synced = False
+
         provider_close_async = getattr(self._provider, "close_async", None)
         if callable(provider_close_async):
             try:
                 await provider_close_async()
             except Exception:
                 pass
-        self._flush_and_close_telemetry()
 
     def _close_sync_resources(self) -> None:
         provider_close = getattr(self._provider, "close", None)
@@ -577,13 +599,19 @@ class Agent:
                 provider_close()
             except Exception:
                 pass
-        self._flush_and_close_telemetry()
 
     def _flush_and_close_telemetry(self) -> None:
         if self._telemetry is not None:
-            self._telemetry.flush()
+            try:
+                self._telemetry.flush()
+            except Exception:
+                pass
             if self._owns_telemetry:
-                self._telemetry.close()
+                try:
+                    self._telemetry.close()
+                except Exception:
+                    pass
+                self._owns_telemetry = False
 
     def __del__(self) -> None:
         if getattr(self, "_background_loop", None) is not None:

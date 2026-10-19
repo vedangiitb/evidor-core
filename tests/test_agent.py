@@ -584,8 +584,18 @@ def test_background_event_loop_lifecycle() -> None:
 
 
 def test_agent_send_then_close_async() -> None:
-    provider = FakeProvider(model="test")
-    provider.close_async = AsyncMock()
+    captured_gen_loop = []
+    captured_close_loop = []
+
+    class RealLoopProvider(FakeProvider):
+        async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+            captured_gen_loop.append(asyncio.get_running_loop())
+            return await super().generate_async(request)
+
+        async def close_async(self) -> None:
+            captured_close_loop.append(asyncio.get_running_loop())
+
+    provider = RealLoopProvider(model="test")
     provider.close = MagicMock()
 
     agent = Agent(provider)
@@ -593,13 +603,55 @@ def test_agent_send_then_close_async() -> None:
     assert res.text == "[test] hello"
     assert agent._background_loop is not None
     assert agent._background_loop.is_running
+    bg_loop = agent._background_loop.loop
+    assert len(captured_gen_loop) == 1
+    assert captured_gen_loop[0] is bg_loop
+
+    caller_loops = []
 
     async def _close():
+        caller_loops.append(asyncio.get_running_loop())
         await agent.close_async()
 
     asyncio.run(_close())
 
     assert agent._background_loop is None
+    # Caller loop is different from background loop
+    assert caller_loops[0] is not bg_loop
+    # Provider's close_async ran on the background loop that owned the resources!
+    assert len(captured_close_loop) == 1
+    assert captured_close_loop[0] is bg_loop
+    provider.close.assert_called_once()
+
+
+def test_agent_telemetry_flushed_and_closed_exactly_once() -> None:
+    from evidor.telemetry import TelemetrySink
+
+    sink = MagicMock(spec=TelemetrySink)
+    provider = FakeProvider(model="test")
+    agent = Agent(provider, telemetry=sink)
+    assert agent._owns_telemetry is True
+
+    agent.close()
+
+    assert agent._owns_telemetry is False
+    assert agent._telemetry._closed is True
+
+
+def test_agent_cleanup_resilient_to_mcp_failure() -> None:
+    provider = FakeProvider(model="test")
+    provider.close_async = AsyncMock()
+    provider.close = MagicMock()
+
+    mock_mcp = MagicMock()
+    mock_mcp.close_async = AsyncMock(side_effect=RuntimeError("MCP crash during shutdown"))
+
+    agent = Agent(provider, mcp_client=mock_mcp)
+    agent.close()
+
+    # Despite MCP failing, provider resources are still cleaned up
+    mock_mcp.close_async.assert_awaited_once()
+    assert agent._mcp_tools_synced is False
     provider.close_async.assert_awaited_once()
     provider.close.assert_called_once()
 
