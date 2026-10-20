@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v1.10.1-dev.1 (2026-10-20)
+
+### Bug Fixes
+
+- **agent**: Fixing gemini streaming empty message and ttft issues
+  ([`ff00671`](https://github.com/vedangiitb/evidor-core/commit/ff006712848fc54b487d69860313d8506569f8fd))
+
+- **agent**: Fixing gemini streaming empty message and ttft issues
+  ([`53381cc`](https://github.com/vedangiitb/evidor-core/commit/53381cc73cd83e8cb331d6e44a75e95cb6f257a5))
+
+### Chores
+
+- **ci**: Ci updates for automated main to dev merge and pypi pre release on dev push
+  ([`f2ada55`](https://github.com/vedangiitb/evidor-core/commit/f2ada55412557798c1db0c38ae3f12725e669a14))
+
+- **ci**: Sync main to dev updates
+  ([`82353ed`](https://github.com/vedangiitb/evidor-core/commit/82353ed5e6face3f54cf8a9d3588abb7f30a1b12))
+
+
 ## v1.10.0 (2026-10-20)
 
 
