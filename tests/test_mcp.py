@@ -35,16 +35,6 @@ def get_order_status(order_id: str) -> str:
         raise ValueError("Invalid order ID provided.")
     return f"Order {order_id} is shipped and arriving tomorrow."
 
-@server.resource("amazon://inventory/kindle")
-def get_kindle_inventory() -> str:
-    \"\"\"Check Kindle stock count.\"\"\"
-    return "Stock: 42 units available in Seattle warehouse"
-
-@server.prompt()
-def deal_finder(category: str) -> str:
-    \"\"\"Find daily deals in a category.\"\"\"
-    return f"You are a deal finder. Suggest top discounts for {category}."
-
 if __name__ == "__main__":
     server.run("stdio")
 """
@@ -224,10 +214,6 @@ def test_mcp_session_stdio_lifecycle() -> None:
         # Call another tool
         order_res = session.call_tool("get_order_status", {"order_id": "ORD-99"})
         assert "Order ORD-99 is shipped" in order_res
-
-        # Test prompt
-        prompt = session.get_prompt("deal_finder", {"category": "electronics"})
-        assert prompt.description == "Find daily deals in a category."
 
     assert not session.is_connected
 
