@@ -630,12 +630,13 @@ def test_agent_telemetry_flushed_and_closed_exactly_once() -> None:
     sink = MagicMock(spec=TelemetrySink)
     provider = FakeProvider(model="test")
     agent = Agent(provider, telemetry=sink)
-    assert agent._owns_telemetry is True
+    assert agent._telemetry_bridge.owns_telemetry is True
 
     agent.close()
 
-    assert agent._owns_telemetry is False
-    assert agent._telemetry._closed is True
+    assert agent._telemetry_bridge.owns_telemetry is False
+    assert agent.telemetry._closed is True
+    sink.close.assert_called_once()
 
 
 def test_agent_cleanup_resilient_to_mcp_failure() -> None:
