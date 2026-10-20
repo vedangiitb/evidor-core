@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v1.10.0-dev.1 (2026-10-20)
+
+### Documentation
+
+- **agent**: Streaming tokens support
+  ([`af8166c`](https://github.com/vedangiitb/evidor-core/commit/af8166c98a34e83ca04c6ff17aecc8c8874d80f7))
+
+### Features
+
+- **agent**: Streaming tokens support
+  ([`fb5b58f`](https://github.com/vedangiitb/evidor-core/commit/fb5b58fb2940ff9f9e29634ecc9614a3b9e3f5ff))
+
+- **agent**: Streaming tokens support
+  ([`fdb1992`](https://github.com/vedangiitb/evidor-core/commit/fdb199243d3df645f3bbbdbdecef6460d67d6104))
+
+- **agent**: Streaming tokens support - model updates
+  ([`2c89965`](https://github.com/vedangiitb/evidor-core/commit/2c8996576388d2c2efb8a885ba0c45f0debafa70))
+
+- **agent**: Streaming tokens support - telemetry changes
+  ([`21b8a97`](https://github.com/vedangiitb/evidor-core/commit/21b8a97bf0b33001e2aa81a9e701d6887c165854))
+
+
 ## v1.9.2 (2026-10-20)
 
 
