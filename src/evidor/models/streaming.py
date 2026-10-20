@@ -90,7 +90,7 @@ class StreamResponse(Iterator[StreamChunk]):
                     pass
             raise
 
-        if (chunk.text or chunk.thinking) and self._first_token_time is None:
+        if (chunk.text or chunk.thinking or chunk.tool_calls) and self._first_token_time is None:
             self._first_token_time = time.perf_counter()
             if self._on_first_token:
                 try:
@@ -228,7 +228,7 @@ class AsyncStreamResponse(AsyncIterator[StreamChunk]):
                     pass
             raise
 
-        if (chunk.text or chunk.thinking) and self._first_token_time is None:
+        if (chunk.text or chunk.thinking or chunk.tool_calls) and self._first_token_time is None:
             self._first_token_time = time.perf_counter()
             if self._on_first_token:
                 try:

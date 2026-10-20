@@ -226,60 +226,132 @@ class GeminiProvider(BaseProvider):
 
     def _create_stream(self, raw_stream: Any) -> Iterator[StreamChunk]:
         tool_acc = ToolCallAccumulator()
+        step_id_map: dict[str, str] = {}
+        thought_blocks: list[dict[str, Any]] = []
+        text_parts: list[str] = []
         for event in raw_stream:
-            yield from self._process_gemini_event(event, tool_acc)
+            yield from self._process_gemini_event(event, tool_acc, step_id_map, thought_blocks, text_parts)
 
-        remaining_tools = tool_acc.finalize_all()
-        if remaining_tools:
-            yield StreamChunk(tool_calls=tuple(remaining_tools))
+        remaining_in_flight = [
+            tc for call_id in list(tool_acc._calls.keys())
+            if (tc := tool_acc.complete_call(call_id)) is not None
+        ]
+        if remaining_in_flight:
+            yield StreamChunk(tool_calls=tuple(remaining_in_flight))
 
     async def _create_async_stream(self, raw_stream: Any) -> AsyncIterator[StreamChunk]:
         tool_acc = ToolCallAccumulator()
+        step_id_map: dict[str, str] = {}
+        thought_blocks: list[dict[str, Any]] = []
+        text_parts: list[str] = []
         async for event in raw_stream:
-            for chunk in self._process_gemini_event(event, tool_acc):
+            for chunk in self._process_gemini_event(event, tool_acc, step_id_map, thought_blocks, text_parts):
                 yield chunk
 
-        remaining_tools = tool_acc.finalize_all()
-        if remaining_tools:
-            yield StreamChunk(tool_calls=tuple(remaining_tools))
+        remaining_in_flight = [
+            tc for call_id in list(tool_acc._calls.keys())
+            if (tc := tool_acc.complete_call(call_id)) is not None
+        ]
+        if remaining_in_flight:
+            yield StreamChunk(tool_calls=tuple(remaining_in_flight))
 
-    def _process_gemini_event(self, event: Any, tool_acc: ToolCallAccumulator) -> Iterator[StreamChunk]:
+    def _process_gemini_event(
+        self,
+        event: Any,
+        tool_acc: ToolCallAccumulator,
+        step_id_map: dict[str, str],
+        thought_blocks: list[dict[str, Any]],
+        text_parts: list[str],
+    ) -> Iterator[StreamChunk]:
         ev_type = getattr(event, "event_type", None) or getattr(event, "type", None)
+        idx = str(getattr(event, "index", 0))
 
         delta_obj = getattr(event, "delta", None)
-        if delta_obj is not None:
+        if delta_obj is not None and ev_type not in (
+            "step.start",
+            "step_start",
+            "step.stop",
+            "step_stop",
+            "interaction.completed",
+            "interaction_completed",
+        ):
             delta_type = getattr(delta_obj, "type", None)
-            if delta_type == "text" or hasattr(delta_obj, "text"):
+            if delta_type == "text" or (hasattr(delta_obj, "text") and not hasattr(delta_obj, "arguments")):
                 txt = getattr(delta_obj, "text", "") or ""
-                if txt:
+                if isinstance(txt, str) and txt:
+                    text_parts.append(txt)
                     yield StreamChunk(text=txt, raw_event=event)
             elif delta_type in ("thought_summary", "thought"):
                 th = getattr(delta_obj, "text", "") or getattr(delta_obj, "summary", "") or ""
-                if th:
+                if isinstance(th, str) and th:
                     yield StreamChunk(thinking=th, raw_event=event)
             elif delta_type == "arguments_delta" or hasattr(delta_obj, "arguments"):
-                call_id = getattr(event, "event_id", None) or getattr(event, "step_id", None) or "call_1"
+                call_id = (
+                    getattr(event, "event_id", None)
+                    or getattr(event, "step_id", None)
+                    or step_id_map.get(idx)
+                    or "call_1"
+                )
                 args_delta = getattr(delta_obj, "arguments", "") or getattr(delta_obj, "text", "") or ""
-                tool_acc.add_arguments_delta(call_id, args_delta)
+                if isinstance(args_delta, str) and args_delta:
+                    tool_acc.add_arguments_delta(call_id, args_delta)
+            elif delta_type in ("thought_signature", "thought"):
+                sig = getattr(delta_obj, "signature", None)
+                if isinstance(sig, str) and sig:
+                    thought_blocks.append({
+                        "type": "thought",
+                        "thought": True,
+                        "thought_signature": sig,
+                    })
 
         if ev_type in ("step.start", "step_start"):
             step = getattr(event, "step", None)
             if step and getattr(step, "type", None) == "function_call":
-                call_id = getattr(step, "id", None) or getattr(event, "event_id", None) or "call_1"
-                tool_acc.start_call(call_id, getattr(step, "name", "") or "")
+                call_id = getattr(step, "id", None) or getattr(event, "event_id", None) or f"call_{idx}"
+                name = getattr(step, "name", "") or ""
+                step_id_map[idx] = call_id
+                tool_acc.start_call(call_id, name)
+                sig = getattr(step, "signature", None)
+                if sig:
+                    thought_blocks.append({
+                        "type": "function_call",
+                        "id": call_id,
+                        "name": name,
+                        "thought_signature": sig,
+                    })
+            elif step and getattr(step, "type", None) == "thought":
+                step_id_map[idx] = f"thought_{idx}"
         elif ev_type in ("step.stop", "step_stop"):
-            call_id = getattr(event, "event_id", None) or getattr(event, "step_id", None)
+            call_id = (
+                getattr(event, "event_id", None)
+                or getattr(event, "step_id", None)
+                or step_id_map.pop(idx, None)
+            )
             if call_id:
                 tc = tool_acc.complete_call(call_id)
                 if tc:
                     yield StreamChunk(tool_calls=(tc,), raw_event=event)
 
-        if ev_type in ("interaction.completed", "interaction_completed") or hasattr(event, "interaction"):
+        if ev_type in ("interaction.completed", "interaction_completed"):
             interaction = getattr(event, "interaction", event)
             final_resp = self._parse_response(interaction)
+            accumulated_text = "".join(s for s in text_parts if isinstance(s, str))
+            final_text = final_resp.text or accumulated_text
+            final_tools = final_resp.tool_calls or tuple(tool_acc._completed)
+            final_resp = GenerationResponse(
+                id=final_resp.id,
+                text=final_text,
+                model=final_resp.model,
+                tool_calls=final_tools,
+                usage=final_resp.usage,
+                thinking=final_resp.thinking,
+                thought_blocks=tuple(thought_blocks) if thought_blocks else final_resp.thought_blocks,
+                compaction=final_resp.compaction,
+            )
             yield StreamChunk(is_finished=True, response=final_resp, raw_event=event)
         elif hasattr(event, "text") and isinstance(event.text, str) and delta_obj is None:
             if event.text:
+                text_parts.append(event.text)
                 yield StreamChunk(text=event.text, raw_event=event)
 
     def close(self) -> None:
