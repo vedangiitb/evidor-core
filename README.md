@@ -1231,5 +1231,5 @@ Releases are performed by GitHub Actions and use Conventional Commits to select 
 - `feat: ...` creates a minor release.
 - `feat!: ...` or a `BREAKING CHANGE:` footer creates a major release.
 
-Pushes to `dev` publish `-dev.N` prereleases to TestPyPI. Pushes to `main` publish stable releases to PyPI. Configure `TEST_PYPI_API_TOKEN` as a repository or `dev` environment secret, and configure PyPI trusted publishing for the `prod` environment before enabling the workflow.
+Pushes to `dev` publish `-dev.N` prereleases to PyPI. Pushes to `main` publish stable releases to PyPI. Configure PyPI trusted publishing for both the `prod` and `dev` environments before enabling the workflow.
 

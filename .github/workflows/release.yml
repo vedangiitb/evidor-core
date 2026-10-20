@@ -121,30 +121,24 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  publish-testpypi:
-    name: Publish prerelease to TestPyPI
+  publish-dev-pypi:
+    name: Publish prerelease to PyPI
     needs: release
     if: needs.release.outputs.released == 'true' && github.ref_name == 'dev'
     runs-on: ubuntu-latest
-    environment: dev
+    environment:
+      name: dev
+      url: https://pypi.org/project/evidor/
+    permissions:
+      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: distribution-artifacts-${{ needs.release.outputs.version }}
           path: dist/
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install Twine
-        run: python -m pip install --upgrade pip twine
-
-      - name: Upload to TestPyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
-        run: python -m twine upload --repository-url https://test.pypi.org/legacy/ dist/*
+      - name: Publish prerelease to PyPI with trusted publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
 
   publish-pypi:
     name: Publish stable release to PyPI
