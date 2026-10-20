@@ -2,9 +2,16 @@ import asyncio
 import json
 import threading
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, overload, runtime_checkable
 
-from evidor.models import GenerationRequest, GenerationResponse
+from evidor.models import (
+    AsyncStreamResponse,
+    GenerationRequest,
+    GenerationResponse,
+    StreamChunk,
+    StreamResponse,
+    ToolCall,
+)
 from evidor.utils import run_async_in_sync
 
 if TYPE_CHECKING:
@@ -47,11 +54,41 @@ def is_client_closed(client: Any) -> bool:
 class ModelProvider(Protocol):
     """Produces one normalized response from one normalized request."""
 
-    def generate(self, request: GenerationRequest) -> GenerationResponse:
+    @overload
+    def generate(self, request: GenerationRequest, *, stream: Literal[False] = False) -> GenerationResponse: ...
+
+    @overload
+    def generate(self, request: GenerationRequest, *, stream: Literal[True]) -> StreamResponse: ...
+
+    @overload
+    def generate(
+        self, request: GenerationRequest, *, stream: bool = False
+    ) -> GenerationResponse | StreamResponse: ...
+
+    def generate(
+        self, request: GenerationRequest, *, stream: bool = False
+    ) -> GenerationResponse | StreamResponse:
         """Generate a response for the request synchronously."""
         ...
 
-    async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+    @overload
+    async def generate_async(
+        self, request: GenerationRequest, *, stream: Literal[False] = False
+    ) -> GenerationResponse: ...
+
+    @overload
+    async def generate_async(
+        self, request: GenerationRequest, *, stream: Literal[True]
+    ) -> AsyncStreamResponse: ...
+
+    @overload
+    async def generate_async(
+        self, request: GenerationRequest, *, stream: bool = False
+    ) -> GenerationResponse | AsyncStreamResponse: ...
+
+    async def generate_async(
+        self, request: GenerationRequest, *, stream: bool = False
+    ) -> GenerationResponse | AsyncStreamResponse:
         """Generate a response for the request asynchronously."""
         ...
 
@@ -94,16 +131,20 @@ class BaseProvider:
         """The token threshold for provider-native context compaction, if configured."""
         return getattr(self, "_compact_threshold", None)
 
-    async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+    async def generate_async(
+        self, request: GenerationRequest, *, stream: bool = False
+    ) -> GenerationResponse | AsyncStreamResponse:
         """Generate a response asynchronously. Subclasses should override this natively."""
         if type(self).generate != BaseProvider.generate:
-            return await asyncio.to_thread(self.generate, request)
+            return await asyncio.to_thread(self.generate, request, stream=stream)
         raise NotImplementedError(f"{self.__class__.__name__} must implement generate_async")
 
-    def generate(self, request: GenerationRequest) -> GenerationResponse:
+    def generate(
+        self, request: GenerationRequest, *, stream: bool = False
+    ) -> GenerationResponse | StreamResponse:
         """Generate a response synchronously. Dispatches to generate_async via run_async_in_sync."""
         return run_async_in_sync(
-            lambda: self.generate_async(request),
+            lambda: self.generate_async(request, stream=stream),
             error_message=(
                 f"{self.__class__.__name__}.generate() cannot be called from a running event loop. "
                 "Use 'await provider.generate_async()' instead."
@@ -117,6 +158,41 @@ class BaseProvider:
     async def close_async(self) -> None:
         """Close any cached asynchronous or synchronous client sessions."""
         self.close()
+
+
+class ToolCallAccumulator:
+    """Accumulates in-flight streaming tool calls across partial chunks."""
+
+    def __init__(self) -> None:
+        self._calls: dict[str, dict[str, Any]] = {}
+        self._completed: list[ToolCall] = []
+
+    def start_call(self, call_id: str, name: str) -> None:
+        if call_id not in self._calls:
+            self._calls[call_id] = {"id": call_id, "name": name, "args_parts": []}
+        elif name and not self._calls[call_id]["name"]:
+            self._calls[call_id]["name"] = name
+
+    def add_arguments_delta(self, call_id: str, delta: str) -> None:
+        if call_id in self._calls:
+            self._calls[call_id]["args_parts"].append(delta)
+        else:
+            self._calls[call_id] = {"id": call_id, "name": "", "args_parts": [delta]}
+
+    def complete_call(self, call_id: str) -> ToolCall | None:
+        data = self._calls.pop(call_id, None)
+        if not data:
+            return None
+        raw_args = "".join(data["args_parts"])
+        parsed = safe_parse_tool_arguments(raw_args)
+        tc = ToolCall(id=data["id"], name=data["name"] or "tool", arguments=parsed)
+        self._completed.append(tc)
+        return tc
+
+    def finalize_all(self) -> list[ToolCall]:
+        for call_id in list(self._calls.keys()):
+            self.complete_call(call_id)
+        return list(self._completed)
 
 
 def extract_system_prompt(request: GenerationRequest) -> str:

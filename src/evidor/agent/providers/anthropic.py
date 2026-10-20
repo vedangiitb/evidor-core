@@ -1,11 +1,20 @@
 import asyncio
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import AsyncIterator, Iterator, Sequence
+from typing import Any, Literal, overload
 
-from evidor.models import GenerationRequest, GenerationResponse, Message, ToolCall
+from evidor.models import (
+    AsyncStreamResponse,
+    GenerationRequest,
+    GenerationResponse,
+    Message,
+    StreamChunk,
+    StreamResponse,
+    ToolCall,
+)
 from evidor.utils import check_sync_allowed
 from .base import (
     BaseProvider,
+    ToolCallAccumulator,
     build_token_usage,
     extract_system_prompt,
     is_client_closed,
@@ -90,30 +99,147 @@ class AnthropicProvider(BaseProvider):
             compact_instructions=self._compact_instructions,
         )
 
-    def generate(self, request: GenerationRequest) -> GenerationResponse:
+    @overload
+    def generate(self, request: GenerationRequest, *, stream: Literal[False] = False) -> GenerationResponse: ...
+
+    @overload
+    def generate(self, request: GenerationRequest, *, stream: Literal[True]) -> StreamResponse: ...
+
+    @overload
+    def generate(
+        self, request: GenerationRequest, *, stream: bool = False
+    ) -> GenerationResponse | StreamResponse: ...
+
+    def generate(
+        self, request: GenerationRequest, *, stream: bool = False
+    ) -> GenerationResponse | StreamResponse:
         check_sync_allowed(
             "AnthropicProvider.generate() cannot be called from a running event loop. "
             "Use 'await provider.generate_async()' instead."
         )
 
         client = self._get_client()
+        should_stream = stream or request.stream
         payload = self._build_request_payload(request)
+        if should_stream:
+            payload["stream"] = True
+            if self._compact_threshold is not None or self._compact_instructions is not None:
+                raw_stream = client.beta.messages.create(**payload)
+            else:
+                raw_stream = client.messages.create(**payload)
+            return StreamResponse(self._create_stream(raw_stream))
+
         if self._compact_threshold is not None or self._compact_instructions is not None:
             response_msg = client.beta.messages.create(**payload)
         else:
             response_msg = client.messages.create(**payload)
         return self._parse_response(response_msg)
 
-    async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+    @overload
+    async def generate_async(
+        self, request: GenerationRequest, *, stream: Literal[False] = False
+    ) -> GenerationResponse: ...
+
+    @overload
+    async def generate_async(
+        self, request: GenerationRequest, *, stream: Literal[True]
+    ) -> AsyncStreamResponse: ...
+
+    @overload
+    async def generate_async(
+        self, request: GenerationRequest, *, stream: bool = False
+    ) -> GenerationResponse | AsyncStreamResponse: ...
+
+    async def generate_async(
+        self, request: GenerationRequest, *, stream: bool = False
+    ) -> GenerationResponse | AsyncStreamResponse:
         client = self._get_async_client()
+        should_stream = stream or request.stream
         if client is not None:
             payload = self._build_request_payload(request)
+            if should_stream:
+                payload["stream"] = True
+                if self._compact_threshold is not None or self._compact_instructions is not None:
+                    raw_stream = await client.beta.messages.create(**payload)
+                else:
+                    raw_stream = await client.messages.create(**payload)
+                return AsyncStreamResponse(self._create_async_stream(raw_stream))
+
             if self._compact_threshold is not None or self._compact_instructions is not None:
                 response_msg = await client.beta.messages.create(**payload)
             else:
                 response_msg = await client.messages.create(**payload)
             return self._parse_response(response_msg)
-        return await asyncio.to_thread(self.generate, request)
+        return await asyncio.to_thread(self.generate, request, stream=stream)
+
+    def _create_stream(self, raw_stream: Any) -> Iterator[StreamChunk]:
+        tool_acc = ToolCallAccumulator()
+        block_id_map: dict[str, str] = {}
+
+        for event in raw_stream:
+            yield from self._process_anthropic_event(event, tool_acc, block_id_map)
+
+        remaining_tools = tool_acc.finalize_all()
+        if remaining_tools:
+            yield StreamChunk(tool_calls=tuple(remaining_tools))
+
+    async def _create_async_stream(self, raw_stream: Any) -> AsyncIterator[StreamChunk]:
+        tool_acc = ToolCallAccumulator()
+        block_id_map: dict[str, str] = {}
+
+        async for event in raw_stream:
+            for chunk in self._process_anthropic_event(event, tool_acc, block_id_map):
+                yield chunk
+
+        remaining_tools = tool_acc.finalize_all()
+        if remaining_tools:
+            yield StreamChunk(tool_calls=tuple(remaining_tools))
+
+    def _process_anthropic_event(
+        self, event: Any, tool_acc: ToolCallAccumulator, block_id_map: dict[str, str]
+    ) -> Iterator[StreamChunk]:
+        ev_type = getattr(event, "type", None)
+
+        if ev_type == "content_block_start":
+            idx = str(getattr(event, "index", 0))
+            cb = getattr(event, "content_block", None)
+            if cb and getattr(cb, "type", None) == "tool_use":
+                call_id = getattr(cb, "id", None) or f"call_{idx}"
+                name = getattr(cb, "name", "") or ""
+                block_id_map[idx] = call_id
+                tool_acc.start_call(call_id, name)
+
+        elif ev_type == "content_block_delta":
+            delta = getattr(event, "delta", None)
+            if delta is not None:
+                delta_type = getattr(delta, "type", None)
+                if delta_type == "text_delta" or hasattr(delta, "text"):
+                    txt = getattr(delta, "text", "") or ""
+                    if txt:
+                        yield StreamChunk(text=txt, raw_event=event)
+                elif delta_type == "thinking_delta" or hasattr(delta, "thinking"):
+                    th = getattr(delta, "thinking", "") or ""
+                    if th:
+                        yield StreamChunk(thinking=th, raw_event=event)
+                elif delta_type == "input_json_delta" or hasattr(delta, "partial_json"):
+                    idx = str(getattr(event, "index", 0))
+                    call_id = block_id_map.get(idx, f"call_{idx}")
+                    pj = getattr(delta, "partial_json", "") or ""
+                    tool_acc.add_arguments_delta(call_id, pj)
+
+        elif ev_type == "content_block_stop":
+            idx = str(getattr(event, "index", 0))
+            call_id = block_id_map.pop(idx, None)
+            if call_id:
+                tc = tool_acc.complete_call(call_id)
+                if tc:
+                    yield StreamChunk(tool_calls=(tc,), raw_event=event)
+
+        elif ev_type == "message_stop":
+            yield StreamChunk(is_finished=True, raw_event=event)
+        elif hasattr(event, "text") and isinstance(event.text, str):
+            if event.text:
+                yield StreamChunk(text=event.text, raw_event=event)
 
     def close(self) -> None:
         with self._lock:

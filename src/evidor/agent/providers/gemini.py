@@ -1,11 +1,20 @@
 import asyncio
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import AsyncIterator, Iterator, Sequence
+from typing import Any, Literal, overload
 
-from evidor.models import GenerationRequest, GenerationResponse, Message, ToolCall
+from evidor.models import (
+    AsyncStreamResponse,
+    GenerationRequest,
+    GenerationResponse,
+    Message,
+    StreamChunk,
+    StreamResponse,
+    ToolCall,
+)
 from evidor.utils import check_sync_allowed
 from .base import (
     BaseProvider,
+    ToolCallAccumulator,
     build_token_usage,
     extract_system_prompt,
     safe_parse_tool_arguments,
@@ -154,24 +163,124 @@ class GeminiProvider(BaseProvider):
             thinking=self._thinking,
         )
 
-    def generate(self, request: GenerationRequest) -> GenerationResponse:
+    @overload
+    def generate(self, request: GenerationRequest, *, stream: Literal[False] = False) -> GenerationResponse: ...
+
+    @overload
+    def generate(self, request: GenerationRequest, *, stream: Literal[True]) -> StreamResponse: ...
+
+    @overload
+    def generate(
+        self, request: GenerationRequest, *, stream: bool = False
+    ) -> GenerationResponse | StreamResponse: ...
+
+    def generate(
+        self, request: GenerationRequest, *, stream: bool = False
+    ) -> GenerationResponse | StreamResponse:
         check_sync_allowed(
             "GeminiProvider.generate() cannot be called from a running event loop. "
             "Use 'await provider.generate_async()' instead."
         )
 
         client, types = self._get_client_and_types()
+        should_stream = stream or request.stream
         payload = self._build_request_payload(request, types)
+        if should_stream:
+            payload["stream"] = True
+            raw_stream = client.interactions.create(**payload)
+            return StreamResponse(self._create_stream(raw_stream))
+
         response = client.interactions.create(**payload)
         return self._parse_response(response)
 
-    async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+    @overload
+    async def generate_async(
+        self, request: GenerationRequest, *, stream: Literal[False] = False
+    ) -> GenerationResponse: ...
+
+    @overload
+    async def generate_async(
+        self, request: GenerationRequest, *, stream: Literal[True]
+    ) -> AsyncStreamResponse: ...
+
+    @overload
+    async def generate_async(
+        self, request: GenerationRequest, *, stream: bool = False
+    ) -> GenerationResponse | AsyncStreamResponse: ...
+
+    async def generate_async(
+        self, request: GenerationRequest, *, stream: bool = False
+    ) -> GenerationResponse | AsyncStreamResponse:
         client, types = self._get_client_and_types()
+        should_stream = stream or request.stream
         payload = self._build_request_payload(request, types)
         if hasattr(client, "aio") and hasattr(client.aio, "interactions") and hasattr(client.aio.interactions, "create"):
+            if should_stream:
+                payload["stream"] = True
+                raw_stream = await client.aio.interactions.create(**payload)
+                return AsyncStreamResponse(self._create_async_stream(raw_stream))
+
             response = await client.aio.interactions.create(**payload)
             return self._parse_response(response)
-        return await asyncio.to_thread(self.generate, request)
+        return await asyncio.to_thread(self.generate, request, stream=stream)
+
+    def _create_stream(self, raw_stream: Any) -> Iterator[StreamChunk]:
+        tool_acc = ToolCallAccumulator()
+        for event in raw_stream:
+            yield from self._process_gemini_event(event, tool_acc)
+
+        remaining_tools = tool_acc.finalize_all()
+        if remaining_tools:
+            yield StreamChunk(tool_calls=tuple(remaining_tools))
+
+    async def _create_async_stream(self, raw_stream: Any) -> AsyncIterator[StreamChunk]:
+        tool_acc = ToolCallAccumulator()
+        async for event in raw_stream:
+            for chunk in self._process_gemini_event(event, tool_acc):
+                yield chunk
+
+        remaining_tools = tool_acc.finalize_all()
+        if remaining_tools:
+            yield StreamChunk(tool_calls=tuple(remaining_tools))
+
+    def _process_gemini_event(self, event: Any, tool_acc: ToolCallAccumulator) -> Iterator[StreamChunk]:
+        ev_type = getattr(event, "event_type", None) or getattr(event, "type", None)
+
+        delta_obj = getattr(event, "delta", None)
+        if delta_obj is not None:
+            delta_type = getattr(delta_obj, "type", None)
+            if delta_type == "text" or hasattr(delta_obj, "text"):
+                txt = getattr(delta_obj, "text", "") or ""
+                if txt:
+                    yield StreamChunk(text=txt, raw_event=event)
+            elif delta_type in ("thought_summary", "thought"):
+                th = getattr(delta_obj, "text", "") or getattr(delta_obj, "summary", "") or ""
+                if th:
+                    yield StreamChunk(thinking=th, raw_event=event)
+            elif delta_type == "arguments_delta" or hasattr(delta_obj, "arguments"):
+                call_id = getattr(event, "event_id", None) or getattr(event, "step_id", None) or "call_1"
+                args_delta = getattr(delta_obj, "arguments", "") or getattr(delta_obj, "text", "") or ""
+                tool_acc.add_arguments_delta(call_id, args_delta)
+
+        if ev_type in ("step.start", "step_start"):
+            step = getattr(event, "step", None)
+            if step and getattr(step, "type", None) == "function_call":
+                call_id = getattr(step, "id", None) or getattr(event, "event_id", None) or "call_1"
+                tool_acc.start_call(call_id, getattr(step, "name", "") or "")
+        elif ev_type in ("step.stop", "step_stop"):
+            call_id = getattr(event, "event_id", None) or getattr(event, "step_id", None)
+            if call_id:
+                tc = tool_acc.complete_call(call_id)
+                if tc:
+                    yield StreamChunk(tool_calls=(tc,), raw_event=event)
+
+        if ev_type in ("interaction.completed", "interaction_completed") or hasattr(event, "interaction"):
+            interaction = getattr(event, "interaction", event)
+            final_resp = self._parse_response(interaction)
+            yield StreamChunk(is_finished=True, response=final_resp, raw_event=event)
+        elif hasattr(event, "text") and isinstance(event.text, str) and delta_obj is None:
+            if event.text:
+                yield StreamChunk(text=event.text, raw_event=event)
 
     def close(self) -> None:
         with self._lock:

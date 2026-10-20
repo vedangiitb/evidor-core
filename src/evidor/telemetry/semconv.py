@@ -42,5 +42,8 @@ EVIDOR_RETRY_DELAY_SECONDS: Final[str] = "evidor.retry.delay_seconds"
 EVIDOR_RETRY_MAX: Final[str] = "evidor.retry.max"
 EVIDOR_CALL_TYPE: Final[str] = "evidor.call_type"
 EVIDOR_THINKING_CONTENT: Final[str] = "evidor.thinking_content"
+EVIDOR_STREAMING: Final[str] = "llm.streaming"
+EVIDOR_TIME_TO_FIRST_TOKEN_MS: Final[str] = "evidor.time_to_first_token_ms"
+GEN_AI_TIME_TO_FIRST_TOKEN_MS: Final[str] = "gen_ai.response.time_to_first_token_ms"
 
 

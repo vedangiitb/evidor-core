@@ -167,6 +167,7 @@ class LLMCallStartEvent(TelemetryEvent):
     input_messages: tuple[dict[str, Any], ...] = ()
     input_prompt: str = ""
     retry_attempt: int = 0
+    is_streaming: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.input_messages, (list, tuple)):
@@ -180,6 +181,8 @@ class LLMCallStartEvent(TelemetryEvent):
         attrs[semconv.EVIDOR_CALL_TYPE] = self.call_type
         attrs["llm.messages_count"] = self.messages_count
         attrs["llm.tools_count"] = self.tools_count
+        if self.is_streaming:
+            attrs[semconv.EVIDOR_STREAMING] = True
         if self.retry_attempt > 0:
             attrs[semconv.EVIDOR_RETRY_COUNT] = self.retry_attempt
         if self.input_prompt:
@@ -205,6 +208,8 @@ class LLMCallEndEvent(TelemetryEvent):
     thinking_text: str | None = None
     error: str | None = None
     retry_attempt: int = 0
+    time_to_first_token_ms: float | None = None
+    is_streaming: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.output_tool_calls, (list, tuple)):
@@ -219,6 +224,11 @@ class LLMCallEndEvent(TelemetryEvent):
         attrs["status"] = self.status
         attrs["duration_ms"] = self.duration_ms
         attrs["llm.tool_calls_count"] = self.tool_calls_count
+        if self.is_streaming:
+            attrs[semconv.EVIDOR_STREAMING] = True
+        if self.time_to_first_token_ms is not None:
+            attrs[semconv.EVIDOR_TIME_TO_FIRST_TOKEN_MS] = self.time_to_first_token_ms
+            attrs[semconv.GEN_AI_TIME_TO_FIRST_TOKEN_MS] = self.time_to_first_token_ms
         if self.retry_attempt > 0:
             attrs[semconv.EVIDOR_RETRY_COUNT] = self.retry_attempt
         if self.output_text:

@@ -48,6 +48,16 @@ response = agent.send("What color did I say I like?")
 print(response.text)
 ```
 
+#### Streaming Responses
+
+Pass `stream=True` to stream responses token-by-token across any provider:
+
+```python
+stream = agent.send("What color did I say I like?", stream=True)
+for chunk in stream:
+    print(chunk, end="", flush=True)
+```
+
 ### System Prompts
 
 Configure an initial system prompt when creating an `Agent`. Evidor delivers the instructions natively across subsequent turns:
@@ -217,6 +227,167 @@ if response.tool_calls:
     for call in response.tool_calls:
         print(f"Model requested tool: {call.name} with args {call.arguments}")
 ```
+
+---
+
+## Streaming Responses
+
+Evidor provides a provider-agnostic streaming interface across all supported providers (**OpenAI**, **Google Gemini**, and **Anthropic Claude**). By passing `stream=True`, you receive an iterable stream of lightweight chunks that emit tokens in real time while maintaining 100% compatibility with conversation memory, tool execution loops, and observability.
+
+### Unified Developer Experience
+
+The streaming interface is identical whether you are using OpenAI Responses API, Google GenAI Interactions API, or Anthropic Messages API:
+- Pass `stream=True` to `agent.send()` or `await agent.send_async()`.
+- Chunks stringify directly to their text content (`str(chunk)` returns `chunk.text`), so standard printing works immediately: `print(chunk, end="", flush=True)`.
+- At the end of the stream, conversation history, compaction summaries, and server-side state (`last_response_id`) are automatically updated.
+
+### Stateful Agent Streaming
+
+#### Synchronous Streaming (`agent.send`)
+
+```python
+from evidor import Agent, OpenAIProvider
+
+agent = Agent(OpenAIProvider(model="gpt-6-astra"))
+
+# Stream responses token-by-token
+stream = agent.send("Write a short haiku about debugging code.", stream=True)
+for chunk in stream:
+    print(chunk, end="", flush=True)
+
+# Access final accumulated response, token usage, and latency
+print(f"\nModel: {stream.response.model}")
+print(f"Total tokens: {stream.response.usage.total_tokens}")
+print(f"Time to first token: {stream.time_to_first_token_ms:.1f}ms")
+```
+
+#### Asynchronous Streaming (`agent.send_async`)
+
+In async environments (FastAPI, Starlette, async data workers), use `await agent.send_async(..., stream=True)`:
+
+```python
+import asyncio
+from evidor import Agent, GeminiProvider
+
+async def main():
+    agent = Agent(GeminiProvider(model="gemini-3.8-flash"))
+    stream = await agent.send_async("Explain how event loops work.", stream=True)
+    async for chunk in stream:
+        print(chunk, end="", flush=True)
+
+    print(f"\nFinished with {stream.time_to_first_token_ms:.1f}ms TTFT")
+
+asyncio.run(main())
+```
+
+---
+
+### Streaming with Tools: Seamless Background Execution
+
+When an agent needs to execute tools during a streaming turn:
+1. **Clean Text Output**: Tool calling arguments stream and accumulate behind the scenes. `chunk.text` remains `""` so raw JSON arguments never pollute the user stream.
+2. **Automatic Execution**: The agent detects and executes the tool function (concurrently via `asyncio.gather` if multiple tools were called) and updates the conversation history with the tool result.
+3. **Follow-Up Stream**: The model automatically streams its final synthesized answer as text chunks to the caller.
+
+#### Optional UI Indicators for Tool Calls
+
+If you are building a user interface and want to show a loading badge or status indicator when a tool is called, you can inspect `chunk.tool_calls`:
+
+```python
+from evidor import Agent, GeminiProvider, tool
+
+@tool
+def check_order_status(order_id: str) -> str:
+    """Look up order shipping status."""
+    return f"Order {order_id} is out for delivery."
+
+agent = Agent(GeminiProvider(model="gemini-3.8-flash"), tools=[check_order_status])
+stream = agent.send("Where is my order ORD-992?", stream=True)
+
+for chunk in stream:
+    # chunk.tool_calls contains fully validated ToolCall instances when a tool is invoked
+    if chunk.tool_calls:
+        for call in chunk.tool_calls:
+            print(f"\n[⚡ Executing tool: {call.name} with args {call.arguments}]")
+
+    # Regular text tokens
+    print(chunk, end="", flush=True)
+```
+
+---
+
+### Streaming Thinking & Reasoning Tokens
+
+For reasoning models (**OpenAI** `gpt-6-astra`, **Anthropic** `claude-3-7-sonnet-20250219`, or **Gemini** `gemini-3.8-flash` with thinking enabled), intermediate thought tokens are streamed via `chunk.thinking`:
+
+```python
+from evidor import Agent, AnthropicProvider
+
+agent = Agent(AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking=2048))
+stream = agent.send("Solve: Which is greater, 9.11 or 9.9?", stream=True)
+
+for chunk in stream:
+    if chunk.thinking:
+        print(f"\033[90m{chunk.thinking}\033[0m", end="", flush=True)  # Dim thinking text
+    if chunk.text:
+        print(chunk.text, end="", flush=True)
+```
+
+---
+
+### Stateless Provider Streaming
+
+You can also stream direct single-turn LLM calls using `provider.generate()` or `provider.generate_async()`:
+
+```python
+from evidor import GenerationRequest, OpenAIProvider
+
+provider = OpenAIProvider(model="gpt-6-astra")
+
+request = GenerationRequest(
+    prompt="Explain consensus in distributed systems.",
+    stream=True,
+)
+
+# Synchronous streaming
+stream = provider.generate(request)
+for chunk in stream:
+    print(chunk, end="", flush=True)
+
+# Asynchronous streaming
+# stream = await provider.generate_async(request)
+# async for chunk in stream:
+#     print(chunk, end="", flush=True)
+```
+
+---
+
+### Context Managers & Resource Cleanup
+
+Streams implement context manager protocols (`with` / `async with`) for deterministic cleanup if you break out of iteration early:
+
+```python
+# Sync context manager
+with agent.send("List 5 facts about space.", stream=True) as stream:
+    for chunk in stream:
+        print(chunk, end="", flush=True)
+
+# Async context manager
+async with await agent.send_async("List 5 facts about space.", stream=True) as stream:
+    async for chunk in stream:
+        print(chunk, end="", flush=True)
+```
+
+If you need the final accumulated response without consuming the remaining chunks manually, call `stream.get_final_response()` (or `await stream.get_final_response()` in async mode).
+
+---
+
+### Telemetry & Time to First Token (TTFT)
+
+When streaming is enabled, Evidor tracks streaming-specific metrics and lifecycle events:
+- **`time_to_first_token_ms`**: Measured precisely from the moment the HTTP stream request starts until the first content or thinking token arrives. Accessible on `stream.time_to_first_token_ms` and recorded on `LLMCallEndEvent`.
+- **`is_streaming`**: Boolean flag set to `True` on `LLMCallStartEvent` and `LLMCallEndEvent`.
+- **Zero-Flooding Architecture**: Evidor's telemetry pipeline does not emit events per token. Lifecycle events are recorded at the call boundaries, preserving maximum streaming performance without saturating queues or telemetry sinks.
 
 ---
 
@@ -867,6 +1038,7 @@ Standard attributes automatically populated:
 * `gen_ai.system`, `gen_ai.request.model`, `gen_ai.response.model`
 * `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.total_tokens`
 * `llm.input_prompt`, `llm.input_messages`, `llm.output_text`, `llm.output_tool_calls`
+* `llm.is_streaming`, `llm.time_to_first_token_ms` (when streaming)
 * `evidor.agent.run_id`, `evidor.tool.name`, `evidor.mcp.server_name`
 
 
