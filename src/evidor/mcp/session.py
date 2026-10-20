@@ -328,52 +328,6 @@ class MCPSession:
                 )
                 raise
 
-    def list_resources(self, timeout: float | None = 30.0) -> Any:
-        """List available resources on the MCP server synchronously."""
-        return run_async_in_sync(
-            lambda: self.list_resources_async(timeout=timeout),
-            error_message="MCPSession.list_resources() cannot be called from a running event loop. Use 'await session.list_resources_async()' instead.",
-        )
-
-    async def list_resources_async(self, timeout: float | None = 30.0) -> Any:
-        """List available resources on the MCP server asynchronously."""
-        return await self._send_cmd_async("list_resources", timeout=timeout)
-
-    def read_resource(self, uri: str, timeout: float | None = 30.0) -> Any:
-        """Read a resource from the MCP server synchronously."""
-        return run_async_in_sync(
-            lambda: self.read_resource_async(uri, timeout=timeout),
-            error_message="MCPSession.read_resource() cannot be called from a running event loop. Use 'await session.read_resource_async()' instead.",
-        )
-
-    async def read_resource_async(self, uri: str, timeout: float | None = 30.0) -> Any:
-        """Read a resource from the MCP server asynchronously."""
-        return await self._send_cmd_async("read_resource", uri, timeout=timeout)
-
-    def list_prompts(self, timeout: float | None = 30.0) -> Any:
-        """List available prompts on the MCP server synchronously."""
-        return run_async_in_sync(
-            lambda: self.list_prompts_async(timeout=timeout),
-            error_message="MCPSession.list_prompts() cannot be called from a running event loop. Use 'await session.list_prompts_async()' instead.",
-        )
-
-    async def list_prompts_async(self, timeout: float | None = 30.0) -> Any:
-        """List available prompts on the MCP server asynchronously."""
-        return await self._send_cmd_async("list_prompts", timeout=timeout)
-
-    def get_prompt(self, name: str, arguments: dict[str, Any] | None = None, timeout: float | None = 30.0) -> Any:
-        """Retrieve a rendered prompt from the MCP server synchronously."""
-        return run_async_in_sync(
-            lambda: self.get_prompt_async(name, arguments=arguments, timeout=timeout),
-            error_message="MCPSession.get_prompt() cannot be called from a running event loop. Use 'await session.get_prompt_async()' instead.",
-        )
-
-    async def get_prompt_async(
-        self, name: str, arguments: dict[str, Any] | None = None, timeout: float | None = 30.0
-    ) -> Any:
-        """Retrieve a rendered prompt from the MCP server asynchronously."""
-        return await self._send_cmd_async("get_prompt", name, arguments=arguments or {}, timeout=timeout)
-
     async def get_evidor_tools(self, force_refresh: bool = False) -> tuple[Tool, ...]:
         """Convert all MCP tools exposed by this server into Evidor Tool objects."""
         if self._cached_tools is not None and not force_refresh:
