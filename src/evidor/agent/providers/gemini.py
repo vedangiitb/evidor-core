@@ -267,16 +267,23 @@ class GeminiProvider(BaseProvider):
         idx = str(getattr(event, "index", 0))
 
         delta_obj = getattr(event, "delta", None)
-        if delta_obj is not None:
+        if delta_obj is not None and ev_type not in (
+            "step.start",
+            "step_start",
+            "step.stop",
+            "step_stop",
+            "interaction.completed",
+            "interaction_completed",
+        ):
             delta_type = getattr(delta_obj, "type", None)
-            if delta_type == "text" or hasattr(delta_obj, "text"):
+            if delta_type == "text" or (hasattr(delta_obj, "text") and not hasattr(delta_obj, "arguments")):
                 txt = getattr(delta_obj, "text", "") or ""
-                if txt:
+                if isinstance(txt, str) and txt:
                     text_parts.append(txt)
                     yield StreamChunk(text=txt, raw_event=event)
             elif delta_type in ("thought_summary", "thought"):
                 th = getattr(delta_obj, "text", "") or getattr(delta_obj, "summary", "") or ""
-                if th:
+                if isinstance(th, str) and th:
                     yield StreamChunk(thinking=th, raw_event=event)
             elif delta_type == "arguments_delta" or hasattr(delta_obj, "arguments"):
                 call_id = (
@@ -286,10 +293,11 @@ class GeminiProvider(BaseProvider):
                     or "call_1"
                 )
                 args_delta = getattr(delta_obj, "arguments", "") or getattr(delta_obj, "text", "") or ""
-                tool_acc.add_arguments_delta(call_id, args_delta)
+                if isinstance(args_delta, str) and args_delta:
+                    tool_acc.add_arguments_delta(call_id, args_delta)
             elif delta_type in ("thought_signature", "thought"):
                 sig = getattr(delta_obj, "signature", None)
-                if sig:
+                if isinstance(sig, str) and sig:
                     thought_blocks.append({
                         "type": "thought",
                         "thought": True,
@@ -327,7 +335,7 @@ class GeminiProvider(BaseProvider):
         if ev_type in ("interaction.completed", "interaction_completed"):
             interaction = getattr(event, "interaction", event)
             final_resp = self._parse_response(interaction)
-            accumulated_text = "".join(text_parts)
+            accumulated_text = "".join(s for s in text_parts if isinstance(s, str))
             final_text = final_resp.text or accumulated_text
             final_tools = final_resp.tool_calls or tuple(tool_acc._completed)
             final_resp = GenerationResponse(
