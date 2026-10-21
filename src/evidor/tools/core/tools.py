@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import inspect
 from typing import Any
 
+from evidor.constants import ASYNC_TOOL_EXECUTE_ERROR
 from evidor.utils import (
     generate_parameters_schema,
     parse_docstring,
@@ -52,7 +53,7 @@ class Tool:
         """
         return run_async_in_sync(
             lambda: self.execute_async(**kwargs),
-            error_message="Async tool cannot be executed synchronously from a running event loop. Use 'await tool.execute_async()' instead.",
+            error_message=ASYNC_TOOL_EXECUTE_ERROR,
         )
 
     async def execute_async(self, **kwargs: Any) -> Any:

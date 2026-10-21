@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from ...constants import TOOL_EXECUTOR_EXECUTE_ERROR
 from ...models import ToolCall
 from ...telemetry import (
     ErrorEvent,
@@ -41,10 +42,7 @@ class ToolExecutor:
         """Execute a tool call synchronously."""
         return run_async_in_sync(
             lambda: self.execute_async(call),
-            error_message=(
-                "ToolExecutor.execute() cannot be called from a running event loop. "
-                "Use 'await executor.execute_async()' instead."
-            ),
+            error_message=TOOL_EXECUTOR_EXECUTE_ERROR,
         )
 
     async def execute_async(self, call: ToolCall) -> str:
