@@ -21,12 +21,13 @@ response = agent.send("Give a one-sentence explanation of dependency inversion."
 print(response.text)
 ```
 
-## Core Architecture: Two Execution Paradigms
+## Core Architecture: Execution Paradigms
 
-Evidor cleanly separates AI execution into two paradigms:
+Evidor cleanly separates AI execution into flexible paradigms:
 
-1. **Stateful Conversations (`Agent`) (Recommended)**: The primary and recommended way to build applications with Evidor. Conversations maintain state automatically across turns, so you don't have to pass the entire message history each time. Evidor manages session state, context continuation, and tool execution loops seamlessly under the hood.
-2. **Stateless LLM Calls (`provider.generate`)**: Direct single-turn or user-managed requests with tools, structured outputs, and raw message histories. Available when you need low-level control or want to manage message storage and persistence yourself.
+1. **Stateful Conversations (`Agent`) (Default & Recommended)**: The primary and recommended way to build applications with Evidor. Conversations maintain state automatically across turns, so you don't have to pass the entire message history each time. Evidor manages session state, context continuation, and tool execution loops seamlessly under the hood.
+2. **Stateless Agents (`Agent(..., stateless=True)`)**: When you want high-level agent capabilities (automatic multi-step tool execution loops, MCP tools, system prompts, and telemetry) but want every `.send()` / `.send_async()` call to execute completely independently without remembering past turns.
+3. **Stateless LLM Calls (`provider.generate`)**: Direct single-turn or user-managed requests with tools, structured outputs, and raw message histories. Available when you need low-level control or want to manage message storage and persistence yourself.
 
 ---
 
@@ -143,6 +144,38 @@ for msg in agent.messages:
 agent.reset()  # or agent.clear_history()
 print(agent.last_response_id)  # None
 ```
+
+### Stateless Agent (`stateless=True`)
+
+If you want the high-level capabilities of an `Agent`—automatic multi-step tool execution loops, MCP tools, system prompts, and telemetry—but want each `.send()` or `.send_async()` call to execute independently without remembering prior turns, pass `stateless=True`:
+
+```python
+from evidor import Agent, OpenAIProvider
+from evidor.tools import tool
+
+@tool
+def get_stock_price(ticker: str) -> float:
+    return 150.25
+
+# Each send() call executes independently without cross-turn memory
+agent = Agent(
+    OpenAIProvider(model="gpt-6-astra"),
+    system_prompt="You are a financial assistant.",
+    tools=[get_stock_price],
+    stateless=True,
+)
+
+# Turn 1: Invokes tool loop and returns answer
+resp1 = agent.send("What is AAPL's price?")
+
+# Turn 2: Starts completely fresh without prior turns or response chaining
+resp2 = agent.send("What did I just ask?")
+```
+
+**Key Advantages of `stateless=True`**:
+- **Automatic Inter-turn Isolation**: For OpenAI and Gemini, `previous_response_id` / `previous_interaction_id` are not chained across turns. For Anthropic, earlier turns are not replayed.
+- **Intra-turn Tool Loops Intact**: Multi-step tool calls *within* a single turn (tool call $\to$ tool result $\to$ final response) work seamlessly because state is preserved during the turn.
+- **Concurrency-Safe**: Each turn runs within an isolated ephemeral context frame, enabling concurrent `.send_async()` calls without cross-talk.
 
 ---
 
