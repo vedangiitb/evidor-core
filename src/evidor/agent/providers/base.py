@@ -4,6 +4,7 @@ import threading
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal, Protocol, overload, runtime_checkable
 
+from evidor.constants import format_provider_generate_error
 from evidor.models import (
     AsyncStreamResponse,
     GenerationRequest,
@@ -150,10 +151,7 @@ class BaseProvider:
         """Generate a response synchronously. Dispatches to generate_async via run_async_in_sync."""
         return run_async_in_sync(
             lambda: self.generate_async(request, stream=stream),
-            error_message=(
-                f"{self.__class__.__name__}.generate() cannot be called from a running event loop. "
-                "Use 'await provider.generate_async()' instead."
-            ),
+            error_message=format_provider_generate_error(self.__class__.__name__),
         )
 
     def close(self) -> None:

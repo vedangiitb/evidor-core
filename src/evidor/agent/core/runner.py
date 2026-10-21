@@ -38,12 +38,14 @@ class TurnExecutor:
         tool_executor: ToolExecutor,
         telemetry_bridge: AgentTelemetryBridge,
         max_tool_iterations: int = 10,
+        stateless: bool = False,
     ) -> None:
         self._provider = provider
         self._context = context
         self._tool_executor = tool_executor
         self._telemetry_bridge = telemetry_bridge
         self._max_tool_iterations = max_tool_iterations
+        self._stateless = stateless
 
     def update_tool_executor(self, executor: ToolExecutor) -> None:
         """Update the active ToolExecutor (e.g. after MCP tool synchronization)."""
@@ -78,8 +80,10 @@ class TurnExecutor:
         self,
         final_response: GenerationResponse,
         last_response: GenerationResponse | None,
+        context: ConversationContext | None = None,
     ) -> GenerationResponse:
         """Synthesize a fallback response if the model exhausts tool iterations without concluding."""
+        ctx = context or self._context
         final_text = (final_response.text or "").strip()
         if not final_text and last_response:
             final_text = (last_response.text or "").strip()
@@ -87,7 +91,7 @@ class TurnExecutor:
             final_text = (
                 f"Reached maximum tool iterations ({self._max_tool_iterations}) without a final response."
             )
-        self._context.append_assistant_response(text=final_text)
+        ctx.append_assistant_response(text=final_text)
         return GenerationResponse(
             id=final_response.id or (last_response.id if last_response else None),
             text=final_text,
@@ -96,20 +100,21 @@ class TurnExecutor:
 
     async def run_turn_async(self, message: str) -> GenerationResponse:
         """Asynchronously advance one complete user turn with automatic tool calling."""
+        turn_ctx = self._context.spawn_turn_context() if self._stateless else self._context
         run_id = f"run_{secrets.token_hex(6)}"
         with self._telemetry_bridge.run_scope(
-            run_id, message, self._context.system_prompt
+            run_id, message, turn_ctx.system_prompt
         ) as root_ctx:
             t0 = time.perf_counter()
             iterations = 0
             try:
-                user_msg = self._context.append_user_message(message)
+                user_msg = turn_ctx.append_user_message(message)
                 current_turn_messages: Sequence[Message] = [user_msg]
                 response: GenerationResponse | None = None
 
                 for _ in range(self._max_tool_iterations):
                     iterations += 1
-                    req = self._context.build_generation_request(
+                    req = turn_ctx.build_generation_request(
                         current_turn_messages, self._tool_executor.tools
                     )
 
@@ -117,9 +122,9 @@ class TurnExecutor:
                         self._provider, req
                     )
                     if response.id:
-                        self._context.last_response_id = response.id
+                        turn_ctx.last_response_id = response.id
 
-                    self._context.append_assistant_response(
+                    turn_ctx.append_assistant_response(
                         text=response.text,
                         tool_calls=response.tool_calls,
                         thinking=response.thinking,
@@ -128,6 +133,8 @@ class TurnExecutor:
                     )
 
                     if not response.tool_calls:
+                        if self._stateless:
+                            self._context.copy_from(turn_ctx)
                         duration_ms = (time.perf_counter() - t0) * 1000
                         self._telemetry_bridge.emit_run_end(
                             root_ctx=root_ctx,
@@ -141,19 +148,21 @@ class TurnExecutor:
 
                     # Execute tool calls and record results
                     tool_results = await self.execute_tool_calls_async(response.tool_calls)
-                    self._context.append_tool_results(tool_results)
+                    turn_ctx.append_tool_results(tool_results)
                     current_turn_messages = tool_results
 
                 # Iterations exhausted: perform terminal synthesis without tools
                 iterations += 1
-                final_req = self._context.build_final_request(current_turn_messages)
+                final_req = turn_ctx.build_final_request(current_turn_messages)
                 final_response = await self._telemetry_bridge.generate_with_telemetry_async(
                     self._provider, final_req
                 )
                 if final_response.id:
-                    self._context.last_response_id = final_response.id
+                    turn_ctx.last_response_id = final_response.id
 
-                result = self.finalize_loop_expiry(final_response, response)
+                result = self.finalize_loop_expiry(final_response, response, turn_ctx)
+                if self._stateless:
+                    self._context.copy_from(turn_ctx)
                 duration_ms = (time.perf_counter() - t0) * 1000
                 self._telemetry_bridge.emit_run_end(
                     root_ctx=root_ctx,
@@ -179,20 +188,21 @@ class TurnExecutor:
 
     async def stream_turn_async(self, message: str) -> AsyncIterator[StreamChunk]:
         """Asynchronously stream chunks across multi-turn tool execution."""
+        turn_ctx = self._context.spawn_turn_context() if self._stateless else self._context
         run_id = f"run_{secrets.token_hex(6)}"
         with self._telemetry_bridge.run_scope(
-            run_id, message, self._context.system_prompt
+            run_id, message, turn_ctx.system_prompt
         ) as root_ctx:
             t0 = time.perf_counter()
             iterations = 0
             try:
-                user_msg = self._context.append_user_message(message)
+                user_msg = turn_ctx.append_user_message(message)
                 current_turn_messages: Sequence[Message] = [user_msg]
                 response: GenerationResponse | None = None
 
                 for _ in range(self._max_tool_iterations):
                     iterations += 1
-                    req = self._context.build_generation_request(
+                    req = turn_ctx.build_generation_request(
                         current_turn_messages, self._tool_executor.tools, stream=True
                     )
 
@@ -207,9 +217,9 @@ class TurnExecutor:
                         response = await turn_stream.get_final_response()
 
                     if response.id:
-                        self._context.last_response_id = response.id
+                        turn_ctx.last_response_id = response.id
 
-                    self._context.append_assistant_response(
+                    turn_ctx.append_assistant_response(
                         text=response.text,
                         tool_calls=response.tool_calls,
                         thinking=response.thinking,
@@ -218,6 +228,8 @@ class TurnExecutor:
                     )
 
                     if not response.tool_calls:
+                        if self._stateless:
+                            self._context.copy_from(turn_ctx)
                         duration_ms = (time.perf_counter() - t0) * 1000
                         self._telemetry_bridge.emit_run_end(
                             root_ctx=root_ctx,
@@ -231,12 +243,12 @@ class TurnExecutor:
 
                     # Execute tool calls asynchronously
                     tool_results = await self.execute_tool_calls_async(response.tool_calls)
-                    self._context.append_tool_results(tool_results)
+                    turn_ctx.append_tool_results(tool_results)
                     current_turn_messages = tool_results
 
                 # Iterations exhausted: stream final synthesis without tools
                 iterations += 1
-                final_req = self._context.build_final_request(current_turn_messages, stream=True)
+                final_req = turn_ctx.build_final_request(current_turn_messages, stream=True)
                 final_stream = await self._telemetry_bridge.generate_with_telemetry_stream_async(
                     self._provider, final_req
                 )
@@ -247,9 +259,11 @@ class TurnExecutor:
                 if final_response is None:
                     final_response = await final_stream.get_final_response()
                 if final_response.id:
-                    self._context.last_response_id = final_response.id
+                    turn_ctx.last_response_id = final_response.id
 
-                result = self.finalize_loop_expiry(final_response, response)
+                result = self.finalize_loop_expiry(final_response, response, turn_ctx)
+                if self._stateless:
+                    self._context.copy_from(turn_ctx)
                 duration_ms = (time.perf_counter() - t0) * 1000
                 self._telemetry_bridge.emit_run_end(
                     root_ctx=root_ctx,
