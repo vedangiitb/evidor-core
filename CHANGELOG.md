@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.10.2-dev.1 (2026-10-21)
+
+### Bug Fixes
+
+- **agent**: Adding base url support
+  ([`f5f787f`](https://github.com/vedangiitb/evidor-core/commit/f5f787f3ab9015c73d6637b74c4af6fc7649035a))
+
+
 ## v1.10.1 (2026-10-20)
 
 
