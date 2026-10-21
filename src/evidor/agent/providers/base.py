@@ -131,6 +131,11 @@ class BaseProvider:
         """The token threshold for provider-native context compaction, if configured."""
         return getattr(self, "_compact_threshold", None)
 
+    @property
+    def base_url(self) -> str | None:
+        """The custom base URL for the model provider endpoint, if configured."""
+        return getattr(self, "_base_url", None)
+
     async def generate_async(
         self, request: GenerationRequest, *, stream: bool = False
     ) -> GenerationResponse | AsyncStreamResponse:

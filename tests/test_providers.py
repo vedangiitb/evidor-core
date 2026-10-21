@@ -22,12 +22,14 @@ from evidor import (
 
 
 def test_openai_provider_properties_and_with_model() -> None:
-    provider = OpenAIProvider(model="gpt-4.1", api_key="sk-test")
+    provider = OpenAIProvider(model="gpt-4.1", api_key="sk-test", base_url="https://api.deepseek.com")
     assert provider.model == "gpt-4.1"
+    assert provider.base_url == "https://api.deepseek.com"
 
     new_provider = provider.with_model("gpt-4.1-mini")
     assert new_provider.model == "gpt-4.1-mini"
     assert new_provider._api_key == "sk-test"
+    assert new_provider.base_url == "https://api.deepseek.com"
 
 
 def test_openai_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,6 +60,54 @@ def test_openai_provider_generate(monkeypatch: pytest.MonkeyPatch) -> None:
             {"role": "user", "content": "hello"},
         ],
     )
+
+
+def test_openai_provider_generate_with_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_openai = types.ModuleType("openai")
+    mock_client = MagicMock()
+    mock_response = MagicMock(output_text="DeepSeek text")
+    mock_client.responses.create.return_value = mock_response
+    mock_openai.OpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    provider = OpenAIProvider(
+        model="deepseek-flash",
+        api_key="ds-key",
+        base_url="https://api.deepseek.com",
+    )
+    request = GenerationRequest(prompt="Hello DeepSeek")
+    response = provider.generate(request)
+
+    assert response.text == "DeepSeek text"
+    mock_openai.OpenAI.assert_called_once_with(api_key="ds-key", base_url="https://api.deepseek.com")
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_async_with_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_openai = types.ModuleType("openai")
+    mock_client = MagicMock()
+    mock_client.is_closed = False
+    mock_response = MagicMock(output_text="DeepSeek async text")
+
+    async def _async_create(**kwargs: Any) -> Any:
+        return mock_response
+
+    mock_client.responses.create = _async_create
+    mock_openai.AsyncOpenAI = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "openai", mock_openai)
+
+    provider = OpenAIProvider(
+        model="deepseek-flash",
+        api_key="ds-key",
+        base_url="https://api.deepseek.com",
+    )
+    request = GenerationRequest(prompt="Hello DeepSeek async")
+    response = await provider.generate_async(request)
+
+    assert response.text == "DeepSeek async text"
+    mock_openai.AsyncOpenAI.assert_called_once_with(api_key="ds-key", base_url="https://api.deepseek.com")
 
 
 
