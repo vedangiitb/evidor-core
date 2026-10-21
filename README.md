@@ -1168,7 +1168,15 @@ Supported providers, example models, and reasoning/thinking support:
 | `AnthropicProvider` | `claude-3-7-sonnet` | Extended budget (`budget_tokens >= 1024`) or adaptive | `ANTHROPIC_API_KEY` | `evidor[anthropic]` |
 | `GeminiProvider` | `gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview` | `thinking_level` (`"minimal"`, `"low"`, `"medium"`, `"high"`) or budget | `GEMINI_API_KEY` | `evidor[gemini]` |
 
-API keys can be supplied explicitly via the `api_key` constructor argument or read automatically from environment variables.
+API keys can be supplied explicitly via the `api_key` constructor argument or read automatically from environment variables. Custom base URLs for OpenAI-compatible providers (such as DeepSeek) can be supplied via the `base_url` constructor argument or `OPENAI_BASE_URL` environment variable:
+
+```python
+provider = OpenAIProvider(
+    model="deepseek-flash",
+    api_key="your-deepseek-api-key",
+    base_url="https://api.deepseek.com",
+)
+```
 
 ### Modern Provider APIs & Zero Legacy Fallbacks
 

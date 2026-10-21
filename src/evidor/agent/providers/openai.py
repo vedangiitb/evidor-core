@@ -65,6 +65,7 @@ class OpenAIProvider(BaseProvider):
         api_key: str | None = None,
         thinking: Any = None,
         compact_threshold: int | None = None,
+        base_url: str | None = None,
     ) -> None:
         if thinking is not None:
             from evidor.models import OpenAIThinkingConfig
@@ -80,6 +81,7 @@ class OpenAIProvider(BaseProvider):
 
         super().__init__(model=model, api_key=api_key, thinking=thinking_cfg)
         self._compact_threshold = compact_threshold
+        self._base_url = base_url
         self._sync_client: Any = None
         self._default_async_client: Any = None
 
@@ -91,12 +93,18 @@ class OpenAIProvider(BaseProvider):
     def compact_threshold(self) -> int | None:
         return self._compact_threshold
 
+    @property
+    def base_url(self) -> str | None:
+        """The custom base URL for OpenAI-compatible endpoints, if configured."""
+        return self._base_url
+
     def with_model(self, model: str) -> "OpenAIProvider":
         return OpenAIProvider(
             model=model,
             api_key=self._api_key,
             thinking=self._thinking,
             compact_threshold=self._compact_threshold,
+            base_url=self._base_url,
         )
 
     @overload
@@ -291,7 +299,10 @@ class OpenAIProvider(BaseProvider):
             except ImportError as error:
                 raise ImportError("Install OpenAI support with: pip install 'evidor[openai]'") from error
 
-            client = OpenAI(api_key=self._api_key)
+            client_kwargs: dict[str, Any] = {"api_key": self._api_key}
+            if self._base_url is not None:
+                client_kwargs["base_url"] = self._base_url
+            client = OpenAI(**client_kwargs)
             if not hasattr(client, "responses") or not hasattr(client.responses, "create"):
                 raise RuntimeError(
                     "Modern OpenAI Responses API (client.responses.create) is required. "
@@ -320,14 +331,18 @@ class OpenAIProvider(BaseProvider):
             for l in dead_loops:
                 del self._async_clients[l]
 
+            client_kwargs: dict[str, Any] = {"api_key": self._api_key}
+            if self._base_url is not None:
+                client_kwargs["base_url"] = self._base_url
+
             if loop is not None:
                 client = self._async_clients.get(loop)
                 if is_client_closed(client):
-                    client = AsyncOpenAI(api_key=self._api_key)
+                    client = AsyncOpenAI(**client_kwargs)
                     self._async_clients[loop] = client
             else:
                 if is_client_closed(self._default_async_client):
-                    self._default_async_client = AsyncOpenAI(api_key=self._api_key)
+                    self._default_async_client = AsyncOpenAI(**client_kwargs)
                 client = self._default_async_client
 
         if not hasattr(client, "responses") or not hasattr(client.responses, "create"):
