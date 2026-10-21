@@ -695,3 +695,142 @@ def test_agent_concurrent_sync_send() -> None:
     agent.close()
 
 
+def test_agent_stateless_initialization_validation() -> None:
+    provider = FakeProvider()
+    agent = Agent(provider, stateless=True)
+    assert agent.stateless is True
+
+    with pytest.raises(ValueError, match="Cannot configure conversation_id on a stateless Agent"):
+        Agent(provider, stateless=True, conversation_id="conv_123")
+
+    with pytest.raises(ValueError, match="Cannot configure previous_response_id on a stateless Agent"):
+        Agent(provider, stateless=True, previous_response_id="resp_123")
+
+
+def test_agent_stateless_replay_strategy() -> None:
+    provider = FakeProvider(model="claude")
+    agent = Agent(provider, system_prompt="Sys instructions", stateless=True)
+
+    agent.send("Hello turn 1")
+    assert len(provider.requests) == 1
+    req1 = provider.requests[0]
+    # First turn contains system message and user message 1
+    assert [m.content for m in req1.messages if m.role == "user"] == ["Hello turn 1"]
+
+    agent.send("Hello turn 2")
+    assert len(provider.requests) == 2
+    req2 = provider.requests[1]
+    # In stateless mode, turn 2 does NOT include user message 1
+    assert [m.content for m in req2.messages if m.role == "user"] == ["Hello turn 2"]
+
+    # agent.messages holds the latest turn
+    user_msgs = [m.content for m in agent.messages if m.role == "user"]
+    assert user_msgs == ["Hello turn 2"]
+
+
+def test_agent_stateless_chaining_strategy() -> None:
+    class ChainingProvider:
+        context_strategy = "response_chain"
+
+        def __init__(self) -> None:
+            self.requests: list[GenerationRequest] = []
+            self._call_count = 0
+
+        def with_model(self, model: str) -> "ChainingProvider":
+            return self
+
+        def generate(self, request: GenerationRequest) -> GenerationResponse:
+            self.requests.append(request)
+            self._call_count += 1
+            return GenerationResponse(
+                id=f"resp_{self._call_count}",
+                text=f"Response {self._call_count}",
+                model="chain-model",
+            )
+
+        async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+            return self.generate(request)
+
+    provider = ChainingProvider()
+    agent = Agent(provider, stateless=True)
+
+    agent.send("Turn 1")
+    assert len(provider.requests) == 1
+    assert provider.requests[0].previous_response_id is None
+    assert agent.last_response_id == "resp_1"
+
+    agent.send("Turn 2")
+    assert len(provider.requests) == 2
+    # Stateless agent does NOT chain previous_response_id across turns!
+    assert provider.requests[1].previous_response_id is None
+    assert agent.last_response_id == "resp_2"
+
+
+def test_agent_stateless_intra_turn_tool_loop() -> None:
+    class ToolChainingProvider:
+        context_strategy = "response_chain"
+
+        def __init__(self) -> None:
+            self.requests: list[GenerationRequest] = []
+            self._call_count = 0
+
+        def with_model(self, model: str) -> "ToolChainingProvider":
+            return self
+
+        def generate(self, request: GenerationRequest) -> GenerationResponse:
+            self.requests.append(request)
+            self._call_count += 1
+            if self._call_count == 1:
+                # Turn 1 Step 1: Request tool execution
+                return GenerationResponse(
+                    text="",
+                    id="resp_step1",
+                    tool_calls=(ToolCall(id="call_1", name="add", arguments={"a": 2, "b": 3}),),
+                    model="chain-model",
+                )
+            elif self._call_count == 2:
+                # Turn 1 Step 2: Tool result received, produce final response
+                return GenerationResponse(
+                    id="resp_step2",
+                    text="The sum is 5",
+                    model="chain-model",
+                )
+            else:
+                # Turn 2 Step 1: Normal turn
+                return GenerationResponse(
+                    id=f"resp_step{self._call_count}",
+                    text="New turn answer",
+                    model="chain-model",
+                )
+
+        async def generate_async(self, request: GenerationRequest) -> GenerationResponse:
+            return self.generate(request)
+
+    @tool
+    def add(a: int, b: int) -> int:
+        return a + b
+
+    provider = ToolChainingProvider()
+    agent = Agent(provider, tools=[add], stateless=True)
+
+    # Turn 1: Involves tool call + tool result -> final response
+    resp1 = agent.send("Compute 2 + 3")
+    assert resp1.text == "The sum is 5"
+    assert len(provider.requests) == 2
+
+    # Step 1 of turn 1 was unchained
+    assert provider.requests[0].previous_response_id is None
+    # Step 2 of turn 1 was chained to step 1 (intra-turn tool state preserved!)
+    assert provider.requests[1].previous_response_id == "resp_step1"
+    assert agent.last_response_id == "resp_step2"
+
+    # Turn 2: Starts completely fresh!
+    resp2 = agent.send("Independent turn")
+    assert resp2.text == "New turn answer"
+    assert len(provider.requests) == 3
+    # Step 1 of turn 2 is NOT chained to resp_step2!
+    assert provider.requests[2].previous_response_id is None
+    assert agent.last_response_id == "resp_step3"
+
+
+
