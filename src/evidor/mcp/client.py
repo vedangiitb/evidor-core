@@ -6,6 +6,11 @@ from pathlib import Path
 import threading
 from typing import Any
 
+from evidor.constants import (
+    MCP_CLIENT_CLOSE_ERROR,
+    MCP_CLIENT_CONNECT_ERROR,
+    MCP_CLIENT_GET_TOOLS_ERROR,
+)
 from evidor.tools import Tool
 from evidor.utils import check_sync_allowed, run_async_in_sync
 
@@ -197,10 +202,7 @@ class MCPClient:
         """Connect to all configured MCP servers in parallel synchronously."""
         return run_async_in_sync(
             lambda: self.connect_async(timeout=timeout),
-            error_message=(
-                "MCPClient.connect() cannot be called from a running event loop. "
-                "Use 'await client.connect_async()' instead."
-            ),
+            error_message=MCP_CLIENT_CONNECT_ERROR,
         )
 
     async def connect_async(self, timeout: float = 60.0) -> None:
@@ -223,10 +225,7 @@ class MCPClient:
         """Retrieve all Evidor Tool objects from all connected MCP servers in parallel."""
         return run_async_in_sync(
             lambda: self.get_tools_async(force_refresh=force_refresh),
-            error_message=(
-                "MCPClient.get_tools() cannot be called from a running event loop. "
-                "Use 'await client.get_tools_async()' instead."
-            ),
+            error_message=MCP_CLIENT_GET_TOOLS_ERROR,
         )
 
     async def get_tools_async(self, force_refresh: bool = False) -> tuple[Tool, ...]:
@@ -262,10 +261,7 @@ class MCPClient:
 
     def close(self, timeout: float = 5.0) -> None:
         """Close all active MCP server sessions and shut down the client loop."""
-        check_sync_allowed(
-            "MCPClient.close() cannot be called from a running event loop. "
-            "Use 'await client.close_async()' or 'async with client:' instead."
-        )
+        check_sync_allowed(MCP_CLIENT_CLOSE_ERROR)
         with self._lock:
             for session in self._sessions.values():
                 try:

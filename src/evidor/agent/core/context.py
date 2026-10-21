@@ -50,6 +50,22 @@ class ConversationContext:
         if self.system_prompt:
             self._messages.append(Message(role="system", content=self.system_prompt))
 
+    def spawn_turn_context(self) -> ConversationContext:
+        """Create a fresh isolated turn context with the same configuration."""
+        return ConversationContext(
+            strategy=self.strategy,
+            system_prompt=self.system_prompt,
+            previous_response_id=None,
+            conversation_id=None,
+            store=self.store,
+            compact_threshold=self.compact_threshold,
+        )
+
+    def copy_from(self, other: ConversationContext) -> None:
+        """Update messages and last_response_id from another turn context."""
+        self._messages = list(other._messages)
+        self.last_response_id = other.last_response_id
+
     def append_user_message(self, message: str) -> Message:
         """Record a new user message in the conversation history."""
         msg = Message(role="user", content=message)

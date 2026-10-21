@@ -7,6 +7,12 @@ from collections.abc import Callable, Sequence
 import threading
 from typing import Any, Literal, overload
 
+from evidor.constants import (
+    AGENT_CLOSE_SYNC_ERROR,
+    AGENT_SEND_SYNC_ERROR,
+    AGENT_STREAM_SYNC_ERROR,
+    AGENT_SYNC_MCP_TOOLS_ERROR,
+)
 from evidor.models import (
     AsyncStreamResponse,
     GenerationResponse,
@@ -48,7 +54,15 @@ class Agent:
         store: bool | None = None,
         compact_threshold: int | None = None,
         telemetry: TelemetryRuntime | TelemetrySink | Sequence[TelemetrySink] | None = None,
+        stateless: bool = False,
     ) -> None:
+        if stateless:
+            if previous_response_id is not None:
+                raise ValueError("Cannot configure previous_response_id on a stateless Agent.")
+            if conversation_id is not None:
+                raise ValueError("Cannot configure conversation_id on a stateless Agent.")
+
+        self._stateless = stateless
         self._provider = provider
         self._system_prompt = system_prompt
         self._compact_threshold = compact_threshold or getattr(provider, "compact_threshold", None)
@@ -93,6 +107,7 @@ class Agent:
             tool_executor=self._tool_executor,
             telemetry_bridge=self._telemetry_bridge,
             max_tool_iterations=max_tool_iterations,
+            stateless=self._stateless,
         )
 
         # Background event loop and thread synchronization
@@ -116,6 +131,11 @@ class Agent:
         - 'stateless_replay': Replays message history (used by Anthropic Claude and stateless models)
         """
         return getattr(self._provider, "context_strategy", "stateless_replay")
+
+    @property
+    def stateless(self) -> bool:
+        """Whether this agent runs each turn statelessly without retaining conversation memory across turns."""
+        return self._stateless
 
     @property
     def last_response_id(self) -> str | None:
@@ -192,10 +212,7 @@ class Agent:
             return
         self._sync_loop.run(
             lambda: self._sync_mcp_tools_async(force=force),
-            error_message=(
-                "Cannot synchronize MCP tools synchronously from a running event loop. "
-                "Access agent.tools outside an event loop or run an async agent turn first."
-            ),
+            error_message=AGENT_SYNC_MCP_TOOLS_ERROR,
         )
 
     async def _sync_mcp_tools_async(self, force: bool = False) -> None:
@@ -230,16 +247,10 @@ class Agent:
             with self._lock:
                 return self._sync_loop.run(
                     lambda: self.send_async(message, stream=False),
-                    error_message=(
-                        "Agent.send() cannot be called from a running event loop. "
-                        "Use 'await agent.send_async()' instead."
-                    ),
+                    error_message=AGENT_SEND_SYNC_ERROR,
                 )
 
-        check_sync_allowed(
-            "Agent.send(..., stream=True) cannot be called from a running event loop. "
-            "Use 'await agent.send_async(..., stream=True)' instead."
-        )
+        check_sync_allowed(AGENT_STREAM_SYNC_ERROR)
         with self._lock:
             bridge = sync_stream_bridge(
                 self._sync_loop, lambda: self.send_async(message, stream=True)
@@ -282,10 +293,7 @@ class Agent:
                 if self._background_loop is not None and self._background_loop.is_running:
                     self._background_loop.run(
                         self._close_async_resources,
-                        error_message=(
-                            "Agent.close() cannot be called from a running event loop. "
-                            "Use 'await agent.close_async()' or 'async with agent:' instead."
-                        ),
+                        error_message=AGENT_CLOSE_SYNC_ERROR,
                     )
                 else:
                     running_loop = None
@@ -296,18 +304,12 @@ class Agent:
 
                     if running_loop is not None:
                         if self._mcp_client is not None:
-                            check_sync_allowed(
-                                "Agent.close() cannot be called from a running event loop. "
-                                "Use 'await agent.close_async()' or 'async with agent:' instead."
-                            )
+                            check_sync_allowed(AGENT_CLOSE_SYNC_ERROR)
                         running_loop.create_task(self._close_async_resources())
                     else:
                         run_async_in_sync(
                             self._close_async_resources,
-                            error_message=(
-                                "Agent.close() cannot be called from a running event loop. "
-                                "Use 'await agent.close_async()' or 'async with agent:' instead."
-                            ),
+                            error_message=AGENT_CLOSE_SYNC_ERROR,
                         )
                 self._close_sync_resources()
             finally:

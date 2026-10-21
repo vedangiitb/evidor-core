@@ -3,6 +3,8 @@
 import asyncio
 from typing import Any
 
+from evidor.constants import DEFAULT_SYNC_ERROR
+
 
 def check_sync_allowed(error_message: str | None = None) -> None:
     """Raise RuntimeError if called within an active event loop."""
@@ -11,11 +13,7 @@ def check_sync_allowed(error_message: str | None = None) -> None:
     except RuntimeError:
         return
 
-    msg = error_message or (
-        "This sync method cannot be called from a running event loop. "
-        "Use its async equivalent instead."
-    )
-    raise RuntimeError(msg)
+    raise RuntimeError(error_message or DEFAULT_SYNC_ERROR)
 
 
 class BackgroundEventLoop:

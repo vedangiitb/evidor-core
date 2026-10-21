@@ -10,6 +10,12 @@ import threading
 import time
 from typing import Any
 
+from evidor.constants import (
+    MCP_SESSION_CALL_TOOL_ERROR,
+    MCP_SESSION_CLOSE_ERROR,
+    MCP_SESSION_CONNECT_ERROR,
+    MCP_SESSION_LIST_TOOLS_ERROR,
+)
 from evidor.tools import Tool
 from evidor.utils import check_sync_allowed, run_async_in_sync
 from ..telemetry import (
@@ -206,7 +212,7 @@ class MCPSession:
         """Connect to the MCP server synchronously."""
         return run_async_in_sync(
             lambda: self.connect_async(timeout=timeout),
-            error_message="MCPSession.connect() cannot be called from a running event loop. Use 'await session.connect_async()' instead.",
+            error_message=MCP_SESSION_CONNECT_ERROR,
         )
 
     async def connect_async(self, timeout: float = 30.0) -> None:
@@ -264,7 +270,7 @@ class MCPSession:
         """List raw MCP tools from the server synchronously."""
         return run_async_in_sync(
             lambda: self.list_tools_async(timeout=timeout),
-            error_message="MCPSession.list_tools() cannot be called from a running event loop. Use 'await session.list_tools_async()' instead.",
+            error_message=MCP_SESSION_LIST_TOOLS_ERROR,
         )
 
     async def list_tools_async(self, timeout: float | None = 30.0) -> Any:
@@ -275,7 +281,7 @@ class MCPSession:
         """Execute a tool on the MCP server synchronously and return serialized text output."""
         return run_async_in_sync(
             lambda: self.call_tool_async(name, arguments=arguments, timeout=timeout),
-            error_message="MCPSession.call_tool() cannot be called from a running event loop. Use 'await session.call_tool_async()' instead.",
+            error_message=MCP_SESSION_CALL_TOOL_ERROR,
         )
 
     async def call_tool_async(
@@ -382,10 +388,7 @@ class MCPSession:
 
     def close(self, timeout: float = 5.0) -> None:
         """Close the MCP session and terminate worker task."""
-        check_sync_allowed(
-            "MCPSession.close() cannot be called from a running event loop. "
-            "Use 'await session.close_async()' or 'async with session:' instead."
-        )
+        check_sync_allowed(MCP_SESSION_CLOSE_ERROR)
         with self._lock:
             if self._cmd_queue is not None and self._loop is not None:
                 done_event = threading.Event()
