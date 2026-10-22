@@ -460,15 +460,15 @@ provider = AnthropicProvider(
     thinking=AnthropicThinkingConfig(budget_tokens=4096),
 )
 
-# 3. Gemini: Configure thinking level ('minimal', 'low', 'medium', 'high') or budget
+# 3. Gemini: Configure thinking level ('minimal', 'low', 'medium', 'high') and summaries ('auto', 'none')
 # Shorthand string (Gemini 3.x thinking_level):
 provider = GeminiProvider(model="gemini-3.8-flash", thinking="high")
-# Shorthand bool (False disables thinking; True enables dynamic thinking):
+# Shorthand bool (False disables thinking; True enables default thinking):
 provider = GeminiProvider(model="gemini-3.8-flash", thinking=False)
 # Or via typed config:
 provider = GeminiProvider(
     model="gemini-3.8-flash",
-    thinking=GeminiThinkingConfig(thinking_level="high", include_thoughts=True),
+    thinking=GeminiThinkingConfig(thinking_level="high", thinking_summaries="auto"),
 )
 ```
 
@@ -1199,7 +1199,7 @@ Supported providers, example models, and reasoning/thinking support:
 | --- | --- | --- | --- | --- |
 | `OpenAIProvider` | `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna`, `gpt-4.1-mini` | `reasoning_effort` (`"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`) | `OPENAI_API_KEY` | `evidor[openai]` |
 | `AnthropicProvider` | `claude-3-7-sonnet` | Extended budget (`budget_tokens >= 1024`) or adaptive | `ANTHROPIC_API_KEY` | `evidor[anthropic]` |
-| `GeminiProvider` | `gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview` | `thinking_level` (`"minimal"`, `"low"`, `"medium"`, `"high"`) or budget | `GEMINI_API_KEY` | `evidor[gemini]` |
+| `GeminiProvider` | `gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview` | `thinking_level` (`"minimal"`, `"low"`, `"medium"`, `"high"`), `thinking_summaries` (`"auto"`, `"none"`) | `GEMINI_API_KEY` | `evidor[gemini]` |
 
 API keys can be supplied explicitly via the `api_key` constructor argument or read automatically from environment variables. Custom base URLs for OpenAI-compatible providers (such as DeepSeek) can be supplied via the `base_url` constructor argument or `OPENAI_BASE_URL` environment variable:
 

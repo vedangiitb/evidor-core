@@ -101,41 +101,37 @@ def test_anthropic_thinking_config() -> None:
 
 
 def test_gemini_thinking_config() -> None:
-    cfg = GeminiThinkingConfig(thinking_budget=2048, include_thoughts=True)
-    assert cfg.thinking_budget == 2048
-    assert cfg.include_thoughts is True
+    cfg = GeminiThinkingConfig(thinking_level="high", thinking_summaries="auto")
+    assert cfg.thinking_level == "high"
+    assert cfg.thinking_summaries == "auto"
     cfg.validate()
 
     # Dynamic / None
-    cfg_dyn = GeminiThinkingConfig(thinking_budget=None)
+    cfg_dyn = GeminiThinkingConfig(thinking_level=None)
     cfg_dyn.validate()
 
     # Disabled
-    cfg_off = GeminiThinkingConfig(thinking_budget=0)
+    cfg_off = GeminiThinkingConfig(enabled=False)
     cfg_off.validate()
 
-    # Coercion from int
-    c_int = GeminiThinkingConfig.from_value(1024)
-    assert c_int.thinking_budget == 1024
-    assert c_int.enabled is True
+    # Coercion from int -> raises TypeError because Interactions API does not support numeric budgets
+    with pytest.raises(TypeError, match="Numeric budgets are not supported"):
+        GeminiThinkingConfig.from_value(1024)
 
-    # Coercion from bool False -> thinking_budget = 0
+    # Coercion from bool False -> minimal + none
     c_false = GeminiThinkingConfig.from_value(False)
     assert c_false.enabled is False
-    assert c_false.thinking_budget == 0
-    assert c_false.include_thoughts is False
+    assert c_false.thinking_level == "minimal"
+    assert c_false.thinking_summaries == "none"
 
-    # Coercion from bool True -> thinking_budget = None (dynamic)
+    # Coercion from bool True
     c_true = GeminiThinkingConfig.from_value(True)
     assert c_true.enabled is True
-    assert c_true.thinking_budget is None
-    assert c_true.include_thoughts is True
 
     # Coercion from str -> thinking_level (Gemini 3.x)
     c_str = GeminiThinkingConfig.from_value("high")
     assert c_str.enabled is True
     assert c_str.thinking_level == "high"
-    assert c_str.thinking_budget is None
 
 
 # ==============================================================================
@@ -323,7 +319,7 @@ def test_gemini_provider_thinking_extraction_and_config(monkeypatch: pytest.Monk
 
     provider = GeminiProvider(
         model="gemini-3.8-flash",
-        thinking=GeminiThinkingConfig(thinking_budget=2048, include_thoughts=True),
+        thinking=GeminiThinkingConfig(thinking_level="medium", thinking_summaries="auto"),
     )
     res = provider.generate(GenerationRequest(prompt="Explain logic"))
 

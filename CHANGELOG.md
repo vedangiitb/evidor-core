@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v1.10.3-dev.1 (2026-10-22)
+
+### Bug Fixes
+
+- **agent**: Fix gemini streaming issues
+  ([`f9d64f2`](https://github.com/vedangiitb/evidor-core/commit/f9d64f25f195c97c3ee5dd01c18b1d852e92fb70))
+
+- **agent**: Fixing gemini request building, response parsing and adapter lifecycle issues
+  ([`a67efbe`](https://github.com/vedangiitb/evidor-core/commit/a67efbecc0c9331fc61a14ddbc7512b656ae5e95))
+
+### Documentation
+
+- **agent**: Docs update for stateless sessions update
+  ([`57569f8`](https://github.com/vedangiitb/evidor-core/commit/57569f843aa7ceeece9f47ac3abec5cfe48a175d))
+
+
 ## v1.10.2 (2026-10-21)
 
 
