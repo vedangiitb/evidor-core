@@ -2,7 +2,7 @@ import asyncio
 import sys
 import types
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -871,7 +871,7 @@ def test_gemini_provider_prompt_caching_and_cached_content(monkeypatch: pytest.M
     assert resp.usage.cached_tokens == 1800
 
     call_kwargs = mock_client.interactions.create.call_args.kwargs
-    assert call_kwargs["cached_content"] == "cachedContents/abc123xyz"
+    assert "cached_content" not in call_kwargs
 
 
 # --- Gemini Interactions API Tests ---
@@ -1039,7 +1039,7 @@ def test_gemini_provider_interactions_api_with_thinking(monkeypatch: pytest.Monk
 
     provider = GeminiProvider(
         model="gemini-3.8-flash",
-        thinking=GeminiThinkingConfig(thinking_level="high", include_thoughts=True),
+        thinking=GeminiThinkingConfig(thinking_level="high", thinking_summaries="auto"),
     )
     request = GenerationRequest(prompt="Analyze this")
     response = provider.generate(request)
@@ -1203,6 +1203,48 @@ def test_gemini_client_reuse_and_close(monkeypatch: pytest.MonkeyPatch) -> None:
     assert new_provider._client is None
 
 
+@pytest.mark.asyncio
+async def test_gemini_client_close_async_and_reinstantiation(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    mock_client = MagicMock()
+    mock_aio = MagicMock()
+    mock_aio.aclose = AsyncMock()
+    mock_response = MagicMock(interaction=MagicMock(id="int_1", model="gemini-3.8-flash", steps=[]))
+    mock_aio.interactions = MagicMock()
+    mock_aio.interactions.create = AsyncMock(return_value=mock_response)
+    mock_client.aio = mock_aio
+    mock_client.interactions.create.return_value = mock_response
+
+    mock_genai.Client = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-3.8-flash", api_key="gem_key")
+    req = GenerationRequest(prompt="hello")
+
+    await provider.generate_async(req)
+    assert mock_genai.Client.call_count == 1
+
+    # 4.1: close_async calls aclose() on aio_client
+    await provider.close_async()
+    mock_aio.aclose.assert_awaited_once()
+    assert provider._client is None
+
+    # Reconnect and generate again
+    await provider.generate_async(req)
+    assert mock_genai.Client.call_count == 2
+
+    # 4.2: Missing re-instantiation check on closed client
+    # Simulate client connection being closed externally (e.g. is_closed property)
+    provider._client.is_closed = True
+    await provider.generate_async(req)
+    assert mock_genai.Client.call_count == 3
+
+
+
 def test_openai_client_reuse_and_close(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_openai = types.ModuleType("openai")
     mock_client = MagicMock()
@@ -1310,6 +1352,210 @@ def test_is_client_closed_detection() -> None:
     assert is_client_closed(MethodClient(True)) is True
     assert is_client_closed(MethodClient(False)) is False
     assert is_client_closed(MagicMock()) is False
+
+
+def test_gemini_payload_builder_step_ordering() -> None:
+    from evidor.agent.providers.gemini.builder import GeminiPayloadBuilder
+    from evidor.models import Message, ToolCall
+
+    builder = GeminiPayloadBuilder(model="gemini-3.8-flash")
+    msg = Message(
+        role="assistant",
+        content="I will call the search tool now.",
+        thought_blocks=[
+            {
+                "type": "thought",
+                "text": "User wants current weather data.",
+                "thought_signature": "sig_thought_1",
+            },
+            {
+                "type": "function_call",
+                "id": "call_1",
+                "name": "search",
+                "args": {"q": "weather in NYC"},
+                "thought_signature": "sig_fc_1",
+            },
+        ],
+        tool_calls=(
+            ToolCall(id="call_1", name="search", arguments={"q": "weather in NYC"}),
+            ToolCall(id="call_2", name="lookup", arguments={"city": "NYC"}),
+        ),
+    )
+
+    steps = builder.format_input_steps([msg])
+    assert len(steps) == 4
+    # Step 1: thought
+    assert steps[0]["type"] == "thought"
+    assert steps[0]["signature"] == "sig_thought_1"
+    assert steps[0]["summary"] == [{"type": "text", "text": "User wants current weather data."}]
+    # Step 2: model_output (text content) comes BEFORE function calls
+    assert steps[1]["type"] == "model_output"
+    assert steps[1]["content"] == [{"type": "text", "text": "I will call the search tool now."}]
+    # Step 3: function_call with signature from thought_blocks
+    assert steps[2]["type"] == "function_call"
+    assert steps[2]["id"] == "call_1"
+    assert steps[2]["signature"] == "sig_fc_1"
+    # Step 4: additional function_call from tool_calls
+    assert steps[3]["type"] == "function_call"
+    assert steps[3]["id"] == "call_2"
+
+
+def test_gemini_payload_builder_thinking_config() -> None:
+    from evidor.agent.providers.gemini.builder import GeminiPayloadBuilder
+    from evidor.models import GeminiThinkingConfig, GenerationRequest
+
+    req = GenerationRequest(prompt="hello")
+
+    # 1. Arbitrary / future thinking_level (no model check, no whitelist)
+    b_custom = GeminiPayloadBuilder(
+        model="gemini-3.8-flash",
+        thinking=GeminiThinkingConfig(thinking_level="experimental_deep", thinking_summaries="auto"),
+    )
+    p_custom = b_custom.build(req)
+    assert p_custom["generation_config"] == {
+        "thinking_level": "experimental_deep",
+        "thinking_summaries": "auto",
+    }
+
+    # 2. thinking_summaries="none"
+    b_no_thoughts = GeminiPayloadBuilder(
+        model="gemini-3.8-flash",
+        thinking=GeminiThinkingConfig(thinking_level="high", thinking_summaries="none"),
+    )
+    p_no_thoughts = b_no_thoughts.build(req)
+    assert p_no_thoughts["generation_config"] == {
+        "thinking_level": "high",
+        "thinking_summaries": "none",
+    }
+
+    # 3. enabled=False disabled thinking -> minimal + none
+    b_off = GeminiPayloadBuilder(
+        model="gemini-3.8-flash",
+        thinking=GeminiThinkingConfig(enabled=False),
+    )
+    p_off = b_off.build(req)
+    assert p_off["generation_config"] == {
+        "thinking_level": "minimal",
+        "thinking_summaries": "none",
+    }
+
+
+def test_gemini_payload_builder_types_optional() -> None:
+    from evidor.agent.providers.gemini.builder import GeminiPayloadBuilder, sanitize_gemini_schema
+    from evidor.models import GenerationRequest
+    from evidor.tools import Tool
+
+    # sanitize_gemini_schema works without types_mod
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+    }
+    sanitized = sanitize_gemini_schema(schema)
+    assert sanitized["type"] == "object"
+    assert "name" in sanitized["properties"]
+
+    # builder.build works without types argument
+    tool = Tool(name="test_tool", description="A test tool", parameters=schema, func=lambda: None)
+    req = GenerationRequest(prompt="Use tool", tools=[tool])
+    builder = GeminiPayloadBuilder(model="gemini-3.8-flash")
+    payload = builder.build(req)
+    assert "cached_content" not in payload
+    assert len(payload["tools"]) == 1
+    assert payload["tools"][0]["name"] == "test_tool"
+
+
+def test_gemini_parser_no_thought_leakage() -> None:
+    from evidor.agent.providers.gemini.parser import GeminiResponseParser
+
+    parser = GeminiResponseParser(model="gemini-3.8-flash")
+    raw_response = {
+        "id": "int_thought_only",
+        "output_text": "",
+        "steps": [
+            {
+                "type": "thought",
+                "summary": [{"type": "text", "text": "Deep thinking reasoning..."}],
+                "signature": "sig_thought",
+            }
+        ],
+    }
+    resp = parser.parse(raw_response)
+    # Thought should NOT leak into text
+    assert resp.text == ""
+    assert resp.thinking == "Deep thinking reasoning..."
+    assert len(resp.thought_blocks) == 1
+    assert resp.thought_blocks[0]["text"] == "Deep thinking reasoning..."
+
+
+def test_gemini_parser_multi_step_model_output() -> None:
+    from evidor.agent.providers.gemini.parser import GeminiResponseParser
+
+    parser = GeminiResponseParser(model="gemini-3.8-flash")
+    raw_response = {
+        "id": "int_multi_step",
+        "steps": [
+            {
+                "type": "thought",
+                "summary": "Thinking first.",
+            },
+            {
+                "type": "model_output",
+                "content": [{"type": "text", "text": "Part 1 of the answer. "}],
+            },
+            {
+                "type": "model_output",
+                "content": [{"type": "text", "text": "Part 2 of the answer."}],
+            },
+        ],
+    }
+    resp = parser.parse(raw_response)
+    assert resp.text == "Part 1 of the answer. Part 2 of the answer."
+    assert resp.thinking == "Thinking first."
+
+
+def test_gemini_parser_usage_dictionary_payload() -> None:
+    from evidor.agent.providers.gemini.parser import GeminiResponseParser
+
+    parser = GeminiResponseParser(model="gemini-3.8-flash")
+    usage_dict = {
+        "total_input_tokens": 120,
+        "total_output_tokens": 80,
+        "total_tokens": 200,
+        "total_cached_tokens": 30,
+        "total_thought_tokens": 40,
+    }
+    usage = parser.parse_usage(usage_dict)
+    assert usage is not None
+    assert usage.prompt_tokens == 120
+    assert usage.completion_tokens == 80
+    assert usage.total_tokens == 200
+    assert usage.cached_tokens == 30
+    assert usage.reasoning_tokens == 40
+
+
+def test_gemini_parser_thought_summary_dict() -> None:
+    from evidor.agent.providers.gemini.parser import GeminiResponseParser
+
+    parser = GeminiResponseParser(model="gemini-3.8-flash")
+    raw_response = {
+        "id": "int_dict_summary",
+        "output_text": "Answer text",
+        "steps": [
+            {
+                "type": "thought",
+                "summary": {"type": "text", "text": "Dict summary text"},
+                "signature": "sig_dict",
+            }
+        ],
+    }
+    resp = parser.parse(raw_response)
+    assert resp.text == "Answer text"
+    assert resp.thinking == "Dict summary text"
+    assert len(resp.thought_blocks) == 1
+    assert resp.thought_blocks[0]["thought_signature"] == "sig_dict"
+
+
 
 
 

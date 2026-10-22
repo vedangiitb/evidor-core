@@ -15,7 +15,7 @@ from evidor.models import (
     ToolCall,
 )
 from evidor.utils import check_sync_allowed
-from ..base import BaseProvider
+from ..base import BaseProvider, is_client_closed
 from ..client_pool import close_sync_client
 from .builder import GeminiPayloadBuilder
 from .parser import GeminiResponseParser
@@ -159,7 +159,11 @@ class GeminiProvider(BaseProvider):
 
         if client is not None:
             aio_client = getattr(client, "aio", None)
-            close_async_fn = getattr(aio_client, "close", None)
+            close_async_fn = (
+                getattr(aio_client, "aclose", None)
+                or getattr(aio_client, "close", None)
+                or getattr(client, "aclose", None)
+            )
             if callable(close_async_fn):
                 try:
                     await close_async_fn()
@@ -169,7 +173,11 @@ class GeminiProvider(BaseProvider):
 
     def _get_client_and_types(self) -> tuple[Any, Any]:
         with self._lock:
-            if getattr(self, "_client", None) is not None and getattr(self, "_types", None) is not None:
+            if (
+                getattr(self, "_client", None) is not None
+                and not is_client_closed(self._client)
+                and getattr(self, "_types", None) is not None
+            ):
                 return self._client, self._types
 
             try:

@@ -40,7 +40,7 @@ _ALLOWED_GEMINI_SCHEMA_KEYS = {
 }
 
 
-def sanitize_gemini_schema(schema: Any, types_mod: Any) -> Any:
+def sanitize_gemini_schema(schema: Any, types_mod: Any = None) -> Any:
     """Sanitize a JSON schema dictionary for Google GenAI types.Schema."""
     if not isinstance(schema, dict):
         if isinstance(schema, list):
@@ -118,7 +118,7 @@ class GeminiPayloadBuilder:
         self.cached_content = cached_content
         self.thinking = thinking
 
-    def build(self, request: GenerationRequest, types: Any) -> dict[str, Any]:
+    def build(self, request: GenerationRequest, types: Any = None) -> dict[str, Any]:
         """Construct the full request dictionary for Gemini Interactions API."""
         system_prompt = extract_system_prompt(request)
         input_steps = self.format_input_steps(request.messages)
@@ -134,8 +134,6 @@ class GeminiPayloadBuilder:
             payload["previous_interaction_id"] = request.previous_response_id
         if request.store is not None:
             payload["store"] = request.store
-        if self.cached_content:
-            payload["cached_content"] = self.cached_content
 
         if request.tools:
             sorted_tools = sort_tools(request.tools)
@@ -151,16 +149,18 @@ class GeminiPayloadBuilder:
 
         if self.thinking is not None:
             gen_config: dict[str, Any] = {}
-            if self.thinking.enabled:
+            if not getattr(self.thinking, "enabled", True):
+                gen_config["thinking_level"] = "minimal"
+                gen_config["thinking_summaries"] = "none"
+            else:
                 thinking_level = getattr(self.thinking, "thinking_level", None)
                 if thinking_level:
                     gen_config["thinking_level"] = thinking_level
-                elif self.thinking.thinking_budget is not None:
-                    gen_config["thinking_level"] = "medium"
-                if getattr(self.thinking, "include_thoughts", True):
-                    gen_config["thinking_summaries"] = "auto"
-            else:
-                gen_config["thinking_level"] = "minimal"
+
+                thinking_summaries = getattr(self.thinking, "thinking_summaries", None)
+                if thinking_summaries:
+                    gen_config["thinking_summaries"] = thinking_summaries
+
             if gen_config:
                 payload["generation_config"] = gen_config
 
@@ -181,13 +181,17 @@ class GeminiPayloadBuilder:
                     "result": {"result": message.content},
                 })
             elif message.role == "assistant":
+                thought_steps: list[dict[str, Any]] = []
+                function_call_steps: list[dict[str, Any]] = []
+                other_steps: list[Any] = []
+
                 if message.thought_blocks:
                     for tb in message.thought_blocks:
                         if isinstance(tb, dict):
                             tb_type = tb.get("type")
                             sig = tb.get("thought_signature") or tb.get("thoughtSignature") or tb.get("signature")
                             if tb_type == "thought" or tb.get("thought"):
-                                input_steps.append({
+                                thought_steps.append({
                                     "type": "thought",
                                     "signature": sig,
                                     "summary": [{"type": "text", "text": tb.get("text", "")}],
@@ -201,30 +205,35 @@ class GeminiPayloadBuilder:
                                 }
                                 if sig:
                                     fc_step["signature"] = sig
-                                input_steps.append(fc_step)
+                                function_call_steps.append(fc_step)
+                            else:
+                                other_steps.append(tb)
                         elif hasattr(tb, "type"):
-                            input_steps.append(tb)
+                            other_steps.append(tb)
 
                 if message.tool_calls:
                     existing_call_ids = {
                         step.get("id")
-                        for step in input_steps
+                        for step in function_call_steps
                         if isinstance(step, dict) and step.get("type") == "function_call"
                     }
                     for tc in message.tool_calls:
                         if tc.id not in existing_call_ids:
-                            input_steps.append({
+                            function_call_steps.append({
                                 "type": "function_call",
                                 "id": tc.id,
                                 "name": tc.name,
                                 "arguments": tc.arguments,
                             })
 
+                input_steps.extend(thought_steps)
+                input_steps.extend(other_steps)
                 if message.content:
                     input_steps.append({
                         "type": "model_output",
                         "content": [{"type": "text", "text": message.content}],
                     })
+                input_steps.extend(function_call_steps)
             else:
                 input_steps.append({
                     "type": "user_input",

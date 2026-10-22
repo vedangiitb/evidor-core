@@ -14,21 +14,32 @@ class GeminiResponseParser:
 
     def parse(self, response: Any) -> GenerationResponse:
         """Parse a Gemini interaction object into GenerationResponse."""
-        resp_id = getattr(response, "id", None)
+        resp_id = getattr(response, "id", None) or (response.get("id") if isinstance(response, dict) else None)
         resp_id = resp_id if isinstance(resp_id, str) else None
-        output_text = getattr(response, "output_text", None) or ""
-
-        text, tool_calls, thought_blocks, thought_parts = self.parse_steps(
-            getattr(response, "steps", None) or [], output_text
+        raw_output_text = (
+            getattr(response, "output_text", None)
+            or (response.get("output_text") if isinstance(response, dict) else None)
         )
+        output_text = raw_output_text if isinstance(raw_output_text, str) else ""
+
+        steps = (
+            getattr(response, "steps", None)
+            or (response.get("steps") if isinstance(response, dict) else None)
+            or []
+        )
+        text, tool_calls, thought_blocks, thought_parts = self.parse_steps(steps, output_text)
 
         if not text and hasattr(response, "text") and isinstance(response.text, str):
             text = response.text
-        if not text and not tool_calls and thought_parts:
-            text = "".join(thought_parts)
+        elif not text and isinstance(response, dict) and isinstance(response.get("text"), str):
+            text = response["text"]
 
         thinking_text = "\n".join(thought_parts) if thought_parts else None
-        usage = self.parse_usage(getattr(response, "usage", None))
+        usage_data = (
+            getattr(response, "usage", None)
+            or (response.get("usage") if isinstance(response, dict) else None)
+        )
+        usage = self.parse_usage(usage_data)
 
         return GenerationResponse(
             id=resp_id,
@@ -44,7 +55,10 @@ class GeminiResponseParser:
         self, steps: list[Any], initial_text: str
     ) -> tuple[str, list[ToolCall], list[dict[str, Any]], list[str]]:
         """Extract text, function calls, thought blocks, and thought summaries from response steps."""
-        text = initial_text
+        text_parts: list[str] = []
+        if initial_text and isinstance(initial_text, str):
+            text_parts.append(initial_text)
+
         tool_calls: list[ToolCall] = []
         thought_blocks: list[dict[str, Any]] = []
         thought_parts: list[str] = []
@@ -79,12 +93,18 @@ class GeminiResponseParser:
                 if isinstance(summary, list):
                     for s in summary:
                         val = getattr(s, "text", None) if not isinstance(s, dict) else s.get("text")
-                        if val:
+                        if val and isinstance(val, str):
                             t_str += val
+                elif isinstance(summary, dict):
+                    val = summary.get("text")
+                    if val and isinstance(val, str):
+                        t_str = val
                 elif isinstance(summary, str):
                     t_str = summary
-                elif getattr(step, "text", None):
-                    t_str = getattr(step, "text")
+                elif getattr(step, "text", None) or (step.get("text") if isinstance(step, dict) else None):
+                    val = getattr(step, "text", None) or (step.get("text") if isinstance(step, dict) else None)
+                    if isinstance(val, str):
+                        t_str = val
 
                 if t_str:
                     thought_parts.append(t_str)
@@ -96,7 +116,7 @@ class GeminiResponseParser:
                     "_raw_part": step,
                 })
             elif step_type == "model_output":
-                if not text:
+                if not initial_text:
                     content = (
                         getattr(step, "content", None)
                         or (step.get("content") if isinstance(step, dict) else None)
@@ -104,9 +124,16 @@ class GeminiResponseParser:
                     if isinstance(content, list):
                         for c in content:
                             val = getattr(c, "text", None) if not isinstance(c, dict) else c.get("text")
-                            if val:
-                                text += val
+                            if val and isinstance(val, str):
+                                text_parts.append(val)
+                    elif isinstance(content, dict):
+                        val = content.get("text")
+                        if val and isinstance(val, str):
+                            text_parts.append(val)
+                    elif isinstance(content, str) and content:
+                        text_parts.append(content)
 
+        text = "".join(text_parts)
         return text, tool_calls, thought_blocks, thought_parts
 
     def parse_usage(self, usage_obj: Any) -> Any:
@@ -114,11 +141,22 @@ class GeminiResponseParser:
         if usage_obj is None:
             return None
 
-        pt = getattr(usage_obj, "total_input_tokens", None)
-        ct = getattr(usage_obj, "total_output_tokens", None)
-        tt = getattr(usage_obj, "total_tokens", None)
-        cached = getattr(usage_obj, "total_cached_tokens", 0) or 0
-        reasoning = getattr(usage_obj, "total_thought_tokens", 0) or 0
+        def _get_field(*keys: str, default: Any = None) -> Any:
+            if isinstance(usage_obj, dict):
+                for k in keys:
+                    if k in usage_obj and usage_obj[k] is not None:
+                        return usage_obj[k]
+            for k in keys:
+                val = getattr(usage_obj, k, None)
+                if val is not None:
+                    return val
+            return default
+
+        pt = _get_field("total_input_tokens", "input_tokens", "prompt_tokens")
+        ct = _get_field("total_output_tokens", "output_tokens", "completion_tokens")
+        tt = _get_field("total_tokens")
+        cached = _get_field("total_cached_tokens", "cached_tokens", default=0) or 0
+        reasoning = _get_field("total_thought_tokens", "thought_tokens", "reasoning_tokens", default=0) or 0
 
         if not (isinstance(pt, int) or isinstance(ct, int) or isinstance(tt, int)):
             return None

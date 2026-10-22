@@ -68,11 +68,10 @@ class AnthropicThinkingConfig(ThinkingConfig):
 
 @dataclass(frozen=True, slots=True)
 class GeminiThinkingConfig(ThinkingConfig):
-    """Configuration for Google Gemini thinking models (Gemini 3.8 Flash, 3.8 Live, 3.7 Flash, etc.)."""
+    """Configuration for Google Gemini thinking models in the Interactions API."""
 
-    thinking_level: str | None = None  # Recommended in Gemini 3.x: 'minimal', 'low', 'medium', 'high'
-    thinking_budget: int | None = None  # None = dynamic, 0 = off, >0 = token budget cap
-    include_thoughts: bool = True
+    thinking_level: str | None = None  # Supported in Gemini 3.x Interactions API: 'minimal', 'low', 'medium', 'high'
+    thinking_summaries: str | None = "auto"  # Supported in Gemini Interactions API: 'auto', 'none'
 
     def validate(self) -> None:
         pass
@@ -82,12 +81,16 @@ class GeminiThinkingConfig(ThinkingConfig):
         if isinstance(value, GeminiThinkingConfig):
             return value
         if isinstance(value, bool):
-            return cls(enabled=value, thinking_budget=None if value else 0, include_thoughts=value)
-        if isinstance(value, int):
-            return cls(enabled=value > 0, thinking_budget=value)
+            if value:
+                return cls(enabled=True, thinking_summaries="auto")
+            return cls(enabled=False, thinking_level="minimal", thinking_summaries="none")
         if isinstance(value, str):
-            return cls(enabled=True, thinking_level=value)
-        raise TypeError(f"Cannot coerce {type(value).__name__} to GeminiThinkingConfig")
+            return cls(enabled=True, thinking_level=value, thinking_summaries="auto")
+        raise TypeError(
+            f"Cannot coerce {type(value).__name__} to GeminiThinkingConfig. "
+            "Gemini Interactions API supports thinking_level (e.g. 'minimal', 'low', 'medium', 'high') "
+            "and thinking_summaries ('auto', 'none'). Numeric budgets are not supported."
+        )
 
 
 AnyThinkingConfig = ThinkingConfig | OpenAIThinkingConfig | AnthropicThinkingConfig | GeminiThinkingConfig
