@@ -281,6 +281,205 @@ def test_gemini_provider_generate_stream(monkeypatch: pytest.MonkeyPatch) -> Non
     assert final.id == "int_123"
 
 
+def test_gemini_streaming_thought_summary_and_thinking_retention(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_google = types.ModuleType("google")
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    mock_client = MagicMock()
+
+    # Events sequence:
+    # 1. interaction.created
+    int_created_event = {
+        "event_type": "interaction.created",
+        "interaction": {"id": "int_thought_stream", "model": "gemini-3.8-flash"},
+    }
+    # 2. step.start thought
+    thought_start_event = {
+        "event_type": "step.start",
+        "index": 0,
+        "step": {"type": "thought"},
+    }
+    # 3. step.delta thought_summary (nested content.text)
+    thought_delta_event = {
+        "event_type": "step.delta",
+        "index": 0,
+        "delta": {
+            "type": "thought_summary",
+            "content": {"type": "text", "text": "Analyzing problem logically..."},
+        },
+    }
+    # 4. step.delta thought_signature
+    sig_delta_event = {
+        "event_type": "step.delta",
+        "index": 0,
+        "delta": {"type": "thought_signature", "signature": "sig_thought_123"},
+    }
+    # 5. step.stop thought
+    thought_stop_event = {"event_type": "step.stop", "index": 0}
+    # 6. step.start model_output
+    output_start_event = {
+        "event_type": "step.start",
+        "index": 1,
+        "step": {"type": "model_output"},
+    }
+    # 7. step.delta text
+    output_delta_event = {
+        "event_type": "step.delta",
+        "index": 1,
+        "delta": {"type": "text", "text": "42"},
+    }
+    # 8. step.stop model_output
+    output_stop_event = {"event_type": "step.stop", "index": 1}
+    # 9. interaction.completed (SSE payload omits steps)
+    mock_interaction = MagicMock(id="int_thought_stream", output_text="", steps=[], usage=None)
+    completed_event = MagicMock(event_type="interaction.completed", interaction=mock_interaction)
+
+    mock_client.interactions.create.return_value = [
+        int_created_event,
+        thought_start_event,
+        thought_delta_event,
+        sig_delta_event,
+        thought_stop_event,
+        output_start_event,
+        output_delta_event,
+        output_stop_event,
+        completed_event,
+    ]
+    mock_genai.Client = MagicMock(return_value=mock_client)
+    mock_genai.types = mock_types
+    mock_google.genai = mock_genai
+
+    monkeypatch.setitem(sys.modules, "google", mock_google)
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-3.8-flash", api_key="gem-test")
+    stream = provider.generate(GenerationRequest(prompt="What is the answer?"), stream=True)
+
+    chunks = list(stream)
+    thinking_chunks = [c.thinking for c in chunks if c.thinking]
+    assert thinking_chunks == ["Analyzing problem logically..."]
+
+    text_chunks = [c.text for c in chunks if c.text]
+    assert text_chunks == ["42"]
+
+    final = stream.get_final_response()
+    assert final.id == "int_thought_stream"
+    assert final.text == "42"
+    assert final.thinking == "Analyzing problem logically..."
+    assert len(final.thought_blocks) >= 1
+    assert any(tb.get("thought_signature") == "sig_thought_123" for tb in final.thought_blocks)
+
+
+def test_gemini_streaming_tool_call_with_event_id_resilience(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_google = types.ModuleType("google")
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    mock_client = MagicMock()
+
+    # Step.start with real function call id
+    step_start = {
+        "event_type": "step.start",
+        "index": 0,
+        "step": {"type": "function_call", "id": "call_weather_99", "name": "get_weather"},
+    }
+    # Step.delta has event_id token (e.g. evt_resumption_token) which should NOT hijack call_id
+    step_delta = {
+        "event_type": "step.delta",
+        "index": 0,
+        "event_id": "evt_resumption_token_xyz",
+        "delta": {"type": "arguments_delta", "arguments": '{"city": "Paris"}'},
+    }
+    # Step.stop also has event_id
+    step_stop = {
+        "event_type": "step.stop",
+        "index": 0,
+        "event_id": "evt_resumption_token_xyz",
+    }
+    completed = {
+        "event_type": "interaction.completed",
+        "interaction": {"id": "int_tool_chain", "output_text": "", "steps": []},
+    }
+
+    mock_client.interactions.create.return_value = [step_start, step_delta, step_stop, completed]
+    mock_genai.Client = MagicMock(return_value=mock_client)
+    mock_genai.types = mock_types
+    mock_google.genai = mock_genai
+
+    monkeypatch.setitem(sys.modules, "google", mock_google)
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-3.8-flash", api_key="gem-test")
+    stream = provider.generate(GenerationRequest(prompt="Paris weather?"), stream=True)
+
+    chunks = list(stream)
+    tool_chunks = [c for c in chunks if c.tool_calls]
+    assert len(tool_chunks) == 1
+    tc = tool_chunks[0].tool_calls[0]
+    assert tc.id == "call_weather_99"
+    assert tc.name == "get_weather"
+    assert tc.arguments == {"city": "Paris"}
+
+    final = stream.get_final_response()
+    assert len(final.tool_calls) == 1
+    assert final.tool_calls[0].id == "call_weather_99"
+
+
+def test_gemini_streaming_error_event_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_google = types.ModuleType("google")
+    mock_genai = types.ModuleType("google.genai")
+    mock_types = types.ModuleType("google.genai.types")
+
+    mock_client = MagicMock()
+    error_event = {
+        "event_type": "error",
+        "error": {"code": "resource_exhausted", "message": "Rate limit exceeded"},
+    }
+    mock_client.interactions.create.return_value = [error_event]
+    mock_genai.Client = MagicMock(return_value=mock_client)
+    mock_genai.types = mock_types
+    mock_google.genai = mock_genai
+
+    monkeypatch.setitem(sys.modules, "google", mock_google)
+    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
+
+    provider = GeminiProvider(model="gemini-3.8-flash", api_key="gem-test")
+    stream = provider.generate(GenerationRequest(prompt="Hello"), stream=True)
+
+    with pytest.raises(RuntimeError, match="Gemini streaming error: Rate limit exceeded"):
+        list(stream)
+
+
+def test_gemini_streaming_finalize_in_flight_calls() -> None:
+    from evidor.agent.providers.gemini.parser import GeminiResponseParser
+    from evidor.agent.providers.gemini.stream import GeminiStreamHandler
+
+    parser = GeminiResponseParser(model="gemini-3.8-flash")
+    handler = GeminiStreamHandler(parser)
+
+    # In-flight call started and partially accumulated, but stream ends before step.stop
+    list(handler.process_event({
+        "event_type": "step.start",
+        "index": 0,
+        "step": {"type": "function_call", "id": "call_in_flight", "name": "do_work"},
+    }))
+    list(handler.process_event({
+        "event_type": "step.delta",
+        "index": 0,
+        "delta": {"type": "arguments_delta", "arguments": '{"status": "ok"}'},
+    }))
+
+    remaining = list(handler.finalize())
+    assert len(remaining) == 1
+    assert remaining[0].tool_calls[0].id == "call_in_flight"
+    assert remaining[0].tool_calls[0].arguments == {"status": "ok"}
+
+
+
 # ==============================================================================
 # Agent Streaming & Telemetry Tests
 # ==============================================================================
