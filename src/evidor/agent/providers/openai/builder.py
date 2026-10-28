@@ -32,7 +32,7 @@ class OpenAIPayloadBuilder:
             payload["instructions"] = request.system
         if request.previous_response_id:
             payload["previous_response_id"] = request.previous_response_id
-        if request.conversation_id:
+        elif request.conversation_id:
             payload["conversation"] = request.conversation_id
         if request.store is not None:
             payload["store"] = request.store
@@ -42,13 +42,16 @@ class OpenAIPayloadBuilder:
                 {"type": "compaction", "compact_threshold": self.compact_threshold}
             ]
 
-        if self.thinking and self.thinking.enabled:
+        if self.thinking is not None:
             reasoning_config: dict[str, Any] = {}
-            if self.thinking.effort:
-                reasoning_config["effort"] = self.thinking.effort
-            summary_val = getattr(self.thinking, "summary", None)
-            if summary_val:
-                reasoning_config["summary"] = summary_val
+            if self.thinking.enabled:
+                if self.thinking.effort:
+                    reasoning_config["effort"] = self.thinking.effort
+                summary_val = getattr(self.thinking, "summary", None)
+                if summary_val:
+                    reasoning_config["summary"] = summary_val
+            else:
+                reasoning_config["effort"] = "none"
             if reasoning_config:
                 payload["reasoning"] = reasoning_config
 
@@ -70,23 +73,45 @@ class OpenAIPayloadBuilder:
         """Format domain messages into OpenAI Responses API input items."""
         input_items: list[dict[str, Any]] = []
         for message in messages:
-            if message.role == "tool":
+            if message.compaction:
+                input_items.append({
+                    "type": "compaction",
+                    "encrypted_content": message.compaction,
+                })
+                if message.content:
+                    input_items.append({"role": "assistant", "content": message.content})
+            elif message.role == "tool":
+                output_val = message.content if isinstance(message.content, str) else json.dumps(message.content)
                 input_items.append({
                     "type": "function_call_output",
-                    "call_id": message.tool_call_id,
-                    "output": message.content,
+                    "call_id": message.tool_call_id or "call_unknown",
+                    "output": output_val,
                 })
             elif message.tool_calls:
+                if message.thought_blocks:
+                    for tb in message.thought_blocks:
+                        if isinstance(tb, dict) and tb.get("type") == "reasoning":
+                            input_items.append(tb)
+                if message.content:
+                    input_items.append({"role": "assistant", "content": message.content})
                 for tc in message.tool_calls:
+                    if tc.arguments is None:
+                        args_str = "{}"
+                    elif isinstance(tc.arguments, (dict, list)):
+                        args_str = json.dumps(tc.arguments)
+                    else:
+                        args_str = str(tc.arguments) if str(tc.arguments).strip() else "{}"
                     input_items.append({
                         "type": "function_call",
                         "call_id": tc.id,
                         "name": tc.name,
-                        "arguments": json.dumps(tc.arguments) if isinstance(tc.arguments, dict) else str(tc.arguments),
+                        "arguments": args_str,
                     })
-                if message.content:
-                    input_items.append({"role": "assistant", "content": message.content})
             else:
+                if message.thought_blocks:
+                    for tb in message.thought_blocks:
+                        if isinstance(tb, dict) and tb.get("type") == "reasoning":
+                            input_items.append(tb)
                 input_items.append({"role": message.role, "content": message.content})
         return input_items
 

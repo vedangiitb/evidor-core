@@ -1556,6 +1556,108 @@ def test_gemini_parser_thought_summary_dict() -> None:
     assert resp.thought_blocks[0]["thought_signature"] == "sig_dict"
 
 
+def test_openai_payload_builder_compaction_and_thought_blocks() -> None:
+    from evidor.agent.providers.openai.builder import OpenAIPayloadBuilder
+    from evidor.models import GenerationRequest, Message
+
+    builder = OpenAIPayloadBuilder(model="gpt-6-astra")
+    req = GenerationRequest(
+        messages=[
+            Message(role="assistant", content="Prior summary", compaction="encrypted_compaction_state"),
+            Message(
+                role="assistant",
+                content="Reasoned text",
+                thought_blocks=({"type": "reasoning", "id": "rs_1", "encrypted_content": "enc_rs"},),
+            ),
+        ]
+    )
+    payload = builder.build(req)
+    input_items = payload["input"]
+    assert input_items[0] == {
+        "type": "compaction",
+        "encrypted_content": "encrypted_compaction_state",
+    }
+    assert input_items[1] == {"role": "assistant", "content": "Prior summary"}
+    assert input_items[2] == {"type": "reasoning", "id": "rs_1", "encrypted_content": "enc_rs"}
+    assert input_items[3] == {"role": "assistant", "content": "Reasoned text"}
+
+
+def test_openai_payload_builder_thinking_disabled_effort_none() -> None:
+    from evidor.agent.providers.openai.builder import OpenAIPayloadBuilder
+    from evidor.models import GenerationRequest, OpenAIThinkingConfig
+
+    builder = OpenAIPayloadBuilder(model="gpt-6-astra", thinking=OpenAIThinkingConfig(enabled=False))
+    req = GenerationRequest(prompt="No thinking please")
+    payload = builder.build(req)
+    assert payload["reasoning"] == {"effort": "none"}
+
+
+def test_openai_payload_builder_assistant_content_precedes_tool_calls() -> None:
+    from evidor.agent.providers.openai.builder import OpenAIPayloadBuilder
+    from evidor.models import GenerationRequest, Message, ToolCall
+
+    builder = OpenAIPayloadBuilder(model="gpt-6-astra")
+    tc = ToolCall(id="call_999", name="lookup", arguments={"target": "val"})
+    req = GenerationRequest(
+        messages=[
+            Message(role="assistant", content="Let me check that.", tool_calls=(tc,)),
+            Message(role="tool", content="lookup_result", tool_call_id="call_999"),
+        ]
+    )
+    payload = builder.build(req)
+    input_items = payload["input"]
+    # Assistant text must come before the function call so it doesn't get inserted between call and output
+    assert input_items[0] == {"role": "assistant", "content": "Let me check that."}
+    assert input_items[1] == {
+        "type": "function_call",
+        "call_id": "call_999",
+        "name": "lookup",
+        "arguments": '{"target": "val"}',
+    }
+    assert input_items[2] == {
+        "type": "function_call_output",
+        "call_id": "call_999",
+        "output": "lookup_result",
+    }
+
+
+def test_openai_payload_builder_mutually_exclusive_chaining_ids() -> None:
+    from evidor.agent.providers.openai.builder import OpenAIPayloadBuilder
+    from evidor.models import GenerationRequest
+
+    builder = OpenAIPayloadBuilder(model="gpt-6-astra")
+    # Both provided -> previous_response_id takes precedence, conversation omitted per OpenAPI spec
+    req = GenerationRequest(
+        prompt="hello",
+        previous_response_id="resp_123",
+        conversation_id="conv_456",
+    )
+    payload = builder.build(req)
+    assert "previous_response_id" in payload
+    assert payload["previous_response_id"] == "resp_123"
+    assert "conversation" not in payload
+
+
+def test_openai_payload_builder_tool_arg_and_output_serialization() -> None:
+    from evidor.agent.providers.openai.builder import OpenAIPayloadBuilder
+    from evidor.models import GenerationRequest, Message, ToolCall
+
+    builder = OpenAIPayloadBuilder(model="gpt-6-astra")
+    tc_none = ToolCall(id="c_none", name="tool_a", arguments=None)  # type: ignore[arg-type]
+    req = GenerationRequest(
+        messages=[
+            Message(role="assistant", tool_calls=(tc_none,)),
+            Message(role="tool", content="ok", tool_call_id=None),
+        ]
+    )
+    payload = builder.build(req)
+    input_items = payload["input"]
+    assert input_items[0]["arguments"] == "{}"
+    assert input_items[1]["output"] == "ok"
+    assert input_items[1]["call_id"] == "call_unknown"
+
+
+
 
 
 
