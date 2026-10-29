@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.10.5-dev.1 (2026-10-29)
+
+### Bug Fixes
+
+- **anthropic**: Fixing parser and request builder issues
+  ([`5bd9e5d`](https://github.com/vedangiitb/evidor-core/commit/5bd9e5d3a100371ad8656cf097f369cf6cffd469))
+
+- **anthropic**: Fixing streaming issues
+  ([`f8f0267`](https://github.com/vedangiitb/evidor-core/commit/f8f0267bd20a9613dd72aac6a1cd52957a47d106))
+
+
 ## v1.10.4 (2026-10-29)
 
 
