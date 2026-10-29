@@ -2,6 +2,23 @@
 
 <!-- version list -->
 
+## v1.10.4-dev.1 (2026-10-29)
+
+### Bug Fixes
+
+- **openai**: Fixing minor issues
+  ([`3cfa475`](https://github.com/vedangiitb/evidor-core/commit/3cfa4750140e293ea8c3d3f94db37fcc332ee9f2))
+
+- **openai**: Fixing request building issues with context compaction and reasoning
+  ([`a8274f5`](https://github.com/vedangiitb/evidor-core/commit/a8274f58267081942b0c0d8c9f187121e05d6834))
+
+- **openai**: Fixing response parsing issues
+  ([`c194b2c`](https://github.com/vedangiitb/evidor-core/commit/c194b2c12932660a896f986cfa83149cf412176b))
+
+- **openai**: Fixing streaming issues
+  ([`644da04`](https://github.com/vedangiitb/evidor-core/commit/644da042fe16e025b24bd15a11ab961720ce4057))
+
+
 ## v1.10.3 (2026-10-22)
 
 
