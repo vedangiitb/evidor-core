@@ -1657,6 +1657,185 @@ def test_openai_payload_builder_tool_arg_and_output_serialization() -> None:
     assert input_items[1]["call_id"] == "call_unknown"
 
 
+# --- OpenAIResponseParser Tests (2.x fixes) ---
+
+
+def test_openai_parser_dict_payload_and_missing_output_text() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    # Wire JSON response from /v1/responses (no SDK output_text property)
+    raw_response = {
+        "id": "resp_json_001",
+        "object": "response",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "id": "msg_001",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Hello "},
+                    {"type": "output_text", "text": "world!"},
+                ],
+            },
+            {
+                "type": "function_call",
+                "id": "fc_001",
+                "call_id": "call_123",
+                "name": "search_data",
+                "arguments": '{"query": "evidor"}',
+            },
+        ],
+        "usage": {
+            "input_tokens": 15,
+            "output_tokens": 25,
+            "total_tokens": 40,
+        },
+    }
+
+    res = parser.parse(raw_response)
+    assert res.id == "resp_json_001"
+    assert res.text == "Hello world!"
+    assert len(res.tool_calls) == 1
+    assert res.tool_calls[0].id == "call_123"
+    assert res.tool_calls[0].name == "search_data"
+    assert res.tool_calls[0].arguments == {"query": "evidor"}
+    assert res.usage is not None
+    assert res.usage.prompt_tokens == 15
+    assert res.usage.completion_tokens == 25
+    assert res.usage.total_tokens == 40
+
+
+def test_openai_parser_reasoning_items_and_thought_blocks() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    reasoning_item = {
+        "type": "reasoning",
+        "id": "rs_001",
+        "summary": [{"type": "summary_text", "text": "Step 1: Analyzed input"}],
+        "content": [{"type": "reasoning_text", "text": "Step 2: Computed intermediate result"}],
+        "encrypted_content": "enc_reasoning_blob_789",
+    }
+    raw_response = {
+        "id": "resp_reasoning_001",
+        "output": [
+            reasoning_item,
+            {
+                "type": "message",
+                "id": "msg_002",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Final answer"}],
+            },
+        ],
+    }
+
+    res = parser.parse(raw_response)
+    assert res.text == "Final answer"
+    # Both summary and content must be preserved without dropping either
+    assert res.thinking is not None
+    assert "Step 1: Analyzed input" in res.thinking
+    assert "Step 2: Computed intermediate result" in res.thinking
+    # Preserves reasoning item in thought_blocks for stateless multi-turn replay
+    assert len(res.thought_blocks) == 1
+    assert res.thought_blocks[0] == reasoning_item
+
+
+def test_openai_parser_top_level_reasoning_summary() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    raw_response = {
+        "id": "resp_top_reasoning",
+        "output_text": "Answer",
+        "reasoning": {
+            "effort": "high",
+            "summary": [{"type": "summary_text", "text": "Deliberating carefully..."}],
+        },
+    }
+
+    res = parser.parse(raw_response)
+    assert res.text == "Answer"
+    assert res.thinking == "Deliberating carefully..."
+
+
+def test_openai_parser_refusal_extraction() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    raw_response = {
+        "id": "resp_refusal_001",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "refusal", "refusal": "I cannot perform this unsafe action."},
+                ],
+            }
+        ],
+    }
+
+    res = parser.parse(raw_response)
+    assert res.text == "I cannot perform this unsafe action."
+
+
+def test_openai_parser_usage_with_cache_write_tokens() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    raw_response = {
+        "id": "resp_usage_001",
+        "output_text": "Usage reply",
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "total_tokens": 150,
+            "input_tokens_details": {
+                "cached_tokens": 30,
+                "cache_write_tokens": 70,
+            },
+            "output_tokens_details": {
+                "reasoning_tokens": 20,
+            },
+        },
+    }
+
+    res = parser.parse(raw_response)
+    assert res.usage is not None
+    assert res.usage.prompt_tokens == 100
+    assert res.usage.completion_tokens == 50
+    assert res.usage.total_tokens == 150
+    assert res.usage.cached_tokens == 30
+    assert res.usage.cache_creation_tokens == 70
+    assert res.usage.reasoning_tokens == 20
+
+
+def test_openai_parser_compaction_extraction() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    raw_response = {
+        "id": "resp_compact_001",
+        "output": [
+            {
+                "type": "compaction",
+                "encrypted_content": "enc_compact_token_xyz",
+            },
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Post compaction text"}],
+            },
+        ],
+    }
+
+    res = parser.parse(raw_response)
+    assert res.text == "Post compaction text"
+    assert res.compaction == "enc_compact_token_xyz"
+
+
+
 
 
 
