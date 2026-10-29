@@ -45,6 +45,7 @@ class AnthropicProvider(BaseProvider):
         thinking: Any = None,
         compact_threshold: int | None = None,
         compact_instructions: str | None = None,
+        base_url: str | None = None,
     ) -> None:
         if thinking is not None:
             from evidor.models import AnthropicThinkingConfig
@@ -62,6 +63,7 @@ class AnthropicProvider(BaseProvider):
         self._enable_prompt_caching = enable_prompt_caching
         self._compact_threshold = compact_threshold
         self._compact_instructions = compact_instructions
+        self._base_url = base_url
         self._sync_client: Any = None
         self._default_async_client: Any = None
         self._async_clients: dict[asyncio.AbstractEventLoop, Any] = {}
@@ -99,6 +101,11 @@ class AnthropicProvider(BaseProvider):
     def compact_instructions(self) -> str | None:
         return self._compact_instructions
 
+    @property
+    def base_url(self) -> str | None:
+        """The custom base URL for Anthropic-compatible endpoints, if configured."""
+        return self._base_url
+
     def with_model(self, model: str) -> "AnthropicProvider":
         return AnthropicProvider(
             model=model,
@@ -108,6 +115,7 @@ class AnthropicProvider(BaseProvider):
             thinking=self._thinking,
             compact_threshold=self._compact_threshold,
             compact_instructions=self._compact_instructions,
+            base_url=self._base_url,
         )
 
     @overload
@@ -163,31 +171,29 @@ class AnthropicProvider(BaseProvider):
     ) -> GenerationResponse | AsyncStreamResponse:
         client = self._get_async_client()
         should_stream = stream or request.stream
-        if client is not None:
-            payload = self._builder.build(request)
-            if should_stream:
-                payload["stream"] = True
-                if self._compact_threshold is not None or self._compact_instructions is not None:
-                    raw_stream = await client.beta.messages.create(**payload)
-                else:
-                    raw_stream = await client.messages.create(**payload)
-                return AsyncStreamResponse(self._create_async_stream(raw_stream))
-
+        payload = self._builder.build(request)
+        if should_stream:
+            payload["stream"] = True
             if self._compact_threshold is not None or self._compact_instructions is not None:
-                response_msg = await client.beta.messages.create(**payload)
+                raw_stream = await client.beta.messages.create(**payload)
             else:
-                response_msg = await client.messages.create(**payload)
-            return self._parser.parse(response_msg)
-        return await asyncio.to_thread(self.generate, request, stream=stream)
+                raw_stream = await client.messages.create(**payload)
+            return AsyncStreamResponse(self._create_async_stream(raw_stream))
+
+        if self._compact_threshold is not None or self._compact_instructions is not None:
+            response_msg = await client.beta.messages.create(**payload)
+        else:
+            response_msg = await client.messages.create(**payload)
+        return self._parser.parse(response_msg)
 
     def _create_stream(self, raw_stream: Any) -> Iterator[StreamChunk]:
-        handler = AnthropicStreamHandler()
+        handler = AnthropicStreamHandler(model=self._model, parser=self._parser)
         for event in raw_stream:
             yield from handler.process_event(event)
         yield from handler.finalize()
 
     async def _create_async_stream(self, raw_stream: Any) -> AsyncIterator[StreamChunk]:
-        handler = AnthropicStreamHandler()
+        handler = AnthropicStreamHandler(model=self._model, parser=self._parser)
         async for event in raw_stream:
             for chunk in handler.process_event(event):
                 yield chunk
@@ -218,23 +224,30 @@ class AnthropicProvider(BaseProvider):
             except ImportError as error:
                 raise ImportError("Install Anthropic support with: pip install 'evidor[anthropic]'") from error
 
-            client = Anthropic(api_key=self._api_key)
+            client_kwargs: dict[str, Any] = {"api_key": self._api_key}
+            if self._base_url is not None:
+                client_kwargs["base_url"] = self._base_url
+            client = Anthropic(**client_kwargs)
             self._sync_client = client
             return client
 
     def _get_async_client(self) -> Any:
         try:
             from anthropic import AsyncAnthropic
-        except (ImportError, AttributeError):
-            return None
+        except (ImportError, AttributeError) as error:
+            raise ImportError("Install Anthropic support with: pip install 'evidor[anthropic]'") from error
 
         if not hasattr(self, "_async_clients"):
             self._async_clients = {}
 
+        client_kwargs: dict[str, Any] = {"api_key": self._api_key}
+        if self._base_url is not None:
+            client_kwargs["base_url"] = self._base_url
+
         client, self._default_async_client = get_or_create_async_client(
             self._async_clients,
             self._default_async_client,
-            lambda: AsyncAnthropic(api_key=self._api_key),
+            lambda: AsyncAnthropic(**client_kwargs),
             self._lock,
         )
         return client
@@ -242,4 +255,3 @@ class AnthropicProvider(BaseProvider):
     # Backward-compatible delegates
     def _format_messages(self, messages: Sequence[Message]) -> list[dict[str, Any]]:
         return self._builder.format_messages(messages)
-

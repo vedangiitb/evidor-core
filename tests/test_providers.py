@@ -2152,6 +2152,94 @@ def test_anthropic_parser_null_response() -> None:
     assert res.usage is None
 
 
+# --- AnthropicProvider Lifecycle & Client Pool Tests (4.x fixes) ---
+
+
+def test_anthropic_provider_base_url_and_with_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = MagicMock(content=[MagicMock(type="text", text="ok")])
+    mock_anthropic.Anthropic = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(
+        model="claude-3-7-sonnet",
+        api_key="ant-key",
+        base_url="https://anthropic.custom-proxy.internal",
+    )
+    assert provider.base_url == "https://anthropic.custom-proxy.internal"
+
+    copied = provider.with_model("claude-3-5-haiku")
+    assert copied.model == "claude-3-5-haiku"
+    assert copied.base_url == "https://anthropic.custom-proxy.internal"
+
+    provider.generate(GenerationRequest(prompt="hello"))
+    mock_anthropic.Anthropic.assert_called_once_with(
+        api_key="ant-key",
+        base_url="https://anthropic.custom-proxy.internal",
+    )
+
+
+@pytest.mark.asyncio
+async def test_anthropic_provider_async_with_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+    mock_client.is_closed = False
+
+    async def _async_create(**kwargs: Any) -> Any:
+        return MagicMock(content=[MagicMock(type="text", text="async ok")])
+
+    mock_client.messages.create = _async_create
+    mock_anthropic.AsyncAnthropic = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(
+        model="claude-3-7-sonnet",
+        api_key="ant-key",
+        base_url="https://anthropic.custom-proxy.internal",
+    )
+    resp = await provider.generate_async(GenerationRequest(prompt="hello"))
+    assert resp.text == "async ok"
+    mock_anthropic.AsyncAnthropic.assert_called_once_with(
+        api_key="ant-key",
+        base_url="https://anthropic.custom-proxy.internal",
+    )
+
+
+@pytest.mark.asyncio
+async def test_anthropic_provider_async_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "anthropic", None)
+    provider = AnthropicProvider(model="claude-3-5")
+    with pytest.raises(ImportError, match="Install Anthropic support with: pip install 'evidor\\[anthropic\\]'"):
+        await provider.generate_async(GenerationRequest(prompt="test"))
+
+
+@pytest.mark.asyncio
+async def test_anthropic_async_client_reuse_and_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+    mock_client.is_closed = False
+    mock_client.close = AsyncMock()
+
+    async def _async_create(**kwargs: Any) -> Any:
+        return MagicMock(content=[MagicMock(type="text", text="res")])
+
+    mock_client.messages.create = _async_create
+    mock_anthropic.AsyncAnthropic = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(model="claude-3-7-sonnet", api_key="key")
+    req = GenerationRequest(prompt="test")
+
+    await provider.generate_async(req)
+    await provider.generate_async(req)
+    assert mock_anthropic.AsyncAnthropic.call_count == 1
+
+    await provider.close_async()
+    mock_client.close.assert_awaited_once()
+
+
+
 
 
 
