@@ -119,6 +119,14 @@ def test_openai_provider_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
         provider.generate(GenerationRequest(prompt="test"))
 
 
+@pytest.mark.asyncio
+async def test_openai_provider_async_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "openai", None)
+    provider = OpenAIProvider(model="gpt-4.1-mini")
+    with pytest.raises(ImportError, match="Install OpenAI support with: pip install 'evidor\\[openai\\]'"):
+        await provider.generate_async(GenerationRequest(prompt="test"))
+
+
 # --- AnthropicProvider Tests ---
 
 

@@ -174,7 +174,7 @@ class OpenAIProvider(BaseProvider):
 
             try:
                 from openai import OpenAI
-            except ImportError as error:
+            except (ImportError, AttributeError) as error:
                 raise ImportError("Install OpenAI support with: pip install 'evidor[openai]'") from error
 
             client_kwargs: dict[str, Any] = {"api_key": self._api_key}
@@ -192,8 +192,8 @@ class OpenAIProvider(BaseProvider):
     def _get_async_client(self) -> Any:
         try:
             from openai import AsyncOpenAI
-        except (ImportError, AttributeError):
-            return None
+        except (ImportError, AttributeError) as error:
+            raise ImportError("Install OpenAI support with: pip install 'evidor[openai]'") from error
 
         if not hasattr(self, "_async_clients"):
             self._async_clients = {}
@@ -210,7 +210,10 @@ class OpenAIProvider(BaseProvider):
         )
 
         if not hasattr(client, "responses") or not hasattr(client.responses, "create"):
-            return None
+            raise RuntimeError(
+                "Modern OpenAI Responses API (client.responses.create) is required. "
+                "Please update openai to the latest version."
+            )
         return client
 
 
