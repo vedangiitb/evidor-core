@@ -49,6 +49,7 @@ class Message:
     thinking: str | None = None
     thought_blocks: tuple[Any, ...] = ()
     compaction: str | None = None
+    is_error: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.tool_calls, (list, tuple)):

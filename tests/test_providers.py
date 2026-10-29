@@ -1843,6 +1843,405 @@ def test_openai_parser_compaction_extraction() -> None:
     assert res.compaction == "enc_compact_token_xyz"
 
 
+# --- AnthropicPayloadBuilder Tests (1.x fixes) ---
+
+
+def test_anthropic_builder_parallel_tool_results_merged_into_single_user_message() -> None:
+    from evidor.agent.providers.anthropic.builder import AnthropicPayloadBuilder
+
+    builder = AnthropicPayloadBuilder(model="claude-3-7-sonnet-20250219", max_tokens=2048)
+    req = GenerationRequest(
+        messages=[
+            Message(role="user", content="Perform tasks"),
+            Message(
+                role="assistant",
+                content="Running tools...",
+                tool_calls=(
+                    ToolCall(id="call_1", name="tool_a", arguments={"a": 1}),
+                    ToolCall(id="call_2", name="tool_b", arguments={"b": 2}),
+                ),
+            ),
+            Message(role="tool", content="result 1", tool_call_id="call_1"),
+            Message(role="tool", content="result 2", tool_call_id="call_2"),
+        ]
+    )
+    payload = builder.build(req)
+    messages = payload["messages"]
+    assert len(messages) == 3
+    assert messages[0]["role"] == "user"
+    assert messages[1]["role"] == "assistant"
+    assert messages[2]["role"] == "user"
+    assert len(messages[2]["content"]) == 2
+    assert messages[2]["content"][0] == {
+        "type": "tool_result",
+        "tool_use_id": "call_1",
+        "content": "result 1",
+    }
+    assert messages[2]["content"][1] == {
+        "type": "tool_result",
+        "tool_use_id": "call_2",
+        "content": "result 2",
+    }
+
+
+def test_anthropic_builder_tool_call_id_fallback_and_error() -> None:
+    from evidor.agent.providers.anthropic.builder import AnthropicPayloadBuilder
+
+    builder = AnthropicPayloadBuilder(model="claude-3-7-sonnet-20250219", max_tokens=2048)
+    msg_err = Message(role="tool", content="Error occurred", tool_call_id=None, is_error=True)
+    req = GenerationRequest(
+        messages=[
+            Message(role="user", content="Execute"),
+            Message(
+                role="assistant",
+                content="Executing...",
+                tool_calls=(ToolCall(id="call_x", name="fail_tool", arguments={}),),
+            ),
+            msg_err,
+        ]
+    )
+    payload = builder.build(req)
+    tool_content = payload["messages"][2]["content"]
+    assert len(tool_content) == 1
+    assert tool_content[0]["tool_use_id"] == "call_unknown"
+    assert tool_content[0]["is_error"] is True
+    assert tool_content[0]["content"] == "Error occurred"
+
+
+def test_anthropic_builder_thought_blocks_sdk_objects_and_ordering() -> None:
+    from evidor.agent.providers.anthropic.builder import AnthropicPayloadBuilder
+
+    builder = AnthropicPayloadBuilder(model="claude-3-7-sonnet-20250219", max_tokens=2048)
+
+    class MockSDKThinkingBlock:
+        def __init__(self, thinking: str, signature: str) -> None:
+            self.type = "thinking"
+            self.thinking = thinking
+            self.signature = signature
+
+        def model_dump(self) -> dict[str, Any]:
+            return {"type": "thinking", "thinking": self.thinking, "signature": self.signature}
+
+    sdk_tb = MockSDKThinkingBlock("SDK reasoning", "sig_sdk_123")
+    tc = ToolCall(id="call_calc", name="calc", arguments={"val": 10})
+    req = GenerationRequest(
+        messages=[
+            Message(role="user", content="Calculate"),
+            Message(
+                role="assistant",
+                content="Final text",
+                tool_calls=(tc,),
+                thought_blocks=(sdk_tb,),
+            ),
+        ]
+    )
+    payload = builder.build(req)
+    assistant_blocks = payload["messages"][1]["content"]
+    assert len(assistant_blocks) == 3
+    # 1st block: thinking block (must be first)
+    assert assistant_blocks[0] == {
+        "type": "thinking",
+        "thinking": "SDK reasoning",
+        "signature": "sig_sdk_123",
+    }
+    # 2nd block: text
+    assert assistant_blocks[1] == {"type": "text", "text": "Final text"}
+    # 3rd block: tool_use
+    assert assistant_blocks[2] == {
+        "type": "tool_use",
+        "id": "call_calc",
+        "name": "calc",
+        "input": {"val": 10},
+    }
+
+
+def test_anthropic_builder_thinking_budget_and_max_tokens_clamping() -> None:
+    from evidor.agent.providers.anthropic.builder import AnthropicPayloadBuilder
+    from evidor.models import AnthropicThinkingConfig
+
+    # Budget tokens < 1024 auto-promoted to 1024, max_tokens bumped if <= budget
+    cfg = AnthropicThinkingConfig(enabled=True, type="enabled", budget_tokens=500)
+    builder = AnthropicPayloadBuilder(model="claude-3-7-sonnet-20250219", max_tokens=1000, thinking=cfg)
+    req = GenerationRequest(prompt="Hello")
+    payload = builder.build(req)
+
+    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+    assert payload["max_tokens"] > 1024
+    assert payload["max_tokens"] == 1024 + 1024
+
+
+def test_anthropic_builder_tool_schema_normalization() -> None:
+    from evidor.agent.providers.anthropic.builder import AnthropicPayloadBuilder
+
+    builder = AnthropicPayloadBuilder(model="claude-3-7-sonnet-20250219", max_tokens=2048)
+
+    empty_param_tool = Tool(name="empty_param", description="Empty parameters", parameters=None, func=lambda: None)  # type: ignore[arg-type]
+    dict_tool = {
+        "name": "dict_tool",
+        "description": "Defined as dictionary",
+        "input_schema": {"type": "object", "properties": {"target": {"type": "string"}}},
+    }
+
+    req = GenerationRequest(
+        prompt="Use tools",
+        tools=[empty_param_tool, dict_tool],  # type: ignore[list-item]
+    )
+    payload = builder.build(req)
+    tools = payload["tools"]
+    assert len(tools) == 2
+    # Dict tool sorted first alphabetically
+    assert tools[0]["name"] == "dict_tool"
+    assert tools[0]["description"] == "Defined as dictionary"
+    assert tools[0]["input_schema"] == {"type": "object", "properties": {"target": {"type": "string"}}}
+
+    # Empty param tool sorted second, normalized schema
+    assert tools[1]["name"] == "empty_param"
+    assert tools[1]["description"] == "Empty parameters"
+    assert tools[1]["input_schema"] == {"type": "object", "properties": {}}
+
+
+def test_anthropic_builder_consecutive_user_messages_merged() -> None:
+    from evidor.agent.providers.anthropic.builder import AnthropicPayloadBuilder
+
+    builder = AnthropicPayloadBuilder(model="claude-3-7-sonnet-20250219", max_tokens=2048)
+    req = GenerationRequest(
+        messages=[
+            Message(role="user", content="Part 1"),
+            Message(role="user", content="Part 2"),
+        ]
+    )
+    payload = builder.build(req)
+    messages = payload["messages"]
+    assert len(messages) == 1
+    assert messages[0]["role"] == "user"
+    assert messages[0]["content"] == "Part 1\n\nPart 2"
+
+
+# --- AnthropicResponseParser Tests (2.x fixes) ---
+
+
+def test_anthropic_parser_dict_payload() -> None:
+    from evidor.agent.providers.anthropic.parser import AnthropicResponseParser
+
+    parser = AnthropicResponseParser(model="claude-3-7-sonnet")
+    dict_response = {
+        "id": "msg_wire_001",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-3-7-sonnet-20250219",
+        "content": [
+            {"type": "text", "text": "Wire text response"},
+        ],
+        "usage": {
+            "input_tokens": 120,
+            "output_tokens": 45,
+            "cache_read_input_tokens": 20,
+            "cache_creation_input_tokens": 10,
+        },
+    }
+
+    res = parser.parse(dict_response)
+    assert res.id == "msg_wire_001"
+    assert res.model == "claude-3-7-sonnet-20250219"
+    assert res.text == "Wire text response"
+    assert res.usage is not None
+    assert res.usage.prompt_tokens == 140
+    assert res.usage.completion_tokens == 45
+    assert res.usage.cached_tokens == 20
+    assert res.usage.cache_creation_tokens == 10
+
+
+def test_anthropic_parser_tool_call_json_string_arguments_and_fallbacks() -> None:
+    from evidor.agent.providers.anthropic.parser import AnthropicResponseParser
+
+    parser = AnthropicResponseParser(model="claude-3-7-sonnet")
+    raw_response = {
+        "id": "msg_tool_002",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "call_weather_1",
+                "name": "get_weather",
+                "input": '{"location": "Tokyo", "days": 3}',
+            },
+            {
+                "type": "tool_use",
+                "id": "",  # Empty id fallback
+                "name": "",  # Empty name fallback
+                "input": None,
+            },
+        ],
+    }
+
+    res = parser.parse(raw_response)
+    assert len(res.tool_calls) == 2
+    assert res.tool_calls[0].id == "call_weather_1"
+    assert res.tool_calls[0].name == "get_weather"
+    assert res.tool_calls[0].arguments == {"location": "Tokyo", "days": 3}
+
+    assert res.tool_calls[1].id == "call_2"
+    assert res.tool_calls[1].name == "unknown_tool"
+    assert res.tool_calls[1].arguments == {}
+
+
+def test_anthropic_parser_usage_with_thinking_tokens() -> None:
+    from evidor.agent.providers.anthropic.parser import AnthropicResponseParser
+
+    parser = AnthropicResponseParser(model="claude-3-7-sonnet")
+
+    # Direct thinking_tokens in usage
+    usage_with_thinking = {
+        "input_tokens": 50,
+        "output_tokens": 200,
+        "thinking_tokens": 150,
+    }
+    res = parser.parse({"content": [], "usage": usage_with_thinking})
+    assert res.usage is not None
+    assert res.usage.prompt_tokens == 50
+    assert res.usage.completion_tokens == 200
+    assert res.usage.reasoning_tokens == 150
+
+    # reasoning_tokens nested in output_tokens_details
+    usage_with_nested = {
+        "input_tokens": 60,
+        "output_tokens": 180,
+        "output_tokens_details": {"reasoning_tokens": 120},
+    }
+    res2 = parser.parse({"content": [], "usage": usage_with_nested})
+    assert res2.usage is not None
+    assert res2.usage.reasoning_tokens == 120
+
+
+def test_anthropic_parser_redacted_thinking_and_string_content() -> None:
+    from evidor.agent.providers.anthropic.parser import AnthropicResponseParser
+
+    parser = AnthropicResponseParser(model="claude-3-7-sonnet")
+
+    raw_response = {
+        "id": "msg_redacted_003",
+        "content": [
+            {"type": "redacted_thinking", "data": "enc_data_blob_xyz"},
+            {"type": "thinking", "thinking": "Internal thought", "signature": "sig_thought_1"},
+            {"type": "text", "text": "Visible text"},
+        ],
+    }
+    res = parser.parse(raw_response)
+    assert res.text == "Visible text"
+    assert res.thinking == "Internal thought"
+    assert len(res.thought_blocks) == 2
+    assert res.thought_blocks[0] == {"type": "redacted_thinking", "data": "enc_data_blob_xyz"}
+    assert res.thought_blocks[1] == {
+        "type": "thinking",
+        "thinking": "Internal thought",
+        "signature": "sig_thought_1",
+    }
+
+    # Content as plain string
+    res_str = parser.parse({"content": "Simple raw string response"})
+    assert res_str.text == "Simple raw string response"
+
+
+def test_anthropic_parser_null_response() -> None:
+    from evidor.agent.providers.anthropic.parser import AnthropicResponseParser
+
+    parser = AnthropicResponseParser(model="claude-3-7-sonnet")
+    res = parser.parse(None)
+    assert res.text == ""
+    assert res.model == "claude-3-7-sonnet"
+    assert res.tool_calls == ()
+    assert res.usage is None
+
+
+# --- AnthropicProvider Lifecycle & Client Pool Tests (4.x fixes) ---
+
+
+def test_anthropic_provider_base_url_and_with_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = MagicMock(content=[MagicMock(type="text", text="ok")])
+    mock_anthropic.Anthropic = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(
+        model="claude-3-7-sonnet",
+        api_key="ant-key",
+        base_url="https://anthropic.custom-proxy.internal",
+    )
+    assert provider.base_url == "https://anthropic.custom-proxy.internal"
+
+    copied = provider.with_model("claude-3-5-haiku")
+    assert copied.model == "claude-3-5-haiku"
+    assert copied.base_url == "https://anthropic.custom-proxy.internal"
+
+    provider.generate(GenerationRequest(prompt="hello"))
+    mock_anthropic.Anthropic.assert_called_once_with(
+        api_key="ant-key",
+        base_url="https://anthropic.custom-proxy.internal",
+    )
+
+
+@pytest.mark.asyncio
+async def test_anthropic_provider_async_with_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+    mock_client.is_closed = False
+
+    async def _async_create(**kwargs: Any) -> Any:
+        return MagicMock(content=[MagicMock(type="text", text="async ok")])
+
+    mock_client.messages.create = _async_create
+    mock_anthropic.AsyncAnthropic = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(
+        model="claude-3-7-sonnet",
+        api_key="ant-key",
+        base_url="https://anthropic.custom-proxy.internal",
+    )
+    resp = await provider.generate_async(GenerationRequest(prompt="hello"))
+    assert resp.text == "async ok"
+    mock_anthropic.AsyncAnthropic.assert_called_once_with(
+        api_key="ant-key",
+        base_url="https://anthropic.custom-proxy.internal",
+    )
+
+
+@pytest.mark.asyncio
+async def test_anthropic_provider_async_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "anthropic", None)
+    provider = AnthropicProvider(model="claude-3-5")
+    with pytest.raises(ImportError, match="Install Anthropic support with: pip install 'evidor\\[anthropic\\]'"):
+        await provider.generate_async(GenerationRequest(prompt="test"))
+
+
+@pytest.mark.asyncio
+async def test_anthropic_async_client_reuse_and_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+    mock_client.is_closed = False
+    mock_client.close = AsyncMock()
+
+    async def _async_create(**kwargs: Any) -> Any:
+        return MagicMock(content=[MagicMock(type="text", text="res")])
+
+    mock_client.messages.create = _async_create
+    mock_anthropic.AsyncAnthropic = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(model="claude-3-7-sonnet", api_key="key")
+    req = GenerationRequest(prompt="test")
+
+    await provider.generate_async(req)
+    await provider.generate_async(req)
+    assert mock_anthropic.AsyncAnthropic.call_count == 1
+
+    await provider.close_async()
+    mock_client.close.assert_awaited_once()
+
+
+
+
+
 
 
 

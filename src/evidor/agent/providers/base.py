@@ -213,7 +213,10 @@ def sort_tools(tools: Sequence[Any] | None) -> list[Any]:
     """Sort tools alphabetically by name for deterministic ordering and prompt caching."""
     if not tools:
         return []
-    return sorted(tools, key=lambda t: getattr(t, "name", ""))
+    return sorted(
+        tools,
+        key=lambda t: (t.get("name") if isinstance(t, dict) else getattr(t, "name", "")) or "",
+    )
 
 
 def safe_parse_tool_arguments(raw_args: Any) -> dict[str, Any]:

@@ -239,6 +239,169 @@ def test_anthropic_provider_generate_stream(monkeypatch: pytest.MonkeyPatch) -> 
     assert final.text == "Claude stream"
 
 
+def test_anthropic_stream_thinking_delta_and_signature_preservation(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+
+    events = [
+        {"type": "message_start", "message": {"id": "msg_th_01", "model": "claude-3-7-sonnet-20250219"}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "Pondering "}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "the problem..."}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig_crypto_valid_456"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "Solution: 42"}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_stop"},
+    ]
+
+    mock_client.messages.create.return_value = events
+    mock_anthropic.Anthropic = MagicMock(return_value=mock_client)
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(model="claude-3-7-sonnet", api_key="ant-test")
+    stream = provider.generate(GenerationRequest(prompt="Deep thought"), stream=True)
+
+    thinking_chunks = []
+    text_chunks = []
+    for chunk in stream:
+        if chunk.thinking:
+            thinking_chunks.append(chunk.thinking)
+        if chunk.text:
+            text_chunks.append(chunk.text)
+
+    assert "".join(thinking_chunks) == "Pondering the problem..."
+    assert "".join(text_chunks) == "Solution: 42"
+
+    final = stream.get_final_response()
+    assert final.id == "msg_th_01"
+    assert final.model == "claude-3-7-sonnet-20250219"
+    assert final.text == "Solution: 42"
+    assert final.thinking == "Pondering the problem..."
+    assert len(final.thought_blocks) == 1
+    assert final.thought_blocks[0] == {
+        "type": "thinking",
+        "thinking": "Pondering the problem...",
+        "signature": "sig_crypto_valid_456",
+    }
+
+
+def test_anthropic_stream_full_lifecycle_with_usage_and_dict_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+
+    events = [
+        {
+            "type": "message_start",
+            "message": {
+                "id": "msg_life_02",
+                "model": "claude-3-7-sonnet-20250219",
+                "usage": {
+                    "input_tokens": 80,
+                    "cache_read_input_tokens": 40,
+                    "cache_creation_input_tokens": 15,
+                },
+            },
+        },
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello "}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "streaming world!"}},
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {
+                "output_tokens": 30,
+                "thinking_tokens": 10,
+            },
+        },
+        {"type": "message_stop"},
+    ]
+
+    mock_client.messages.create.return_value = events
+    mock_anthropic.Anthropic = MagicMock(return_value=mock_client)
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(model="claude-3-7-sonnet", api_key="ant-test")
+    stream = provider.generate(GenerationRequest(prompt="Hello"), stream=True)
+
+    text_collected = "".join([c.text for c in stream if c.text])
+    assert text_collected == "Hello streaming world!"
+
+    final = stream.get_final_response()
+    assert final.text == "Hello streaming world!"
+    assert final.usage is not None
+    assert final.usage.prompt_tokens == 120  # 80 input + 40 cache_read
+    assert final.usage.completion_tokens == 30
+    assert final.usage.cached_tokens == 40
+    assert final.usage.cache_creation_tokens == 15
+    assert final.usage.reasoning_tokens == 10
+
+
+def test_anthropic_stream_parallel_tool_calls_streaming(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+
+    events = [
+        {"type": "message_start", "message": {"id": "msg_tools_03", "model": "claude-3-7-sonnet"}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "call_t1", "name": "fetch"}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"id":'}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": ' 123}'}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "call_t2", "name": "calc"}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"expr": "2+2"}'}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_stop"},
+    ]
+
+    mock_client.messages.create.return_value = events
+    mock_anthropic.Anthropic = MagicMock(return_value=mock_client)
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(model="claude-3-7-sonnet", api_key="ant-test")
+    stream = provider.generate(GenerationRequest(prompt="Fetch and calc"), stream=True)
+
+    tool_call_chunks = []
+    for chunk in stream:
+        if chunk.tool_calls:
+            tool_call_chunks.extend(chunk.tool_calls)
+
+    assert len(tool_call_chunks) == 2
+    assert tool_call_chunks[0].id == "call_t1"
+    assert tool_call_chunks[0].name == "fetch"
+    assert tool_call_chunks[0].arguments == {"id": 123}
+
+    assert tool_call_chunks[1].id == "call_t2"
+    assert tool_call_chunks[1].name == "calc"
+    assert tool_call_chunks[1].arguments == {"expr": "2+2"}
+
+    final = stream.get_final_response()
+    assert len(final.tool_calls) == 2
+
+
+def test_anthropic_stream_error_event_raises_runtime_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_client = MagicMock()
+
+    events = [
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Starting..."}},
+        {"type": "error", "error": {"type": "overloaded_error", "message": "Server overloaded"}},
+    ]
+
+    mock_client.messages.create.return_value = events
+    mock_anthropic.Anthropic = MagicMock(return_value=mock_client)
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+
+    provider = AnthropicProvider(model="claude-3-7-sonnet", api_key="ant-test")
+    stream = provider.generate(GenerationRequest(prompt="Hello"), stream=True)
+
+    with pytest.raises(RuntimeError, match="Anthropic stream error \\(overloaded_error\\): Server overloaded"):
+        list(stream)
+
+
+
 # ==============================================================================
 # Gemini Provider Streaming Tests
 # ==============================================================================
