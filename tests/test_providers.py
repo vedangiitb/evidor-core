@@ -119,6 +119,14 @@ def test_openai_provider_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
         provider.generate(GenerationRequest(prompt="test"))
 
 
+@pytest.mark.asyncio
+async def test_openai_provider_async_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "openai", None)
+    provider = OpenAIProvider(model="gpt-4.1-mini")
+    with pytest.raises(ImportError, match="Install OpenAI support with: pip install 'evidor\\[openai\\]'"):
+        await provider.generate_async(GenerationRequest(prompt="test"))
+
+
 # --- AnthropicProvider Tests ---
 
 
@@ -1554,6 +1562,287 @@ def test_gemini_parser_thought_summary_dict() -> None:
     assert resp.thinking == "Dict summary text"
     assert len(resp.thought_blocks) == 1
     assert resp.thought_blocks[0]["thought_signature"] == "sig_dict"
+
+
+def test_openai_payload_builder_compaction_and_thought_blocks() -> None:
+    from evidor.agent.providers.openai.builder import OpenAIPayloadBuilder
+    from evidor.models import GenerationRequest, Message
+
+    builder = OpenAIPayloadBuilder(model="gpt-6-astra")
+    req = GenerationRequest(
+        messages=[
+            Message(role="assistant", content="Prior summary", compaction="encrypted_compaction_state"),
+            Message(
+                role="assistant",
+                content="Reasoned text",
+                thought_blocks=({"type": "reasoning", "id": "rs_1", "encrypted_content": "enc_rs"},),
+            ),
+        ]
+    )
+    payload = builder.build(req)
+    input_items = payload["input"]
+    assert input_items[0] == {
+        "type": "compaction",
+        "encrypted_content": "encrypted_compaction_state",
+    }
+    assert input_items[1] == {"role": "assistant", "content": "Prior summary"}
+    assert input_items[2] == {"type": "reasoning", "id": "rs_1", "encrypted_content": "enc_rs"}
+    assert input_items[3] == {"role": "assistant", "content": "Reasoned text"}
+
+
+def test_openai_payload_builder_thinking_disabled_effort_none() -> None:
+    from evidor.agent.providers.openai.builder import OpenAIPayloadBuilder
+    from evidor.models import GenerationRequest, OpenAIThinkingConfig
+
+    builder = OpenAIPayloadBuilder(model="gpt-6-astra", thinking=OpenAIThinkingConfig(enabled=False))
+    req = GenerationRequest(prompt="No thinking please")
+    payload = builder.build(req)
+    assert payload["reasoning"] == {"effort": "none"}
+
+
+def test_openai_payload_builder_assistant_content_precedes_tool_calls() -> None:
+    from evidor.agent.providers.openai.builder import OpenAIPayloadBuilder
+    from evidor.models import GenerationRequest, Message, ToolCall
+
+    builder = OpenAIPayloadBuilder(model="gpt-6-astra")
+    tc = ToolCall(id="call_999", name="lookup", arguments={"target": "val"})
+    req = GenerationRequest(
+        messages=[
+            Message(role="assistant", content="Let me check that.", tool_calls=(tc,)),
+            Message(role="tool", content="lookup_result", tool_call_id="call_999"),
+        ]
+    )
+    payload = builder.build(req)
+    input_items = payload["input"]
+    # Assistant text must come before the function call so it doesn't get inserted between call and output
+    assert input_items[0] == {"role": "assistant", "content": "Let me check that."}
+    assert input_items[1] == {
+        "type": "function_call",
+        "call_id": "call_999",
+        "name": "lookup",
+        "arguments": '{"target": "val"}',
+    }
+    assert input_items[2] == {
+        "type": "function_call_output",
+        "call_id": "call_999",
+        "output": "lookup_result",
+    }
+
+
+def test_openai_payload_builder_mutually_exclusive_chaining_ids() -> None:
+    from evidor.agent.providers.openai.builder import OpenAIPayloadBuilder
+    from evidor.models import GenerationRequest
+
+    builder = OpenAIPayloadBuilder(model="gpt-6-astra")
+    # Both provided -> previous_response_id takes precedence, conversation omitted per OpenAPI spec
+    req = GenerationRequest(
+        prompt="hello",
+        previous_response_id="resp_123",
+        conversation_id="conv_456",
+    )
+    payload = builder.build(req)
+    assert "previous_response_id" in payload
+    assert payload["previous_response_id"] == "resp_123"
+    assert "conversation" not in payload
+
+
+def test_openai_payload_builder_tool_arg_and_output_serialization() -> None:
+    from evidor.agent.providers.openai.builder import OpenAIPayloadBuilder
+    from evidor.models import GenerationRequest, Message, ToolCall
+
+    builder = OpenAIPayloadBuilder(model="gpt-6-astra")
+    tc_none = ToolCall(id="c_none", name="tool_a", arguments=None)  # type: ignore[arg-type]
+    req = GenerationRequest(
+        messages=[
+            Message(role="assistant", tool_calls=(tc_none,)),
+            Message(role="tool", content="ok", tool_call_id=None),
+        ]
+    )
+    payload = builder.build(req)
+    input_items = payload["input"]
+    assert input_items[0]["arguments"] == "{}"
+    assert input_items[1]["output"] == "ok"
+    assert input_items[1]["call_id"] == "call_unknown"
+
+
+# --- OpenAIResponseParser Tests (2.x fixes) ---
+
+
+def test_openai_parser_dict_payload_and_missing_output_text() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    # Wire JSON response from /v1/responses (no SDK output_text property)
+    raw_response = {
+        "id": "resp_json_001",
+        "object": "response",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "id": "msg_001",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Hello "},
+                    {"type": "output_text", "text": "world!"},
+                ],
+            },
+            {
+                "type": "function_call",
+                "id": "fc_001",
+                "call_id": "call_123",
+                "name": "search_data",
+                "arguments": '{"query": "evidor"}',
+            },
+        ],
+        "usage": {
+            "input_tokens": 15,
+            "output_tokens": 25,
+            "total_tokens": 40,
+        },
+    }
+
+    res = parser.parse(raw_response)
+    assert res.id == "resp_json_001"
+    assert res.text == "Hello world!"
+    assert len(res.tool_calls) == 1
+    assert res.tool_calls[0].id == "call_123"
+    assert res.tool_calls[0].name == "search_data"
+    assert res.tool_calls[0].arguments == {"query": "evidor"}
+    assert res.usage is not None
+    assert res.usage.prompt_tokens == 15
+    assert res.usage.completion_tokens == 25
+    assert res.usage.total_tokens == 40
+
+
+def test_openai_parser_reasoning_items_and_thought_blocks() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    reasoning_item = {
+        "type": "reasoning",
+        "id": "rs_001",
+        "summary": [{"type": "summary_text", "text": "Step 1: Analyzed input"}],
+        "content": [{"type": "reasoning_text", "text": "Step 2: Computed intermediate result"}],
+        "encrypted_content": "enc_reasoning_blob_789",
+    }
+    raw_response = {
+        "id": "resp_reasoning_001",
+        "output": [
+            reasoning_item,
+            {
+                "type": "message",
+                "id": "msg_002",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Final answer"}],
+            },
+        ],
+    }
+
+    res = parser.parse(raw_response)
+    assert res.text == "Final answer"
+    # Both summary and content must be preserved without dropping either
+    assert res.thinking is not None
+    assert "Step 1: Analyzed input" in res.thinking
+    assert "Step 2: Computed intermediate result" in res.thinking
+    # Preserves reasoning item in thought_blocks for stateless multi-turn replay
+    assert len(res.thought_blocks) == 1
+    assert res.thought_blocks[0] == reasoning_item
+
+
+def test_openai_parser_top_level_reasoning_summary() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    raw_response = {
+        "id": "resp_top_reasoning",
+        "output_text": "Answer",
+        "reasoning": {
+            "effort": "high",
+            "summary": [{"type": "summary_text", "text": "Deliberating carefully..."}],
+        },
+    }
+
+    res = parser.parse(raw_response)
+    assert res.text == "Answer"
+    assert res.thinking == "Deliberating carefully..."
+
+
+def test_openai_parser_refusal_extraction() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    raw_response = {
+        "id": "resp_refusal_001",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "refusal", "refusal": "I cannot perform this unsafe action."},
+                ],
+            }
+        ],
+    }
+
+    res = parser.parse(raw_response)
+    assert res.text == "I cannot perform this unsafe action."
+
+
+def test_openai_parser_usage_with_cache_write_tokens() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    raw_response = {
+        "id": "resp_usage_001",
+        "output_text": "Usage reply",
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "total_tokens": 150,
+            "input_tokens_details": {
+                "cached_tokens": 30,
+                "cache_write_tokens": 70,
+            },
+            "output_tokens_details": {
+                "reasoning_tokens": 20,
+            },
+        },
+    }
+
+    res = parser.parse(raw_response)
+    assert res.usage is not None
+    assert res.usage.prompt_tokens == 100
+    assert res.usage.completion_tokens == 50
+    assert res.usage.total_tokens == 150
+    assert res.usage.cached_tokens == 30
+    assert res.usage.cache_creation_tokens == 70
+    assert res.usage.reasoning_tokens == 20
+
+
+def test_openai_parser_compaction_extraction() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    raw_response = {
+        "id": "resp_compact_001",
+        "output": [
+            {
+                "type": "compaction",
+                "encrypted_content": "enc_compact_token_xyz",
+            },
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Post compaction text"}],
+            },
+        ],
+    }
+
+    res = parser.parse(raw_response)
+    assert res.text == "Post compaction text"
+    assert res.compaction == "enc_compact_token_xyz"
+
+
 
 
 

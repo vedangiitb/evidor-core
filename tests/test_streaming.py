@@ -612,3 +612,161 @@ async def test_agent_streaming_with_tool_execution() -> None:
     assert roles == ["user", "assistant", "tool", "assistant"]
     assert agent.messages[2].content == "Weather in Tokyo: Sunny 72F"
     assert agent.messages[3].content == "It is Sunny 72F in Tokyo."
+
+
+# ==============================================================================
+# OpenAI Streaming Handler Tests (3.x fixes)
+# ==============================================================================
+
+
+def test_openai_streaming_tool_call_item_id_mapping() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+    from evidor.agent.providers.openai.stream import OpenAIStreamHandler
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    handler = OpenAIStreamHandler(parser)
+
+    # 1. Output item added with item.id ("fc_001") and item.call_id ("call_abc")
+    item_added = {
+        "type": "response.output_item.added",
+        "item": {
+            "id": "fc_001",
+            "call_id": "call_abc",
+            "type": "function_call",
+            "name": "lookup_weather",
+        },
+    }
+    chunks1 = list(handler.process_event(item_added))
+    assert chunks1 == []
+    assert handler.item_id_map.get("fc_001") == "call_abc"
+
+    # 2. Argument deltas carry item_id ("fc_001") WITHOUT call_id
+    delta1 = {
+        "type": "response.function_call_arguments.delta",
+        "item_id": "fc_001",
+        "delta": '{"location":',
+    }
+    delta2 = {
+        "type": "response.function_call_arguments.delta",
+        "item_id": "fc_001",
+        "delta": ' "Tokyo"}',
+    }
+    chunks2 = list(handler.process_event(delta1))
+    chunks3 = list(handler.process_event(delta2))
+    assert chunks2 == []
+    assert chunks3 == []
+
+    # 3. Arguments done event carries item_id ("fc_001")
+    args_done = {
+        "type": "response.function_call_arguments.done",
+        "item_id": "fc_001",
+    }
+    chunks4 = list(handler.process_event(args_done))
+    assert len(chunks4) == 1
+    assert len(chunks4[0].tool_calls) == 1
+    tc = chunks4[0].tool_calls[0]
+    assert tc.id == "call_abc"
+    assert tc.name == "lookup_weather"
+    assert tc.arguments == {"location": "Tokyo"}
+
+    # 4. output_item.done should NOT re-emit the already completed call
+    item_done = {
+        "type": "response.output_item.done",
+        "item": {
+            "id": "fc_001",
+            "call_id": "call_abc",
+            "type": "function_call",
+            "name": "lookup_weather",
+        },
+    }
+    chunks5 = list(handler.process_event(item_done))
+    assert chunks5 == []
+
+    # 5. finalize() must NOT double-yield already completed calls
+    final_chunks = list(handler.finalize())
+    assert final_chunks == []
+
+
+def test_openai_streaming_finalize_in_flight_calls() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+    from evidor.agent.providers.openai.stream import OpenAIStreamHandler
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    handler = OpenAIStreamHandler(parser)
+
+    # Start a call that does not receive a completion event before stream ends
+    item_added = {
+        "type": "response.output_item.added",
+        "item": {
+            "id": "fc_in_flight",
+            "call_id": "call_in_flight",
+            "type": "function_call",
+            "name": "search_db",
+        },
+    }
+    list(handler.process_event(item_added))
+
+    delta = {
+        "type": "response.function_call_arguments.delta",
+        "item_id": "fc_in_flight",
+        "delta": '{"query": "antigravity"}',
+    }
+    list(handler.process_event(delta))
+
+    # finalize completes in-flight calls
+    final_chunks = list(handler.finalize())
+    assert len(final_chunks) == 1
+    assert len(final_chunks[0].tool_calls) == 1
+    tc = final_chunks[0].tool_calls[0]
+    assert tc.id == "call_in_flight"
+    assert tc.name == "search_db"
+    assert tc.arguments == {"query": "antigravity"}
+
+    # Subsequent finalize yields nothing
+    assert list(handler.finalize()) == []
+
+
+def test_openai_streaming_refusal_delta() -> None:
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+    from evidor.agent.providers.openai.stream import OpenAIStreamHandler
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    handler = OpenAIStreamHandler(parser)
+
+    refusal_event = {
+        "type": "response.refusal.delta",
+        "delta": "I cannot perform that request.",
+    }
+    chunks = list(handler.process_event(refusal_event))
+    assert len(chunks) == 1
+    assert chunks[0].text == "I cannot perform that request."
+
+
+def test_openai_streaming_error_events_raise() -> None:
+    import pytest
+    from evidor.agent.providers.openai.parser import OpenAIResponseParser
+    from evidor.agent.providers.openai.stream import OpenAIStreamHandler
+
+    parser = OpenAIResponseParser(model="gpt-6-astra")
+    handler = OpenAIStreamHandler(parser)
+
+    err_event = {
+        "type": "response.error",
+        "code": "rate_limit_exceeded",
+        "message": "Quota exceeded",
+    }
+    with pytest.raises(RuntimeError, match="OpenAI stream error \\(rate_limit_exceeded\\): Quota exceeded"):
+        list(handler.process_event(err_event))
+
+    fail_event = {
+        "type": "response.failed",
+        "response": {
+            "error": {
+                "code": "server_error",
+                "message": "Internal error occurred",
+            }
+        },
+    }
+    with pytest.raises(RuntimeError, match="OpenAI response failed \\(server_error\\): Internal error occurred"):
+        list(handler.process_event(fail_event))
+
