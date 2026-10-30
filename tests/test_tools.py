@@ -257,3 +257,27 @@ def test_async_tool_preserves_contextvars() -> None:
     asyncio.run(_run())
     # When executed synchronously outside any active loop, it runs in a new loop and preserves contextvars
     assert get_token.execute() == "custom_token_123"
+
+
+def test_tool_nullable_and_array_items() -> None:
+    @tool
+    def search_records(
+        scores: list[int],
+        filter_name: Optional[str] = None,
+        tags: list = [],  # type: ignore[assignment]
+    ) -> str:
+        """Search records."""
+        return "ok"
+
+    props = search_records.parameters["properties"]
+    # Generic list[int] has items: integer
+    assert props["scores"]["type"] == "array"
+    assert props["scores"]["items"] == {"type": "integer"}
+
+    # Optional[str] has nullable: True
+    assert props["filter_name"]["type"] == "string"
+    assert props["filter_name"]["nullable"] is True
+
+    # Bare list defaults items to string
+    assert props["tags"]["type"] == "array"
+    assert props["tags"]["items"] == {"type": "string"}

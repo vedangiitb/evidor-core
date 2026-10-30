@@ -1473,6 +1473,61 @@ def test_gemini_payload_builder_types_optional() -> None:
     assert payload["tools"][0]["name"] == "test_tool"
 
 
+def test_gemini_schema_sanitizer_enhancements() -> None:
+    from evidor.agent.providers.gemini.builder import sanitize_gemini_schema
+
+    # 1. Bare array missing items gets default string items
+    schema_array = {
+        "type": "object",
+        "properties": {
+            "tags": {"type": "array"},
+        },
+    }
+    sanitized_array = sanitize_gemini_schema(schema_array)
+    assert sanitized_array["properties"]["tags"]["items"] == {"type": "string"}
+
+    # 2. Empty required list is omitted
+    schema_empty_req = {
+        "type": "object",
+        "properties": {"opt": {"type": "string"}},
+        "required": [],
+    }
+    sanitized_empty_req = sanitize_gemini_schema(schema_empty_req)
+    assert "required" not in sanitized_empty_req
+
+    # 3. Non-empty required list is preserved
+    schema_with_req = {
+        "type": "object",
+        "properties": {"req_field": {"type": "string"}},
+        "required": ["req_field"],
+    }
+    sanitized_with_req = sanitize_gemini_schema(schema_with_req)
+    assert sanitized_with_req["required"] == ["req_field"]
+
+    # 4. Normalization of snake_case to camelCase
+    schema_snake = {
+        "type": "object",
+        "properties": {
+            "val": {
+                "max_length": 50,
+                "min_length": 5,
+                "any_of": [{"type": "string"}, {"type": "number"}],
+            }
+        },
+        "property_ordering": ["val"],
+    }
+    sanitized_snake = sanitize_gemini_schema(schema_snake)
+    val_prop = sanitized_snake["properties"]["val"]
+    assert "maxLength" in val_prop
+    assert "max_length" not in val_prop
+    assert "minLength" in val_prop
+    assert "min_length" not in val_prop
+    assert "anyOf" in val_prop
+    assert "any_of" not in val_prop
+    assert "propertyOrdering" in sanitized_snake
+    assert "property_ordering" not in sanitized_snake
+
+
 def test_gemini_parser_no_thought_leakage() -> None:
     from evidor.agent.providers.gemini.parser import GeminiResponseParser
 

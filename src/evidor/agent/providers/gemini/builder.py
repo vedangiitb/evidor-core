@@ -6,6 +6,17 @@ from typing import Any
 from evidor.models import GenerationRequest, Message
 from ..base import extract_system_prompt, sort_tools
 
+_SNAKE_TO_CAMEL: dict[str, str] = {
+    "any_of": "anyOf",
+    "max_length": "maxLength",
+    "min_length": "minLength",
+    "max_items": "maxItems",
+    "min_items": "minItems",
+    "max_properties": "maxProperties",
+    "min_properties": "minProperties",
+    "property_ordering": "propertyOrdering",
+}
+
 _ALLOWED_GEMINI_SCHEMA_KEYS = {
     "type",
     "format",
@@ -17,26 +28,26 @@ _ALLOWED_GEMINI_SCHEMA_KEYS = {
     "properties",
     "required",
     "items",
-    "any_of",
     "anyOf",
+    "any_of",
     "maximum",
     "minimum",
-    "max_length",
     "maxLength",
-    "min_length",
+    "max_length",
     "minLength",
+    "min_length",
     "pattern",
-    "max_items",
     "maxItems",
-    "min_items",
+    "max_items",
     "minItems",
-    "max_properties",
+    "min_items",
     "maxProperties",
-    "min_properties",
+    "max_properties",
     "minProperties",
+    "min_properties",
     "example",
-    "property_ordering",
     "propertyOrdering",
+    "property_ordering",
 }
 
 
@@ -44,7 +55,7 @@ def sanitize_gemini_schema(schema: Any, types_mod: Any = None) -> Any:
     """Sanitize a JSON schema dictionary for Google GenAI types.Schema."""
     if not isinstance(schema, dict):
         if isinstance(schema, list):
-            return [sanitize_gemini_schema(item, types_mod) for item in schema]
+            return [sanitize_gemini_schema(item) for item in schema]
         return schema
 
     cleaned: dict[str, Any] = {}
@@ -75,32 +86,42 @@ def sanitize_gemini_schema(schema: Any, types_mod: Any = None) -> Any:
     for k, v in schema.items():
         if k == "type":
             continue
-        if k in ("oneOf", "one_of") and "anyOf" not in cleaned and "any_of" not in cleaned:
+        if k in ("oneOf", "one_of") and "anyOf" not in cleaned:
             cleaned["anyOf"] = (
-                [sanitize_gemini_schema(it, types_mod) for it in v]
+                [sanitize_gemini_schema(it) for it in v]
                 if isinstance(v, list)
-                else sanitize_gemini_schema(v, types_mod)
+                else sanitize_gemini_schema(v)
             )
             continue
         if k == "examples" and "example" not in schema and isinstance(v, list) and v:
             cleaned["example"] = v[0]
             continue
 
+        target_k = _SNAKE_TO_CAMEL.get(k, k)
+
         if k == "properties" and isinstance(v, dict):
             cleaned["properties"] = {
-                prop_name: sanitize_gemini_schema(prop_s, types_mod)
+                prop_name: sanitize_gemini_schema(prop_s)
                 for prop_name, prop_s in v.items()
             }
         elif k == "items":
             if isinstance(v, list):
                 if len(v) == 1:
-                    cleaned["items"] = sanitize_gemini_schema(v[0], types_mod)
+                    cleaned["items"] = sanitize_gemini_schema(v[0])
                 elif len(v) > 1:
-                    cleaned["items"] = {"anyOf": [sanitize_gemini_schema(it, types_mod) for it in v]}
+                    cleaned["items"] = {"anyOf": [sanitize_gemini_schema(it) for it in v]}
             else:
-                cleaned["items"] = sanitize_gemini_schema(v, types_mod)
+                cleaned["items"] = sanitize_gemini_schema(v)
         elif k in _ALLOWED_GEMINI_SCHEMA_KEYS:
-            cleaned[k] = sanitize_gemini_schema(v, types_mod)
+            cleaned[target_k] = sanitize_gemini_schema(v)
+
+    # Ensure ARRAY types have an items schema (required by Gemini API)
+    if cleaned.get("type") in ("array", "ARRAY") and "items" not in cleaned:
+        cleaned["items"] = {"type": "string"}
+
+    # Omit empty required lists (Gemini schema validation rejects empty required arrays)
+    if "required" in cleaned and not cleaned["required"]:
+        del cleaned["required"]
 
     return cleaned
 
@@ -142,7 +163,7 @@ class GeminiPayloadBuilder:
                     "type": "function",
                     "name": t.name,
                     "description": t.description,
-                    "parameters": sanitize_gemini_schema(t.parameters, types) if t.parameters else None,
+                    "parameters": sanitize_gemini_schema(t.parameters) if t.parameters else None,
                 }
                 for t in sorted_tools
             ]

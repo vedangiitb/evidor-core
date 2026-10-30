@@ -70,6 +70,19 @@ def python_type_to_json_type(annotation: Any) -> str:
     return TYPE_MAPPING.get(annotation, "string")
 
 
+def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:
+    """Unwrap Optional / Union[..., None] and return (inner_type, is_nullable)."""
+    origin = get_origin(annotation)
+    if origin in (Union, types.UnionType):
+        args = get_args(annotation)
+        is_nullable = type(None) in args
+        non_none_args = [arg for arg in args if arg is not type(None)]
+        if len(non_none_args) == 1:
+            return non_none_args[0], is_nullable
+        return annotation, is_nullable
+    return annotation, False
+
+
 def generate_parameters_schema(func: Callable[..., Any], param_docs: dict[str, str]) -> dict[str, Any]:
     """Generate a JSON Schema object describing the function parameters."""
     sig = inspect.signature(func)
@@ -86,7 +99,22 @@ def generate_parameters_schema(func: Callable[..., Any], param_docs: dict[str, s
             inspect.Parameter.VAR_KEYWORD,
         ):
             continue
-        prop_schema: dict[str, Any] = {"type": python_type_to_json_type(type_hints.get(name, param.annotation))}
+        annotation = type_hints.get(name, param.annotation)
+        unwrapped, is_nullable = _unwrap_optional(annotation)
+        json_type = python_type_to_json_type(unwrapped)
+        prop_schema: dict[str, Any] = {"type": json_type}
+        if is_nullable:
+            prop_schema["nullable"] = True
+
+        if json_type == "array":
+            item_type = "string"
+            item_origin = get_origin(unwrapped)
+            if item_origin is not None:
+                args = get_args(unwrapped)
+                if args and args[0] is not Ellipsis:
+                    item_type = python_type_to_json_type(args[0])
+            prop_schema["items"] = {"type": item_type}
+
         if name in param_docs:
             prop_schema["description"] = param_docs[name]
         properties[name] = prop_schema
