@@ -51,81 +51,6 @@ _ALLOWED_GEMINI_SCHEMA_KEYS = {
 }
 
 
-def sanitize_gemini_schema(schema: Any, types_mod: Any = None) -> Any:
-    """Sanitize a JSON schema dictionary for Google GenAI types.Schema."""
-    if not isinstance(schema, dict):
-        if isinstance(schema, list):
-            return [sanitize_gemini_schema(item) for item in schema]
-        return schema
-
-    cleaned: dict[str, Any] = {}
-
-    # Handle 'type' if given as a list (union types, e.g. ['string', 'number', 'boolean'])
-    raw_type = schema.get("type")
-    if isinstance(raw_type, list):
-        types_list = [t for t in raw_type if t != "null"]
-        has_null = "null" in raw_type
-        if len(types_list) == 1:
-            cleaned["type"] = types_list[0]
-            if has_null:
-                cleaned["nullable"] = True
-        elif len(types_list) > 1:
-            subschemas = [{"type": t} for t in types_list]
-            if has_null:
-                cleaned["nullable"] = True
-            cleaned["anyOf"] = subschemas
-        elif has_null:
-            cleaned["type"] = "NULL"
-    elif raw_type is not None:
-        cleaned["type"] = raw_type
-
-    # Handle const -> enum
-    if "const" in schema and "enum" not in schema:
-        cleaned["enum"] = [schema["const"]]
-
-    for k, v in schema.items():
-        if k == "type":
-            continue
-        if k in ("oneOf", "one_of") and "anyOf" not in cleaned:
-            cleaned["anyOf"] = (
-                [sanitize_gemini_schema(it) for it in v]
-                if isinstance(v, list)
-                else sanitize_gemini_schema(v)
-            )
-            continue
-        if k == "examples" and "example" not in schema and isinstance(v, list) and v:
-            cleaned["example"] = v[0]
-            continue
-
-        target_k = _SNAKE_TO_CAMEL.get(k, k)
-
-        if k == "properties" and isinstance(v, dict):
-            cleaned["properties"] = {
-                prop_name: sanitize_gemini_schema(prop_s)
-                for prop_name, prop_s in v.items()
-            }
-        elif k == "items":
-            if isinstance(v, list):
-                if len(v) == 1:
-                    cleaned["items"] = sanitize_gemini_schema(v[0])
-                elif len(v) > 1:
-                    cleaned["items"] = {"anyOf": [sanitize_gemini_schema(it) for it in v]}
-            else:
-                cleaned["items"] = sanitize_gemini_schema(v)
-        elif k in _ALLOWED_GEMINI_SCHEMA_KEYS:
-            cleaned[target_k] = sanitize_gemini_schema(v)
-
-    # Ensure ARRAY types have an items schema (required by Gemini API)
-    if cleaned.get("type") in ("array", "ARRAY") and "items" not in cleaned:
-        cleaned["items"] = {"type": "string"}
-
-    # Omit empty required lists (Gemini schema validation rejects empty required arrays)
-    if "required" in cleaned and not cleaned["required"]:
-        del cleaned["required"]
-
-    return cleaned
-
-
 class GeminiPayloadBuilder:
     """Builds and formats API request payloads for Google Gemini Interactions API."""
 
@@ -138,6 +63,80 @@ class GeminiPayloadBuilder:
         self.model = model
         self.cached_content = cached_content
         self.thinking = thinking
+
+    def _sanitize_schema(self, schema: Any) -> Any:
+        """Sanitize a JSON schema dictionary for Google GenAI types.Schema."""
+        if not isinstance(schema, dict):
+            if isinstance(schema, list):
+                return [self._sanitize_schema(item) for item in schema]
+            return schema
+
+        cleaned: dict[str, Any] = {}
+
+        # Handle 'type' if given as a list (union types, e.g. ['string', 'number', 'boolean'])
+        raw_type = schema.get("type")
+        if isinstance(raw_type, list):
+            types_list = [t for t in raw_type if t != "null"]
+            has_null = "null" in raw_type
+            if len(types_list) == 1:
+                cleaned["type"] = types_list[0]
+                if has_null:
+                    cleaned["nullable"] = True
+            elif len(types_list) > 1:
+                subschemas = [{"type": t} for t in types_list]
+                if has_null:
+                    cleaned["nullable"] = True
+                cleaned["anyOf"] = subschemas
+            elif has_null:
+                cleaned["type"] = "NULL"
+        elif raw_type is not None:
+            cleaned["type"] = raw_type
+
+        # Handle const -> enum
+        if "const" in schema and "enum" not in schema:
+            cleaned["enum"] = [schema["const"]]
+
+        for k, v in schema.items():
+            if k == "type":
+                continue
+            if k in ("oneOf", "one_of") and "anyOf" not in cleaned:
+                cleaned["anyOf"] = (
+                    [self._sanitize_schema(it) for it in v]
+                    if isinstance(v, list)
+                    else self._sanitize_schema(v)
+                )
+                continue
+            if k == "examples" and "example" not in schema and isinstance(v, list) and v:
+                cleaned["example"] = v[0]
+                continue
+
+            target_k = _SNAKE_TO_CAMEL.get(k, k)
+
+            if k == "properties" and isinstance(v, dict):
+                cleaned["properties"] = {
+                    prop_name: self._sanitize_schema(prop_s)
+                    for prop_name, prop_s in v.items()
+                }
+            elif k == "items":
+                if isinstance(v, list):
+                    if len(v) == 1:
+                        cleaned["items"] = self._sanitize_schema(v[0])
+                    elif len(v) > 1:
+                        cleaned["items"] = {"anyOf": [self._sanitize_schema(it) for it in v]}
+                else:
+                    cleaned["items"] = self._sanitize_schema(v)
+            elif k in _ALLOWED_GEMINI_SCHEMA_KEYS:
+                cleaned[target_k] = self._sanitize_schema(v)
+
+        # Ensure ARRAY types have an items schema (required by Gemini API)
+        if cleaned.get("type") in ("array", "ARRAY") and "items" not in cleaned:
+            cleaned["items"] = {"type": "string"}
+
+        # Omit empty required lists (Gemini schema validation rejects empty required arrays)
+        if "required" in cleaned and not cleaned["required"]:
+            del cleaned["required"]
+
+        return cleaned
 
     def build(self, request: GenerationRequest, types: Any = None) -> dict[str, Any]:
         """Construct the full request dictionary for Gemini Interactions API."""
@@ -163,7 +162,7 @@ class GeminiPayloadBuilder:
                     "type": "function",
                     "name": t.name,
                     "description": t.description,
-                    "parameters": sanitize_gemini_schema(t.parameters) if t.parameters else None,
+                    "parameters": self._sanitize_schema(t.parameters) if t.parameters else None,
                 }
                 for t in sorted_tools
             ]
@@ -261,4 +260,5 @@ class GeminiPayloadBuilder:
                     "content": [{"type": "text", "text": message.content}],
                 })
         return input_steps
+
 

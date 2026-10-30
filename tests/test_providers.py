@@ -1449,24 +1449,25 @@ def test_gemini_payload_builder_thinking_config() -> None:
 
 
 def test_gemini_payload_builder_types_optional() -> None:
-    from evidor.agent.providers.gemini.builder import GeminiPayloadBuilder, sanitize_gemini_schema
+    from evidor.agent.providers.gemini.builder import GeminiPayloadBuilder
     from evidor.models import GenerationRequest
     from evidor.tools import Tool
 
-    # sanitize_gemini_schema works without types_mod
+    builder = GeminiPayloadBuilder(model="gemini-3.8-flash")
+
+    # _sanitize_schema works as an internal instance method
     schema = {
         "type": "object",
         "properties": {"name": {"type": "string"}},
         "required": ["name"],
     }
-    sanitized = sanitize_gemini_schema(schema)
+    sanitized = builder._sanitize_schema(schema)
     assert sanitized["type"] == "object"
     assert "name" in sanitized["properties"]
 
     # builder.build works without types argument
     tool = Tool(name="test_tool", description="A test tool", parameters=schema, func=lambda: None)
     req = GenerationRequest(prompt="Use tool", tools=[tool])
-    builder = GeminiPayloadBuilder(model="gemini-3.8-flash")
     payload = builder.build(req)
     assert "cached_content" not in payload
     assert len(payload["tools"]) == 1
@@ -1474,7 +1475,9 @@ def test_gemini_payload_builder_types_optional() -> None:
 
 
 def test_gemini_schema_sanitizer_enhancements() -> None:
-    from evidor.agent.providers.gemini.builder import sanitize_gemini_schema
+    from evidor.agent.providers.gemini.builder import GeminiPayloadBuilder
+
+    builder = GeminiPayloadBuilder(model="gemini-3.8-flash")
 
     # 1. Bare array missing items gets default string items
     schema_array = {
@@ -1483,7 +1486,7 @@ def test_gemini_schema_sanitizer_enhancements() -> None:
             "tags": {"type": "array"},
         },
     }
-    sanitized_array = sanitize_gemini_schema(schema_array)
+    sanitized_array = builder._sanitize_schema(schema_array)
     assert sanitized_array["properties"]["tags"]["items"] == {"type": "string"}
 
     # 2. Empty required list is omitted
@@ -1492,7 +1495,7 @@ def test_gemini_schema_sanitizer_enhancements() -> None:
         "properties": {"opt": {"type": "string"}},
         "required": [],
     }
-    sanitized_empty_req = sanitize_gemini_schema(schema_empty_req)
+    sanitized_empty_req = builder._sanitize_schema(schema_empty_req)
     assert "required" not in sanitized_empty_req
 
     # 3. Non-empty required list is preserved
@@ -1501,7 +1504,7 @@ def test_gemini_schema_sanitizer_enhancements() -> None:
         "properties": {"req_field": {"type": "string"}},
         "required": ["req_field"],
     }
-    sanitized_with_req = sanitize_gemini_schema(schema_with_req)
+    sanitized_with_req = builder._sanitize_schema(schema_with_req)
     assert sanitized_with_req["required"] == ["req_field"]
 
     # 4. Normalization of snake_case to camelCase
@@ -1516,7 +1519,7 @@ def test_gemini_schema_sanitizer_enhancements() -> None:
         },
         "property_ordering": ["val"],
     }
-    sanitized_snake = sanitize_gemini_schema(schema_snake)
+    sanitized_snake = builder._sanitize_schema(schema_snake)
     val_prop = sanitized_snake["properties"]["val"]
     assert "maxLength" in val_prop
     assert "max_length" not in val_prop
