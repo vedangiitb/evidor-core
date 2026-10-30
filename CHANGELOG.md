@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.10.6-dev.1 (2026-10-30)
+
+### Bug Fixes
+
+- **gemini**: Fixing tool schema sanitization issues
+  ([`4fb1034`](https://github.com/vedangiitb/evidor-core/commit/4fb103470787d203cc7542c68283f28a724c5041))
+
+- **gemini**: Fixing tool schema sanitization issues
+  ([`186bdd3`](https://github.com/vedangiitb/evidor-core/commit/186bdd394b08f003953dc362bd020a99004346f9))
+
+
 ## v1.10.5 (2026-10-29)
 
 
