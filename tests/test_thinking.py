@@ -104,34 +104,30 @@ def test_gemini_thinking_config() -> None:
     cfg = GeminiThinkingConfig(thinking_level="high", thinking_summaries="auto")
     assert cfg.thinking_level == "high"
     assert cfg.thinking_summaries == "auto"
+    assert not hasattr(cfg, "enabled")
     cfg.validate()
 
     # Dynamic / None
     cfg_dyn = GeminiThinkingConfig(thinking_level=None)
     cfg_dyn.validate()
 
-    # Disabled
-    cfg_off = GeminiThinkingConfig(enabled=False)
-    cfg_off.validate()
-
-    # Coercion from int -> raises TypeError because Interactions API does not support numeric budgets
-    with pytest.raises(TypeError, match="Numeric budgets are not supported"):
-        GeminiThinkingConfig.from_value(1024)
-
-    # Coercion from bool False -> minimal + none
-    c_false = GeminiThinkingConfig.from_value(False)
-    assert c_false.enabled is False
-    assert c_false.thinking_level == "minimal"
-    assert c_false.thinking_summaries == "none"
-
-    # Coercion from bool True
-    c_true = GeminiThinkingConfig.from_value(True)
-    assert c_true.enabled is True
+    # Coercion from int -> thinking_budget supported
+    c_int = GeminiThinkingConfig.from_value(1024)
+    assert c_int.thinking_budget == 1024
+    assert not hasattr(c_int, "enabled")
 
     # Coercion from str -> thinking_level (Gemini 3.x)
     c_str = GeminiThinkingConfig.from_value("high")
-    assert c_str.enabled is True
     assert c_str.thinking_level == "high"
+    assert not hasattr(c_str, "enabled")
+
+    # Enabled is not a parameter on GeminiThinkingConfig
+    with pytest.raises(TypeError):
+        GeminiThinkingConfig(enabled=True)  # type: ignore[call-arg]
+
+    # Bool coercion is not supported on GeminiThinkingConfig
+    with pytest.raises(TypeError, match="Cannot coerce bool to GeminiThinkingConfig"):
+        GeminiThinkingConfig.from_value(False)
 
 
 # ==============================================================================
@@ -335,13 +331,20 @@ def test_gemini_provider_thinking_extraction_and_config(monkeypatch: pytest.Monk
     assert call_config["thinking_level"] == "medium"
     assert call_config["thinking_summaries"] == "auto"
 
-    # Test Gemini 3.x thinking_level parameter
+    # Test Gemini 3.x thinking_level parameter (Mode 1: thinking="high")
     p_gemini_3 = GeminiProvider(model="gemini-3.8-flash", thinking="high")
-    assert p_gemini_3.thinking.thinking_level == "high"
+    assert p_gemini_3.thinking == "high"
     res_3 = p_gemini_3.generate(GenerationRequest(prompt="Explain logic"))
     call_config_3 = mock_client.interactions.create.call_args.kwargs["generation_config"]
     assert call_config_3["thinking_level"] == "high"
-    assert call_config_3["thinking_summaries"] == "auto"
+    assert "thinking_summaries" not in call_config_3
+
+    # Test Mode 2 with thinking_budget (earlier models)
+    p_gemini_budget = GeminiProvider(model="gemini-2.5-flash", thinking=GeminiThinkingConfig(thinking_budget=2048))
+    assert p_gemini_budget.thinking.thinking_budget == 2048
+    p_gemini_budget.generate(GenerationRequest(prompt="Explain logic"))
+    call_config_budget = mock_client.interactions.create.call_args.kwargs["generation_config"]
+    assert call_config_budget["thinking_budget"] == 2048
 
 
 def test_gemini_provider_disable_thinking(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -358,8 +361,9 @@ def test_gemini_provider_disable_thinking(monkeypatch: pytest.MonkeyPatch) -> No
     provider = GeminiProvider(model="gemini-3.8-flash", thinking=False)
     provider.generate(GenerationRequest(prompt="Fast query"))
 
-    call_config = mock_client.interactions.create.call_args.kwargs["generation_config"]
-    assert call_config["thinking_level"] == "minimal"
+    # When thinking=False, it is not handled, so no generation_config is passed
+    call_kwargs = mock_client.interactions.create.call_args.kwargs
+    assert "generation_config" not in call_kwargs
 
 
 # ==============================================================================

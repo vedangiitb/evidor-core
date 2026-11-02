@@ -67,11 +67,12 @@ class AnthropicThinkingConfig(ThinkingConfig):
 
 
 @dataclass(frozen=True, slots=True)
-class GeminiThinkingConfig(ThinkingConfig):
+class GeminiThinkingConfig:
     """Configuration for Google Gemini thinking models in the Interactions API."""
 
     thinking_level: str | None = None  # Supported in Gemini 3.x Interactions API: 'minimal', 'low', 'medium', 'high'
-    thinking_summaries: str | None = "auto"  # Supported in Gemini Interactions API: 'auto', 'none'
+    thinking_summaries: str | None = None  # Supported in Gemini Interactions API: 'auto', 'none'
+    thinking_budget: int | None = None  # Supported in earlier Gemini models (e.g. Gemini 2.5)
 
     def validate(self) -> None:
         pass
@@ -81,15 +82,19 @@ class GeminiThinkingConfig(ThinkingConfig):
         if isinstance(value, GeminiThinkingConfig):
             return value
         if isinstance(value, bool):
-            if value:
-                return cls(enabled=True, thinking_summaries="auto")
-            return cls(enabled=False, thinking_level="minimal", thinking_summaries="none")
+            raise TypeError(
+                "Cannot coerce bool to GeminiThinkingConfig. "
+                "Gemini Interactions API supports thinking_level (e.g. 'minimal', 'low', 'medium', 'high'), "
+                "thinking_summaries ('auto', 'none'), or thinking_budget (int)."
+            )
+        if isinstance(value, int):
+            return cls(thinking_budget=value)
         if isinstance(value, str):
-            return cls(enabled=True, thinking_level=value, thinking_summaries="auto")
+            return cls(thinking_level=value)
         raise TypeError(
             f"Cannot coerce {type(value).__name__} to GeminiThinkingConfig. "
-            "Gemini Interactions API supports thinking_level (e.g. 'minimal', 'low', 'medium', 'high') "
-            "and thinking_summaries ('auto', 'none'). Numeric budgets are not supported."
+            "Gemini Interactions API supports thinking_level (e.g. 'minimal', 'low', 'medium', 'high'), "
+            "thinking_summaries ('auto', 'none'), or thinking_budget (int)."
         )
 
 

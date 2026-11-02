@@ -138,7 +138,12 @@ class GeminiPayloadBuilder:
 
         return cleaned
 
-    def build(self, request: GenerationRequest, types: Any = None) -> dict[str, Any]:
+    def build(
+        self,
+        request: GenerationRequest,
+        types: Any = None,
+        thinking: Any = None,
+    ) -> dict[str, Any]:
         """Construct the full request dictionary for Gemini Interactions API."""
         system_prompt = extract_system_prompt(request)
         input_steps = self.format_input_steps(request.messages)
@@ -167,19 +172,34 @@ class GeminiPayloadBuilder:
                 for t in sorted_tools
             ]
 
-        if self.thinking is not None:
+        active_thinking = thinking if thinking is not None else self.thinking
+        if active_thinking and isinstance(active_thinking, str):
+            payload["generation_config"] = {"thinking_level": active_thinking}
+        elif active_thinking and not isinstance(active_thinking, bool):
             gen_config: dict[str, Any] = {}
-            if not getattr(self.thinking, "enabled", True):
-                gen_config["thinking_level"] = "minimal"
-                gen_config["thinking_summaries"] = "none"
-            else:
-                thinking_level = getattr(self.thinking, "thinking_level", None)
-                if thinking_level:
-                    gen_config["thinking_level"] = thinking_level
+            thinking_level = (
+                active_thinking.get("thinking_level")
+                if isinstance(active_thinking, dict)
+                else getattr(active_thinking, "thinking_level", None)
+            )
+            if isinstance(thinking_level, str):
+                gen_config["thinking_level"] = thinking_level
 
-                thinking_summaries = getattr(self.thinking, "thinking_summaries", None)
-                if thinking_summaries:
-                    gen_config["thinking_summaries"] = thinking_summaries
+            thinking_summaries = (
+                active_thinking.get("thinking_summaries")
+                if isinstance(active_thinking, dict)
+                else getattr(active_thinking, "thinking_summaries", None)
+            )
+            if isinstance(thinking_summaries, str):
+                gen_config["thinking_summaries"] = thinking_summaries
+
+            thinking_budget = (
+                active_thinking.get("thinking_budget")
+                if isinstance(active_thinking, dict)
+                else getattr(active_thinking, "thinking_budget", None)
+            )
+            if thinking_budget is not None and not isinstance(thinking_budget, bool):
+                gen_config["thinking_budget"] = thinking_budget
 
             if gen_config:
                 payload["generation_config"] = gen_config

@@ -1414,7 +1414,17 @@ def test_gemini_payload_builder_thinking_config() -> None:
 
     req = GenerationRequest(prompt="hello")
 
-    # 1. Arbitrary / future thinking_level (no model check, no whitelist)
+    # Mode 1: thinking="..." (user configures thinking as a string)
+    b_str = GeminiPayloadBuilder(
+        model="gemini-3.8-flash",
+        thinking="high",
+    )
+    p_str = b_str.build(req)
+    assert p_str["generation_config"] == {
+        "thinking_level": "high",
+    }
+
+    # Mode 2: Arbitrary / future thinking_level with thinking_summaries
     b_custom = GeminiPayloadBuilder(
         model="gemini-3.8-flash",
         thinking=GeminiThinkingConfig(thinking_level="experimental_deep", thinking_summaries="auto"),
@@ -1425,7 +1435,7 @@ def test_gemini_payload_builder_thinking_config() -> None:
         "thinking_summaries": "auto",
     }
 
-    # 2. thinking_summaries="none"
+    # Mode 2: thinking_summaries="none"
     b_no_thoughts = GeminiPayloadBuilder(
         model="gemini-3.8-flash",
         thinking=GeminiThinkingConfig(thinking_level="high", thinking_summaries="none"),
@@ -1436,16 +1446,30 @@ def test_gemini_payload_builder_thinking_config() -> None:
         "thinking_summaries": "none",
     }
 
-    # 3. enabled=False disabled thinking -> minimal + none
-    b_off = GeminiPayloadBuilder(
+    # Mode 2: thinking_budget supported without error on client side
+    b_budget = GeminiPayloadBuilder(
         model="gemini-3.8-flash",
-        thinking=GeminiThinkingConfig(enabled=False),
+        thinking=GeminiThinkingConfig(thinking_budget=2048),
     )
-    p_off = b_off.build(req)
-    assert p_off["generation_config"] == {
-        "thinking_level": "minimal",
-        "thinking_summaries": "none",
+    p_budget = b_budget.build(req)
+    assert p_budget["generation_config"] == {
+        "thinking_budget": 2048,
     }
+
+    # Don't handle for thinking=False
+    b_false = GeminiPayloadBuilder(
+        model="gemini-3.8-flash",
+        thinking=False,
+    )
+    p_false = b_false.build(req)
+    assert "generation_config" not in p_false
+
+    # build() handles thinking passed directly without needing it at init
+    b_dynamic = GeminiPayloadBuilder(model="gemini-3.8-flash")
+    p_dyn_str = b_dynamic.build(req, thinking="low")
+    assert p_dyn_str["generation_config"] == {"thinking_level": "low"}
+    p_dyn_obj = b_dynamic.build(req, thinking=GeminiThinkingConfig(thinking_budget=4096))
+    assert p_dyn_obj["generation_config"] == {"thinking_budget": 4096}
 
 
 def test_gemini_payload_builder_types_optional() -> None:
