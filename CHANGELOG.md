@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.10.7-dev.1 (2026-11-02)
+
+### Bug Fixes
+
+- **gemini**: Fixing thinking related issues
+  ([`4451ea1`](https://github.com/vedangiitb/evidor-core/commit/4451ea1d3d5039fd0cc276b9f6b0f6ceb88c5a92))
+
+
 ## v1.10.6 (2026-10-31)
 
 
