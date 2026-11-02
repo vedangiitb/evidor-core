@@ -32,19 +32,7 @@ class GeminiProvider(BaseProvider):
         cached_content: str | None = None,
         thinking: Any = None,
     ) -> None:
-        if thinking is not None:
-            from evidor.models import GeminiThinkingConfig
-
-            thinking_cfg: GeminiThinkingConfig | None = (
-                thinking
-                if isinstance(thinking, GeminiThinkingConfig)
-                else GeminiThinkingConfig.from_value(thinking)
-            )
-            thinking_cfg.validate()
-        else:
-            thinking_cfg = None
-
-        super().__init__(model=model, api_key=api_key, thinking=thinking_cfg)
+        super().__init__(model=model, api_key=api_key, thinking=thinking)
         self._cached_content = cached_content
         self._client: Any = None
         self._types: Any = None
