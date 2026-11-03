@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.11.0-dev.1 (2026-11-03)
+
+### Features
+
+- **agent**: Centralized thinking configs
+  ([`4a05c49`](https://github.com/vedangiitb/evidor-core/commit/4a05c49bbae3852a10d9597c6c27c1d9cdd335af))
+
+
 ## v1.10.7 (2026-11-02)
 
 

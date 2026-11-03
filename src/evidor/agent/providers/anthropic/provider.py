@@ -47,19 +47,7 @@ class AnthropicProvider(BaseProvider):
         compact_instructions: str | None = None,
         base_url: str | None = None,
     ) -> None:
-        if thinking is not None:
-            from evidor.models import AnthropicThinkingConfig
-
-            thinking_cfg: AnthropicThinkingConfig | None = (
-                thinking
-                if isinstance(thinking, AnthropicThinkingConfig)
-                else AnthropicThinkingConfig.from_value(thinking)
-            )
-            thinking_cfg.validate()
-        else:
-            thinking_cfg = None
-
-        super().__init__(model=model, api_key=api_key, thinking=thinking_cfg)
+        super().__init__(model=model, api_key=api_key, thinking=thinking)
         self._enable_prompt_caching = enable_prompt_caching
         self._compact_threshold = compact_threshold
         self._compact_instructions = compact_instructions
@@ -69,8 +57,13 @@ class AnthropicProvider(BaseProvider):
         self._async_clients: dict[asyncio.AbstractEventLoop, Any] = {}
 
         if max_tokens is None:
-            if self._thinking and self._thinking.enabled and self._thinking.budget_tokens:
-                max_tokens = self._thinking.budget_tokens + 2048
+            budget = (
+                self._thinking.get("budget_tokens")
+                if isinstance(self._thinking, dict)
+                else getattr(self._thinking, "budget_tokens", None)
+            )
+            if budget is not None and not isinstance(budget, bool) and budget > 0:
+                max_tokens = budget + 2048
             else:
                 max_tokens = 1024
         self._max_tokens = max_tokens

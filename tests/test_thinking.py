@@ -7,16 +7,13 @@ import pytest
 from evidor import (
     Agent,
     AnthropicProvider,
-    AnthropicThinkingConfig,
     ConsoleSink,
     GeminiProvider,
-    GeminiThinkingConfig,
     GenerationRequest,
     GenerationResponse,
     InMemorySink,
     Message,
     OpenAIProvider,
-    OpenAIThinkingConfig,
     ThinkingConfig,
     ToolCall,
 )
@@ -34,100 +31,53 @@ from evidor.telemetry import semconv
 # ==============================================================================
 
 
-def test_thinking_config_base() -> None:
-    cfg = ThinkingConfig(enabled=True)
-    assert cfg.enabled is True
-    cfg.validate()
-
-
-def test_openai_thinking_config() -> None:
-    cfg = OpenAIThinkingConfig(effort="high")
+def test_thinking_config() -> None:
+    # 1. Effort only
+    cfg = ThinkingConfig(effort="high")
     assert cfg.effort == "high"
-    assert cfg.enabled is True
+    assert cfg.budget_tokens is None
+    assert cfg.summary is None
     cfg.validate()
 
-    # Coercion from shorthand string
-    c1 = OpenAIThinkingConfig.from_value("low")
-    assert c1.effort == "low"
-    assert c1.enabled is True
+    # 2. Budget tokens
+    cfg_b = ThinkingConfig(budget_tokens=4096)
+    assert cfg_b.budget_tokens == 4096
 
-    # Coercion from bool
-    c2 = OpenAIThinkingConfig.from_value(False)
-    assert c2.enabled is False
+    # 3. Summary
+    cfg_s = ThinkingConfig(summary="auto")
+    assert cfg_s.summary == "auto"
 
-    # Identity
-    c3 = OpenAIThinkingConfig.from_value(cfg)
-    assert c3 is cfg
+    # 4. All combined
+    cfg_all = ThinkingConfig(effort="xhigh", budget_tokens=2048, summary="concise")
+    assert cfg_all.effort == "xhigh"
+    assert cfg_all.budget_tokens == 2048
+    assert cfg_all.summary == "concise"
 
-    # Any custom or newly released effort mode is accepted
-    c_future = OpenAIThinkingConfig.from_value("ultra-high")
-    assert c_future.effort == "ultra-high"
-    assert c_future.enabled is True
+    # 5. Coercion from shorthand string (Mode 1: thinking="high")
+    c_str = ThinkingConfig.from_value("medium")
+    assert c_str.effort == "medium"
+    assert c_str.budget_tokens is None
+    assert c_str.summary is None
 
-    # Invalid type
-    with pytest.raises(TypeError, match="Cannot coerce"):
-        OpenAIThinkingConfig.from_value(1234)
+    # 6. Coercion from dict
+    c_dict = ThinkingConfig.from_value({"effort": "low", "summary": "none"})
+    assert c_dict.effort == "low"
+    assert c_dict.summary == "none"
 
+    # 7. Identity
+    assert ThinkingConfig.from_value(cfg) is cfg
 
-def test_anthropic_thinking_config() -> None:
-    cfg = AnthropicThinkingConfig(budget_tokens=4096)
-    assert cfg.budget_tokens == 4096
-    assert cfg.type == "enabled"
-    cfg.validate()
-
-    # Adaptive effort
-    adaptive = AnthropicThinkingConfig(type="adaptive", effort="high", budget_tokens=None)
-    adaptive.validate()
-    assert adaptive.type == "adaptive"
-    assert adaptive.effort == "high"
-
-    # Coercion from integer budget
-    c_int = AnthropicThinkingConfig.from_value(2048)
-    assert c_int.budget_tokens == 2048
-    assert c_int.type == "enabled"
-
-    # Coercion from effort string (including any future effort level)
-    c_str = AnthropicThinkingConfig.from_value("ultra")
-    assert c_str.type == "adaptive"
-    assert c_str.effort == "ultra"
-
-    # Coercion from bool
-    c_bool = AnthropicThinkingConfig.from_value(False)
-    assert c_bool.enabled is False
-
-    # Invalid type
-    with pytest.raises(TypeError, match="Cannot coerce"):
-        AnthropicThinkingConfig.from_value({"dict": "invalid"})
-
-
-def test_gemini_thinking_config() -> None:
-    cfg = GeminiThinkingConfig(thinking_level="high", thinking_summaries="auto")
-    assert cfg.thinking_level == "high"
-    assert cfg.thinking_summaries == "auto"
-    assert not hasattr(cfg, "enabled")
-    cfg.validate()
-
-    # Dynamic / None
-    cfg_dyn = GeminiThinkingConfig(thinking_level=None)
-    cfg_dyn.validate()
-
-    # Coercion from int -> thinking_budget supported
-    c_int = GeminiThinkingConfig.from_value(1024)
-    assert c_int.thinking_budget == 1024
-    assert not hasattr(c_int, "enabled")
-
-    # Coercion from str -> thinking_level (Gemini 3.x)
-    c_str = GeminiThinkingConfig.from_value("high")
-    assert c_str.thinking_level == "high"
-    assert not hasattr(c_str, "enabled")
-
-    # Enabled is not a parameter on GeminiThinkingConfig
+    # 8. No enabled parameter exists
     with pytest.raises(TypeError):
-        GeminiThinkingConfig(enabled=True)  # type: ignore[call-arg]
+        ThinkingConfig(enabled=True)  # type: ignore[call-arg]
 
-    # Bool coercion is not supported on GeminiThinkingConfig
-    with pytest.raises(TypeError, match="Cannot coerce bool to GeminiThinkingConfig"):
-        GeminiThinkingConfig.from_value(False)
+    # 9. No integer shorthand (thinking=4096 is confusing, must use ThinkingConfig(budget_tokens=4096))
+    with pytest.raises(TypeError, match="Cannot coerce int to ThinkingConfig"):
+        ThinkingConfig.from_value(4096)
+
+    # 10. No boolean shorthand (thinking=False not supported)
+    with pytest.raises(TypeError, match="Cannot coerce bool to ThinkingConfig"):
+        ThinkingConfig.from_value(False)
 
 
 # ==============================================================================
@@ -156,8 +106,7 @@ def test_openai_provider_thinking_chat_completions(monkeypatch: pytest.MonkeyPat
     monkeypatch.setitem(sys.modules, "openai", mock_openai)
 
     provider = OpenAIProvider(model="gpt-6-astra", thinking="high")
-    assert provider.thinking is not None
-    assert provider.thinking.effort == "high"
+    assert provider.thinking == "high"
 
     req = GenerationRequest(prompt="Math puzzle")
     res = provider.generate(req)
@@ -221,7 +170,7 @@ def test_anthropic_provider_extended_thinking(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
 
     # When budget_tokens is 2048 and max_tokens was 1024, auto-bump to 4096
-    provider = AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking=2048)
+    provider = AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking=ThinkingConfig(budget_tokens=2048))
     assert provider._max_tokens > 2048
 
     req = GenerationRequest(prompt="Deep question")
@@ -315,7 +264,7 @@ def test_gemini_provider_thinking_extraction_and_config(monkeypatch: pytest.Monk
 
     provider = GeminiProvider(
         model="gemini-3.8-flash",
-        thinking=GeminiThinkingConfig(thinking_level="medium", thinking_summaries="auto"),
+        thinking=ThinkingConfig(effort="medium", summary="auto"),
     )
     res = provider.generate(GenerationRequest(prompt="Explain logic"))
 
@@ -340,14 +289,14 @@ def test_gemini_provider_thinking_extraction_and_config(monkeypatch: pytest.Monk
     assert "thinking_summaries" not in call_config_3
 
     # Test Mode 2 with thinking_budget (earlier models)
-    p_gemini_budget = GeminiProvider(model="gemini-2.5-flash", thinking=GeminiThinkingConfig(thinking_budget=2048))
-    assert p_gemini_budget.thinking.thinking_budget == 2048
+    p_gemini_budget = GeminiProvider(model="gemini-2.5-flash", thinking=ThinkingConfig(budget_tokens=2048))
+    assert p_gemini_budget.thinking.budget_tokens == 2048
     p_gemini_budget.generate(GenerationRequest(prompt="Explain logic"))
     call_config_budget = mock_client.interactions.create.call_args.kwargs["generation_config"]
     assert call_config_budget["thinking_budget"] == 2048
 
 
-def test_gemini_provider_disable_thinking(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gemini_provider_without_thinking(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_genai = types.ModuleType("google.genai")
     mock_types = types.ModuleType("google.genai.types")
 
@@ -358,10 +307,10 @@ def test_gemini_provider_disable_thinking(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", mock_types)
 
-    provider = GeminiProvider(model="gemini-3.8-flash", thinking=False)
+    provider = GeminiProvider(model="gemini-3.8-flash")
     provider.generate(GenerationRequest(prompt="Fast query"))
 
-    # When thinking=False, it is not handled, so no generation_config is passed
+    # When thinking is omitted or None, no generation_config is passed
     call_kwargs = mock_client.interactions.create.call_args.kwargs
     assert "generation_config" not in call_kwargs
 
@@ -502,22 +451,22 @@ def test_redact_event_capture_content_false_capture_thinking_true() -> None:
 def test_openai_thinking_forward_compatible_models() -> None:
     # Any model name is accepted without client-side gating for forward compatibility
     p1 = OpenAIProvider(model="o3-mini", thinking="high")
-    assert p1.thinking.effort == "high"
+    assert p1.thinking == "high"
 
     p2 = OpenAIProvider(model="gpt-4o", thinking="low")
-    assert p2.thinking.effort == "low"
+    assert p2.thinking == "low"
 
     p3 = OpenAIProvider(model="gpt-6-astra", thinking="xhigh")
-    assert p3.thinking.effort == "xhigh"
+    assert p3.thinking == "xhigh"
 
     p_sol = OpenAIProvider(model="gpt-6.1-sol", thinking="medium")
-    assert p_sol.thinking.effort == "medium"
+    assert p_sol.thinking == "medium"
 
     p_luna = OpenAIProvider(model="gpt-6-luna", thinking="none")
-    assert p_luna.thinking.effort == "none"
+    assert p_luna.thinking == "none"
 
-    p4 = OpenAIProvider(model="gpt-6-astra", thinking=False)
-    assert p4.thinking.enabled is False
+    p4 = OpenAIProvider(model="gpt-6-astra", thinking=ThinkingConfig(effort="max"))
+    assert p4.thinking.effort == "max"
 
 
 def test_openai_responses_api_thinking_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -579,7 +528,7 @@ def test_openai_responses_api_with_summary_config(monkeypatch: pytest.MonkeyPatc
 
     provider = OpenAIProvider(
         model="o3-mini",
-        thinking=OpenAIThinkingConfig(effort="low", summary="auto"),
+        thinking=ThinkingConfig(effort="low", summary="auto"),
     )
     provider.generate(GenerationRequest(prompt="Summarized steps"))
 
@@ -652,20 +601,20 @@ def test_openai_chat_completions_reasoning_content_extraction(monkeypatch: pytes
 
 def test_anthropic_forward_compatibility() -> None:
     # Any model name is accepted without client-side gating for forward compatibility
-    p_any = AnthropicProvider(model="claude-future-model", thinking=2048)
+    p_any = AnthropicProvider(model="claude-future-model", thinking=ThinkingConfig(budget_tokens=2048))
     assert p_any.thinking.budget_tokens == 2048
     assert p_any._max_tokens == 2048 + 2048
 
     # When user explicitly provides max_tokens, it is respected as-is without client-side blocking
-    p_explicit = AnthropicProvider(model="claude-future-model", max_tokens=1500, thinking=2048)
+    p_explicit = AnthropicProvider(model="claude-future-model", max_tokens=1500, thinking=ThinkingConfig(budget_tokens=2048))
     assert p_explicit._max_tokens == 1500
 
     # Any future effort level string is passed through
     p_older = AnthropicProvider(model="claude-3-5-sonnet", thinking="ultra")
-    assert p_older.thinking.effort == "ultra"
+    assert p_older.thinking == "ultra"
 
-    p2 = AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking=False)
-    assert p2.thinking.enabled is False
+    p2 = AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking=ThinkingConfig(effort="high"))
+    assert p2.thinking.effort == "high"
 
 
 def test_gemini_multiturn_thought_signature_preservation(monkeypatch: pytest.MonkeyPatch) -> None:

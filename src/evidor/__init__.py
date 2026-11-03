@@ -13,18 +13,16 @@ from .mcp import (
 )
 from .models import (
     AnyThinkingConfig,
-    AnthropicThinkingConfig,
     AsyncStreamResponse,
-    GeminiThinkingConfig,
     GenerationRequest,
     GenerationResponse,
     Message,
-    OpenAIThinkingConfig,
     SearchResult,
     StreamChunk,
     StreamResponse,
     ThinkingConfig,
     ThinkingEffort,
+    ThinkingSummary,
     ToolCall,
 )
 
@@ -77,7 +75,6 @@ from .tools import (
 __all__ = [
     "Agent",
     "AnthropicProvider",
-    "AnthropicThinkingConfig",
     "AnyThinkingConfig",
     "AsyncStreamResponse",
     "BraveSearchProvider",
@@ -91,7 +88,6 @@ __all__ = [
     "ExaSearchProvider",
     "fetch_webpage_content",
     "GeminiProvider",
-    "GeminiThinkingConfig",
     "GenerationRequest",
     "GenerationResponse",
     "get_current_time",
@@ -105,7 +101,6 @@ __all__ = [
     "Message",
     "ModelProvider",
     "OpenAIProvider",
-    "OpenAIThinkingConfig",
     "OpenTelemetrySink",
     "PhoenixSink",
     "PrometheusSink",
@@ -121,6 +116,7 @@ __all__ = [
     "TelemetrySink",
     "ThinkingConfig",
     "ThinkingEffort",
+    "ThinkingSummary",
     "Tool",
     "ToolCall",
     "TraceContext",
