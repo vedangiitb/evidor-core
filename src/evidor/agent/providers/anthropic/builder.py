@@ -27,7 +27,7 @@ class AnthropicPayloadBuilder:
         self.compact_threshold = compact_threshold
         self.compact_instructions = compact_instructions
 
-    def build(self, request: GenerationRequest) -> dict[str, Any]:
+    def build(self, request: GenerationRequest, thinking: Any = None) -> dict[str, Any]:
         """Construct the full request dictionary for Anthropic Messages API."""
         system_prompt = extract_system_prompt(request)
         formatted_messages = self.format_messages(request.messages)
@@ -48,22 +48,32 @@ class AnthropicPayloadBuilder:
             payload["betas"] = ["compact-2026-01-12"]
             payload["context_management"] = {"edits": [edit]}
 
-        if self.thinking and self.thinking.enabled:
-            if getattr(self.thinking, "type", "enabled") == "adaptive":
-                payload["thinking"] = {"type": "adaptive"}
-                if getattr(self.thinking, "effort", None):
-                    payload["output_config"] = {"effort": self.thinking.effort}
-            else:
-                budget = getattr(self.thinking, "budget_tokens", None)
-                if budget is None or budget < 1024:
-                    budget = 1024
+        active_thinking = thinking if thinking is not None else self.thinking
+        if active_thinking and isinstance(active_thinking, str):
+            payload["thinking"] = {"type": "adaptive"}
+            payload["output_config"] = {"effort": active_thinking}
+        elif active_thinking and not isinstance(active_thinking, (bool, int)):
+            budget = (
+                active_thinking.get("budget_tokens")
+                if isinstance(active_thinking, dict)
+                else getattr(active_thinking, "budget_tokens", None)
+            )
+            effort = (
+                active_thinking.get("effort")
+                if isinstance(active_thinking, dict)
+                else getattr(active_thinking, "effort", None)
+            )
+            if budget is not None and not isinstance(budget, bool) and budget > 0:
+                actual_budget = max(budget, 1024)
                 payload["thinking"] = {
                     "type": "enabled",
-                    "budget_tokens": budget,
+                    "budget_tokens": actual_budget,
                 }
-                # Anthropic Messages API requires max_tokens > budget_tokens
-                if payload["max_tokens"] <= budget:
-                    payload["max_tokens"] = budget + 1024
+                if payload["max_tokens"] <= actual_budget:
+                    payload["max_tokens"] = actual_budget + 1024
+            elif isinstance(effort, str):
+                payload["thinking"] = {"type": "adaptive"}
+                payload["output_config"] = {"effort": effort}
 
         if self.enable_prompt_caching:
             payload["cache_control"] = {"type": "ephemeral"}

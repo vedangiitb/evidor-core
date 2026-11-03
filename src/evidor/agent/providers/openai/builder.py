@@ -21,7 +21,7 @@ class OpenAIPayloadBuilder:
         self.thinking = thinking
         self.compact_threshold = compact_threshold
 
-    def build(self, request: GenerationRequest) -> dict[str, Any]:
+    def build(self, request: GenerationRequest, thinking: Any = None) -> dict[str, Any]:
         """Construct the full request dictionary for OpenAI Responses API."""
         payload: dict[str, Any] = {
             "model": self.model,
@@ -42,16 +42,27 @@ class OpenAIPayloadBuilder:
                 {"type": "compaction", "compact_threshold": self.compact_threshold}
             ]
 
-        if self.thinking is not None:
+        active_thinking = thinking if thinking is not None else self.thinking
+        if active_thinking and isinstance(active_thinking, str):
+            payload["reasoning"] = {"effort": active_thinking}
+        elif active_thinking and not isinstance(active_thinking, (bool, int)):
             reasoning_config: dict[str, Any] = {}
-            if self.thinking.enabled:
-                if self.thinking.effort:
-                    reasoning_config["effort"] = self.thinking.effort
-                summary_val = getattr(self.thinking, "summary", None)
-                if summary_val:
-                    reasoning_config["summary"] = summary_val
-            else:
-                reasoning_config["effort"] = "none"
+            effort = (
+                active_thinking.get("effort")
+                if isinstance(active_thinking, dict)
+                else getattr(active_thinking, "effort", None)
+            )
+            if isinstance(effort, str):
+                reasoning_config["effort"] = effort
+
+            summary_val = (
+                active_thinking.get("summary")
+                if isinstance(active_thinking, dict)
+                else getattr(active_thinking, "summary", None)
+            )
+            if isinstance(summary_val, str) and summary_val.lower() != "none":
+                reasoning_config["summary"] = summary_val
+
             if reasoning_config:
                 payload["reasoning"] = reasoning_config
 

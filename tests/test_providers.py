@@ -1005,7 +1005,7 @@ def test_gemini_provider_interactions_api_with_tools_and_multi_turn(monkeypatch:
 
 
 def test_gemini_provider_interactions_api_with_thinking(monkeypatch: pytest.MonkeyPatch) -> None:
-    from evidor.models import GeminiThinkingConfig
+    from evidor.models import ThinkingConfig
 
     mock_google = types.ModuleType("google")
     mock_genai = types.ModuleType("google.genai")
@@ -1047,7 +1047,7 @@ def test_gemini_provider_interactions_api_with_thinking(monkeypatch: pytest.Monk
 
     provider = GeminiProvider(
         model="gemini-3.8-flash",
-        thinking=GeminiThinkingConfig(thinking_level="high", thinking_summaries="auto"),
+        thinking=ThinkingConfig(effort="high", summary="auto"),
     )
     request = GenerationRequest(prompt="Analyze this")
     response = provider.generate(request)
@@ -1410,7 +1410,7 @@ def test_gemini_payload_builder_step_ordering() -> None:
 
 def test_gemini_payload_builder_thinking_config() -> None:
     from evidor.agent.providers.gemini.builder import GeminiPayloadBuilder
-    from evidor.models import GeminiThinkingConfig, GenerationRequest
+    from evidor.models import GenerationRequest, ThinkingConfig
 
     req = GenerationRequest(prompt="hello")
 
@@ -1424,10 +1424,10 @@ def test_gemini_payload_builder_thinking_config() -> None:
         "thinking_level": "high",
     }
 
-    # Mode 2: Arbitrary / future thinking_level with thinking_summaries
+    # Mode 2: Arbitrary / future thinking effort with summary
     b_custom = GeminiPayloadBuilder(
         model="gemini-3.8-flash",
-        thinking=GeminiThinkingConfig(thinking_level="experimental_deep", thinking_summaries="auto"),
+        thinking=ThinkingConfig(effort="experimental_deep", summary="auto"),
     )
     p_custom = b_custom.build(req)
     assert p_custom["generation_config"] == {
@@ -1435,10 +1435,10 @@ def test_gemini_payload_builder_thinking_config() -> None:
         "thinking_summaries": "auto",
     }
 
-    # Mode 2: thinking_summaries="none"
+    # Mode 2: summary="none"
     b_no_thoughts = GeminiPayloadBuilder(
         model="gemini-3.8-flash",
-        thinking=GeminiThinkingConfig(thinking_level="high", thinking_summaries="none"),
+        thinking=ThinkingConfig(effort="high", summary="none"),
     )
     p_no_thoughts = b_no_thoughts.build(req)
     assert p_no_thoughts["generation_config"] == {
@@ -1446,29 +1446,21 @@ def test_gemini_payload_builder_thinking_config() -> None:
         "thinking_summaries": "none",
     }
 
-    # Mode 2: thinking_budget supported without error on client side
+    # Mode 2: budget_tokens supported without error on client side
     b_budget = GeminiPayloadBuilder(
         model="gemini-3.8-flash",
-        thinking=GeminiThinkingConfig(thinking_budget=2048),
+        thinking=ThinkingConfig(budget_tokens=2048),
     )
     p_budget = b_budget.build(req)
     assert p_budget["generation_config"] == {
         "thinking_budget": 2048,
     }
 
-    # Don't handle for thinking=False
-    b_false = GeminiPayloadBuilder(
-        model="gemini-3.8-flash",
-        thinking=False,
-    )
-    p_false = b_false.build(req)
-    assert "generation_config" not in p_false
-
     # build() handles thinking passed directly without needing it at init
     b_dynamic = GeminiPayloadBuilder(model="gemini-3.8-flash")
     p_dyn_str = b_dynamic.build(req, thinking="low")
     assert p_dyn_str["generation_config"] == {"thinking_level": "low"}
-    p_dyn_obj = b_dynamic.build(req, thinking=GeminiThinkingConfig(thinking_budget=4096))
+    p_dyn_obj = b_dynamic.build(req, thinking=ThinkingConfig(budget_tokens=4096))
     assert p_dyn_obj["generation_config"] == {"thinking_budget": 4096}
 
 
@@ -1674,12 +1666,16 @@ def test_openai_payload_builder_compaction_and_thought_blocks() -> None:
 
 def test_openai_payload_builder_thinking_disabled_effort_none() -> None:
     from evidor.agent.providers.openai.builder import OpenAIPayloadBuilder
-    from evidor.models import GenerationRequest, OpenAIThinkingConfig
+    from evidor.models import GenerationRequest, ThinkingConfig
 
-    builder = OpenAIPayloadBuilder(model="gpt-6-astra", thinking=OpenAIThinkingConfig(enabled=False))
+    builder = OpenAIPayloadBuilder(model="gpt-6-astra", thinking=ThinkingConfig(effort="none"))
     req = GenerationRequest(prompt="No thinking please")
     payload = builder.build(req)
     assert payload["reasoning"] == {"effort": "none"}
+
+    # Also test shorthand string "none"
+    b_shorthand = OpenAIPayloadBuilder(model="gpt-6-astra", thinking="none")
+    assert b_shorthand.build(req)["reasoning"] == {"effort": "none"}
 
 
 def test_openai_payload_builder_assistant_content_precedes_tool_calls() -> None:
@@ -2039,10 +2035,10 @@ def test_anthropic_builder_thought_blocks_sdk_objects_and_ordering() -> None:
 
 def test_anthropic_builder_thinking_budget_and_max_tokens_clamping() -> None:
     from evidor.agent.providers.anthropic.builder import AnthropicPayloadBuilder
-    from evidor.models import AnthropicThinkingConfig
+    from evidor.models import ThinkingConfig
 
     # Budget tokens < 1024 auto-promoted to 1024, max_tokens bumped if <= budget
-    cfg = AnthropicThinkingConfig(enabled=True, type="enabled", budget_tokens=500)
+    cfg = ThinkingConfig(budget_tokens=500)
     builder = AnthropicPayloadBuilder(model="claude-3-7-sonnet-20250219", max_tokens=1000, thinking=cfg)
     req = GenerationRequest(prompt="Hello")
     payload = builder.build(req)

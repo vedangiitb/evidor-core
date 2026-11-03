@@ -175,31 +175,34 @@ class GeminiPayloadBuilder:
         active_thinking = thinking if thinking is not None else self.thinking
         if active_thinking and isinstance(active_thinking, str):
             payload["generation_config"] = {"thinking_level": active_thinking}
-        elif active_thinking and not isinstance(active_thinking, bool):
+        elif active_thinking and not isinstance(active_thinking, (bool, int)):
             gen_config: dict[str, Any] = {}
-            thinking_level = (
-                active_thinking.get("thinking_level")
+            effort = (
+                active_thinking.get("effort") or active_thinking.get("thinking_level")
                 if isinstance(active_thinking, dict)
-                else getattr(active_thinking, "thinking_level", None)
+                else getattr(active_thinking, "effort", None) or getattr(active_thinking, "thinking_level", None)
             )
-            if isinstance(thinking_level, str):
-                gen_config["thinking_level"] = thinking_level
+            if isinstance(effort, str):
+                gen_config["thinking_level"] = effort
 
-            thinking_summaries = (
-                active_thinking.get("thinking_summaries")
+            summary = (
+                active_thinking.get("summary") or active_thinking.get("thinking_summaries")
                 if isinstance(active_thinking, dict)
-                else getattr(active_thinking, "thinking_summaries", None)
+                else getattr(active_thinking, "summary", None) or getattr(active_thinking, "thinking_summaries", None)
             )
-            if isinstance(thinking_summaries, str):
-                gen_config["thinking_summaries"] = thinking_summaries
+            if isinstance(summary, str):
+                if summary.lower() == "none":
+                    gen_config["thinking_summaries"] = "none"
+                else:
+                    gen_config["thinking_summaries"] = "auto"
 
-            thinking_budget = (
-                active_thinking.get("thinking_budget")
+            budget = (
+                active_thinking.get("budget_tokens") or active_thinking.get("thinking_budget")
                 if isinstance(active_thinking, dict)
-                else getattr(active_thinking, "thinking_budget", None)
+                else getattr(active_thinking, "budget_tokens", None) or getattr(active_thinking, "thinking_budget", None)
             )
-            if thinking_budget is not None and not isinstance(thinking_budget, bool):
-                gen_config["thinking_budget"] = thinking_budget
+            if budget is not None and not isinstance(budget, bool) and budget > 0:
+                gen_config["thinking_budget"] = budget
 
             if gen_config:
                 payload["generation_config"] = gen_config

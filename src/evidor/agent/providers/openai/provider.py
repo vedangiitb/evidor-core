@@ -33,19 +33,7 @@ class OpenAIProvider(BaseProvider):
         compact_threshold: int | None = None,
         base_url: str | None = None,
     ) -> None:
-        if thinking is not None:
-            from evidor.models import OpenAIThinkingConfig
-
-            thinking_cfg: OpenAIThinkingConfig | None = (
-                thinking
-                if isinstance(thinking, OpenAIThinkingConfig)
-                else OpenAIThinkingConfig.from_value(thinking)
-            )
-            thinking_cfg.validate()
-        else:
-            thinking_cfg = None
-
-        super().__init__(model=model, api_key=api_key, thinking=thinking_cfg)
+        super().__init__(model=model, api_key=api_key, thinking=thinking)
         self._compact_threshold = compact_threshold
         self._base_url = base_url
         self._sync_client: Any = None

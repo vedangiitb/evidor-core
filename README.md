@@ -356,7 +356,7 @@ For reasoning models (**OpenAI** `gpt-6-astra`, **Anthropic** `claude-3-7-sonnet
 ```python
 from evidor import Agent, AnthropicProvider
 
-agent = Agent(AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking=2048))
+agent = Agent(AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking="high"))
 stream = agent.send("Solve: Which is greater, 9.11 or 9.9?", stream=True)
 
 for chunk in stream:
@@ -430,59 +430,79 @@ Evidor delegates retry handling directly to the underlying model provider SDKs (
 
 ### Configurable Thinking & Reasoning Mode
 
-Evidor provides first-class support for reasoning models across **OpenAI** (`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna`), **Anthropic** (`claude-3-7-sonnet-20250219`), and **Gemini** (`gemini-3.8-flash`, `gemini-3.8-live-extended-thinking`, `gemini-3.1-pro-preview`). Thinking can be configured either using provider-specific typed configuration classes or natural shorthands.
+Evidor provides a centralized, provider-neutral `ThinkingConfig` for reasoning models across **OpenAI** (`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna`), **Anthropic** (`claude-3-7-sonnet-20250219`), and **Gemini** (`gemini-3.8-flash`, `gemini-3.8-live-extended-thinking`, `gemini-3.1-pro-preview`).
+
+Instead of navigating provider-specific configuration differences, you configure thinking through **two simple, unified modes**:
+
+- **Mode 1: Shorthand Effort String** (e.g. `thinking="high"`, `thinking="medium"`, `thinking="low"`): Works universally across all providers. The effort level string is passed directly through to the underlying provider without client-side mapping or restrictions.
+- **Mode 2: Centralized `ThinkingConfig` Object**: When you need granular control over reasoning effort, token budget, or summaries.
 
 ```python
 from evidor import (
     Agent,
     AnthropicProvider,
-    AnthropicThinkingConfig,
     GeminiProvider,
-    GeminiThinkingConfig,
     OpenAIProvider,
-    OpenAIThinkingConfig,
+    ThinkingConfig,
 )
 
-# 1. OpenAI: Configure reasoning effort ('low', 'medium', 'high', 'xhigh', 'max')
-# Via shorthand:
-provider = OpenAIProvider(model="gpt-6-astra", thinking="high")
-# Or via typed config:
-provider = OpenAIProvider(model="gpt-6-astra", thinking=OpenAIThinkingConfig(effort="high"))
+# ----------------------------------------------------------------------
+# Mode 1: Direct Effort String (universal across providers)
+# ----------------------------------------------------------------------
+# OpenAI (sets reasoning.effort):
+p_openai = OpenAIProvider(model="gpt-6-astra", thinking="high")
 
-# 2. Anthropic: Configure token budget or adaptive effort
-# Shorthand int (sets budget_tokens >= 1024; auto-bumps max_tokens if needed):
-provider = AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking=4096)
-# Shorthand string (adaptive thinking):
-provider = AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking="high")
-# Or via typed config:
-provider = AnthropicProvider(
+# Anthropic (sets adaptive thinking with effort):
+p_anthropic = AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking="high")
+
+# Gemini (sets generation_config.thinking_level):
+p_gemini = GeminiProvider(model="gemini-3.8-flash", thinking="high")
+
+# ----------------------------------------------------------------------
+# Mode 2: Centralized ThinkingConfig Object
+# ----------------------------------------------------------------------
+# 1. OpenAI: Configure effort and reasoning summary
+p_openai_cfg = OpenAIProvider(
+    model="gpt-6-astra",
+    thinking=ThinkingConfig(effort="high", summary="auto"),
+)
+
+# 2. Anthropic: Configure extended budget tokens (budget_tokens >= 1024; auto-bumps max_tokens if needed)
+p_anthropic_cfg = AnthropicProvider(
     model="claude-3-7-sonnet-20250219",
-    thinking=AnthropicThinkingConfig(budget_tokens=4096),
+    thinking=ThinkingConfig(budget_tokens=4096),
 )
 
-# 3. Gemini: 2 modes for thinking configuration
-# Mode 1: Thinking level string ('minimal', 'low', 'medium', 'high'):
-provider = GeminiProvider(model="gemini-3.8-flash", thinking="high")
-
-# Mode 2: Object supporting thinking_level, thinking_summaries ('auto', 'none'), or thinking_budget:
-provider = GeminiProvider(
+# 3. Gemini: Configure thinking level and summaries (or thinking budget for earlier models)
+p_gemini_cfg = GeminiProvider(
     model="gemini-3.8-flash",
-    thinking=GeminiThinkingConfig(thinking_level="high", thinking_summaries="auto"),
+    thinking=ThinkingConfig(effort="medium", summary="auto"),
 )
 
-# Earlier models supporting numeric thinking_budget can also be configured via GeminiThinkingConfig:
-provider = GeminiProvider(
+# Earlier models supporting numeric thinking budget:
+p_gemini_budget = GeminiProvider(
     model="gemini-2.5-flash",
-    thinking=GeminiThinkingConfig(thinking_budget=2048),
+    thinking=ThinkingConfig(budget_tokens=2048),
 )
 ```
+
+#### Centralized `ThinkingConfig` Reference
+
+| Field | Type | Description & Provider Mapping |
+| :--- | :--- | :--- |
+| `effort` | `str \| None` | Reasoning intensity. Passed through directly without client-side mapping or gating to ensure forward compatibility with new provider levels (e.g., `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`). Supported by OpenAI (`reasoning.effort`), Gemini (`thinking_level`), and Anthropic (`effort`). If an unexpected effort level is passed, the provider API handles it directly. |
+| `budget_tokens` | `int \| None` | Maximum reasoning token budget where supported. Supported by Anthropic (`thinking={"type": "enabled", "budget_tokens": ...}`) and Gemini (`thinking_budget`). |
+| `summary` | `str \| None` | Whether and how to expose reasoning summaries. Supported by OpenAI (`reasoning.summary`) and Gemini (`thinking_summaries`).<br>**Note on Gemini**: Gemini natively supports `"auto"` and `"none"`. When targeting Gemini, you should specify `"auto"` or `"none"`. As a fallback, Evidor automatically maps other non-`none` strings (e.g. `"concise"`, `"detailed"`) to `"auto"`. |
+
+> [!NOTE]
+> **No Boolean or Standalone Integer Shorthands**: Shorthands like `thinking=False` or `thinking=4096` are intentionally not supported to avoid ambiguity. To run without thinking, simply omit the parameter or pass `thinking=None`. To configure a token budget, use `ThinkingConfig(budget_tokens=4096)`.
 
 #### Inspecting Thinking Steps & Reasoning Tokens
 
 When thinking is enabled and the provider outputs thought tokens, the response provides both the visible text and the internal reasoning scratchpad:
 
 ```python
-agent = Agent(AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking=2048))
+agent = Agent(AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking="high"))
 response = agent.send("Solve this logic riddle step-by-step...")
 
 # Final visible response
@@ -1099,7 +1119,7 @@ phoenix_sink = PhoenixSink(capture_content=True, capture_thinking=True)
 langfuse_sink = LangfuseSink(capture_content=True, capture_thinking=True)
 
 agent = Agent(
-    AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking=2048),
+    AnthropicProvider(model="claude-3-7-sonnet-20250219", thinking="high"),
     telemetry=[console_sink, phoenix_sink],
 )
 response = agent.send("Analyze system security risks...")
