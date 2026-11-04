@@ -4,8 +4,8 @@ from collections.abc import Sequence
 import json
 from typing import Any
 
-from evidor.models import GenerationRequest, Message
-from ..base import extract_system_prompt, sort_tools
+from evidor.models import GenerationRequest, Message, ThinkingConfig
+from ..base import extract_system_prompt, safe_parse_tool_arguments, sort_tools
 
 
 class AnthropicPayloadBuilder:
@@ -54,26 +54,61 @@ class AnthropicPayloadBuilder:
             payload["output_config"] = {"effort": active_thinking}
         elif active_thinking and not isinstance(active_thinking, (bool, int)):
             budget = (
-                active_thinking.get("budget_tokens")
+                active_thinking.get("budget_tokens") or active_thinking.get("thinking_budget")
                 if isinstance(active_thinking, dict)
-                else getattr(active_thinking, "budget_tokens", None)
+                else getattr(active_thinking, "budget_tokens", None) or getattr(active_thinking, "thinking_budget", None)
             )
             effort = (
-                active_thinking.get("effort")
+                active_thinking.get("effort") or active_thinking.get("thinking_level")
                 if isinstance(active_thinking, dict)
-                else getattr(active_thinking, "effort", None)
+                else getattr(active_thinking, "effort", None) or getattr(active_thinking, "thinking_level", None)
             )
-            if budget is not None and not isinstance(budget, bool) and budget > 0:
-                actual_budget = max(budget, 1024)
-                payload["thinking"] = {
+            raw_summary = (
+                active_thinking.get("summary") or active_thinking.get("display") or active_thinking.get("thinking_summaries")
+                if isinstance(active_thinking, dict)
+                else getattr(active_thinking, "summary", None) or getattr(active_thinking, "display", None) or getattr(active_thinking, "thinking_summaries", None)
+            )
+            explicit_type = (
+                active_thinking.get("type")
+                if isinstance(active_thinking, dict)
+                else getattr(active_thinking, "type", None)
+            )
+
+            display_val: str | None = None
+            if isinstance(raw_summary, bool):
+                display_val = "summarized" if raw_summary else "omitted"
+            elif isinstance(raw_summary, str) and raw_summary.strip():
+                cleaned_summary = raw_summary.strip().lower()
+                if cleaned_summary in ("none", "omitted", "off", "hidden", "false"):
+                    display_val = "omitted"
+                elif cleaned_summary in ("summarized", "summary", "auto", "concise", "detailed", "on", "visible", "true"):
+                    display_val = "summarized"
+                else:
+                    display_val = raw_summary.strip()
+
+            if (budget is not None and not isinstance(budget, bool) and budget > 0) or explicit_type == "enabled":
+                actual_budget = max(budget or 1024, 1024)
+                thinking_dict: dict[str, Any] = {
                     "type": "enabled",
                     "budget_tokens": actual_budget,
                 }
+                if display_val:
+                    thinking_dict["display"] = display_val
+                payload["thinking"] = thinking_dict
                 if payload["max_tokens"] <= actual_budget:
                     payload["max_tokens"] = actual_budget + 1024
-            elif isinstance(effort, str):
-                payload["thinking"] = {"type": "adaptive"}
-                payload["output_config"] = {"effort": effort}
+            elif (
+                isinstance(effort, str)
+                or display_val is not None
+                or explicit_type == "adaptive"
+                or isinstance(active_thinking, ThinkingConfig)
+            ):
+                thinking_dict = {"type": "adaptive"}
+                if display_val:
+                    thinking_dict["display"] = display_val
+                payload["thinking"] = thinking_dict
+                if isinstance(effort, str) and effort.strip():
+                    payload["output_config"] = {"effort": effort.strip()}
 
         if self.enable_prompt_caching:
             payload["cache_control"] = {"type": "ephemeral"}
@@ -109,25 +144,65 @@ class AnthropicPayloadBuilder:
     @staticmethod
     def _normalize_thought_block(tb: Any) -> dict[str, Any] | None:
         """Convert a thought block (dict, Pydantic model, SDK object) to an Anthropic block dict."""
+        if tb is None:
+            return None
+
+        block_dict: dict[str, Any] | None = None
         if isinstance(tb, dict):
-            return dict(tb)
-        if hasattr(tb, "model_dump") and callable(tb.model_dump):
+            block_dict = tb
+        elif hasattr(tb, "model_dump") and callable(tb.model_dump):
             dumped = tb.model_dump()
             if isinstance(dumped, dict):
-                return dumped
-        if hasattr(tb, "to_dict") and callable(tb.to_dict):
+                block_dict = dumped
+        elif hasattr(tb, "to_dict") and callable(tb.to_dict):
             dumped = tb.to_dict()
             if isinstance(dumped, dict):
-                return dumped
-        if hasattr(tb, "type"):
-            block: dict[str, Any] = {"type": getattr(tb, "type")}
-            if hasattr(tb, "thinking") and getattr(tb, "thinking") is not None:
-                block["thinking"] = getattr(tb, "thinking")
-            if hasattr(tb, "signature") and getattr(tb, "signature") is not None:
-                block["signature"] = getattr(tb, "signature")
-            if hasattr(tb, "data") and getattr(tb, "data") is not None:
-                block["data"] = getattr(tb, "data")
-            return block
+                block_dict = dumped
+
+        def _get(key: str, default: Any = None) -> Any:
+            if block_dict is not None:
+                return block_dict.get(key, default)
+            return getattr(tb, key, default)
+
+        raw_type = _get("type")
+        block_type = str(raw_type).strip().lower() if raw_type is not None else None
+
+        if block_type == "redacted_thinking":
+            data_val = _get("data", "")
+            return {
+                "type": "redacted_thinking",
+                "data": str(data_val or ""),
+            }
+
+        is_thought = (
+            block_type in ("thinking", "thought", "reasoning")
+            or _get("thinking") is not None
+            or _get("thought") is not None
+            or _get("thought_signature") is not None
+            or _get("thoughtSignature") is not None
+            or _get("signature") is not None
+        )
+
+        if is_thought:
+            thinking_text = (
+                _get("thinking")
+                or _get("summary")
+                or _get("text")
+                or ""
+            )
+            sig = (
+                _get("signature")
+                or _get("thought_signature")
+                or _get("thoughtSignature")
+            )
+            normalized: dict[str, Any] = {
+                "type": "thinking",
+                "thinking": str(thinking_text) if thinking_text is not None else "",
+            }
+            if sig is not None and str(sig).strip():
+                normalized["signature"] = str(sig).strip()
+            return normalized
+
         return None
 
     def format_messages(self, messages: Sequence[Message]) -> list[dict[str, Any]]:
@@ -184,15 +259,27 @@ class AnthropicPayloadBuilder:
                         content_blocks.append({"type": "text", "text": message.content})
                     if message.tool_calls:
                         for tc in message.tool_calls:
+                            tc_args = (
+                                tc.arguments
+                                if isinstance(tc.arguments, dict)
+                                else (safe_parse_tool_arguments(tc.arguments) if tc.arguments else {})
+                            )
                             content_blocks.append({
                                 "type": "tool_use",
                                 "id": tc.id,
                                 "name": tc.name,
-                                "input": tc.arguments,
+                                "input": tc_args,
                             })
+                    if not content_blocks:
+                        fallback_text = message.content if (isinstance(message.content, str) and message.content.strip()) else "Done."
+                        content_blocks.append({"type": "text", "text": fallback_text})
                     formatted.append({"role": "assistant", "content": content_blocks})
                 else:
-                    formatted.append({"role": "assistant", "content": message.content})
+                    if isinstance(message.content, list):
+                        formatted.append({"role": "assistant", "content": message.content})
+                    else:
+                        content_val = message.content if (isinstance(message.content, str) and message.content.strip()) else "Done."
+                        formatted.append({"role": "assistant", "content": content_val})
 
             else:
                 # User or other role

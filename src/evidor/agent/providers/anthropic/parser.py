@@ -39,9 +39,18 @@ class AnthropicResponseParser:
 
         thinking_text = "".join(thought_parts) if thought_parts else None
         if thinking_text is None:
-            raw_thinking = _get_field(response_msg, "thinking") or _get_field(response_msg, "reasoning")
+            raw_thinking = (
+                _get_field(response_msg, "thinking")
+                or _get_field(response_msg, "reasoning")
+                or _get_field(response_msg, "thinking_summary")
+                or _get_field(response_msg, "summary")
+            )
             if isinstance(raw_thinking, str) and raw_thinking.strip():
                 thinking_text = raw_thinking.strip()
+            elif isinstance(raw_thinking, dict):
+                th = raw_thinking.get("thinking") or raw_thinking.get("summary") or raw_thinking.get("text")
+                if isinstance(th, str) and th.strip():
+                    thinking_text = th.strip()
 
         usage = self.parse_usage(_get_field(response_msg, "usage"))
 
@@ -93,10 +102,20 @@ class AnthropicResponseParser:
                 )
                 if c:
                     compaction_summary = str(c)
-            elif block_type == "thinking":
-                th_text = _get_field(block, "thinking") or _get_field(block, "text") or ""
-                thought_parts.append(str(th_text))
-                sig = _get_field(block, "signature")
+            elif block_type in ("thinking", "thought"):
+                th_text = (
+                    _get_field(block, "thinking")
+                    or _get_field(block, "summary")
+                    or _get_field(block, "text")
+                    or ""
+                )
+                if str(th_text).strip():
+                    thought_parts.append(str(th_text))
+                sig = (
+                    _get_field(block, "signature")
+                    or _get_field(block, "thought_signature")
+                    or _get_field(block, "thoughtSignature")
+                )
                 tb: dict[str, Any] = {"type": "thinking", "thinking": str(th_text)}
                 if isinstance(sig, str) and sig.strip():
                     tb["signature"] = sig.strip()

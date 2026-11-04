@@ -224,6 +224,199 @@ def test_anthropic_provider_multiturn_thought_signature_replay(monkeypatch: pyte
     assert content_blocks[1]["id"] == "call_99"
 
 
+def test_anthropic_builder_adaptive_effort_and_summary() -> None:
+    from evidor.agent.providers.anthropic.builder import AnthropicPayloadBuilder
+
+    # 1. Adaptive with effort and summary="auto" -> display: "summarized"
+    cfg1 = ThinkingConfig(effort="high", summary="auto")
+    b1 = AnthropicPayloadBuilder(model="claude-3-7-sonnet", max_tokens=2048, thinking=cfg1)
+    p1 = b1.build(GenerationRequest(prompt="Explain quantum mechanics"))
+    assert p1["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert p1["output_config"] == {"effort": "high"}
+
+    # 2. Adaptive with effort and summary="none" -> display: "omitted"
+    cfg2 = ThinkingConfig(effort="low", summary="none")
+    b2 = AnthropicPayloadBuilder(model="claude-3-7-sonnet", max_tokens=2048, thinking=cfg2)
+    p2 = b2.build(GenerationRequest(prompt="Simple math"))
+    assert p2["thinking"] == {"type": "adaptive", "display": "omitted"}
+    assert p2["output_config"] == {"effort": "low"}
+
+    # 3. Summary only ("detailed") -> adaptive thinking with display: "summarized"
+    cfg3 = ThinkingConfig(summary="detailed")
+    b3 = AnthropicPayloadBuilder(model="claude-3-7-sonnet", max_tokens=2048, thinking=cfg3)
+    p3 = b3.build(GenerationRequest(prompt="Summarize"))
+    assert p3["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert "output_config" not in p3
+
+    # 4. Summary only ("omitted") -> adaptive thinking with display: "omitted"
+    cfg4 = ThinkingConfig(summary="omitted")
+    b4 = AnthropicPayloadBuilder(model="claude-3-7-sonnet", max_tokens=2048, thinking=cfg4)
+    p4 = b4.build(GenerationRequest(prompt="Code quickly"))
+    assert p4["thinking"] == {"type": "adaptive", "display": "omitted"}
+
+    # 5. Budget tokens with summary="concise" -> display: "summarized"
+    cfg5 = ThinkingConfig(budget_tokens=2048, summary="concise")
+    b5 = AnthropicPayloadBuilder(model="claude-3-7-sonnet", max_tokens=2048, thinking=cfg5)
+    p5 = b5.build(GenerationRequest(prompt="Analyze code"))
+    assert p5["thinking"] == {"type": "enabled", "budget_tokens": 2048, "display": "summarized"}
+    assert p5["max_tokens"] > 2048
+
+    # 6. Budget tokens with summary="none" -> display: "omitted"
+    cfg6 = ThinkingConfig(budget_tokens=2048, summary="none")
+    b6 = AnthropicPayloadBuilder(model="claude-3-7-sonnet", max_tokens=4096, thinking=cfg6)
+    p6 = b6.build(GenerationRequest(prompt="Deep benchmark"))
+    assert p6["thinking"] == {"type": "enabled", "budget_tokens": 2048, "display": "omitted"}
+
+
+def test_anthropic_builder_thought_block_normalization_cross_provider() -> None:
+    from evidor.agent.providers.anthropic.builder import AnthropicPayloadBuilder
+
+    builder = AnthropicPayloadBuilder(model="claude-3-7-sonnet", max_tokens=2048)
+
+    # Gemini-style thought block with thought_signature and boolean thought flag
+    gem_block = {
+        "type": "thought",
+        "text": "Gemini chain-of-thought",
+        "thought": True,
+        "thought_signature": "gem_sig_789",
+        "extra_gemini_field": "ignore_me",
+    }
+    norm_gem = builder._normalize_thought_block(gem_block)
+    assert norm_gem == {
+        "type": "thinking",
+        "thinking": "Gemini chain-of-thought",
+        "signature": "gem_sig_789",
+    }
+    assert "extra_gemini_field" not in norm_gem
+    assert "thought" not in norm_gem
+
+    # OpenAI-style reasoning block with summary
+    oai_block = {
+        "type": "reasoning",
+        "summary": "OpenAI reasoning summary",
+        "signature": "oai_sig_321",
+    }
+    norm_oai = builder._normalize_thought_block(oai_block)
+    assert norm_oai == {
+        "type": "thinking",
+        "thinking": "OpenAI reasoning summary",
+        "signature": "oai_sig_321",
+    }
+
+    # Anthropic omitted block (empty thinking)
+    omitted_block = {
+        "type": "thinking",
+        "thinking": "",
+        "signature": "omitted_sig_999",
+    }
+    norm_omit = builder._normalize_thought_block(omitted_block)
+    assert norm_omit == {
+        "type": "thinking",
+        "thinking": "",
+        "signature": "omitted_sig_999",
+    }
+
+    # Redacted thinking block
+    redacted_block = {
+        "type": "redacted_thinking",
+        "data": "encrypted_thought_data",
+    }
+    norm_redacted = builder._normalize_thought_block(redacted_block)
+    assert norm_redacted == {
+        "type": "redacted_thinking",
+        "data": "encrypted_thought_data",
+    }
+
+    # Replay assistant message with normalized blocks and fallback for empty content
+    req = GenerationRequest(
+        messages=[
+            Message(role="user", content="Test"),
+            Message(role="assistant", content="", thought_blocks=(gem_block,)),
+        ]
+    )
+    payload = builder.build(req)
+    asst_content = payload["messages"][1]["content"]
+    assert len(asst_content) == 1
+    assert asst_content[0]["type"] == "thinking"
+    assert asst_content[0]["signature"] == "gem_sig_789"
+
+
+def test_anthropic_parser_reasoning_summary_and_omitted() -> None:
+    from evidor.agent.providers.anthropic.parser import AnthropicResponseParser
+
+    parser = AnthropicResponseParser(model="claude-3-7-sonnet")
+
+    # 1. Summarized thinking block: thinking has text
+    resp_sum = {
+        "id": "msg_sum_01",
+        "content": [
+            {"type": "thinking", "summary": "Core algorithm design steps", "signature": "sig_sum_1"},
+            {"type": "text", "text": "Here is the implementation"},
+        ],
+    }
+    res_sum = parser.parse(resp_sum)
+    assert res_sum.thinking == "Core algorithm design steps"
+    assert len(res_sum.thought_blocks) == 1
+    assert res_sum.thought_blocks[0] == {
+        "type": "thinking",
+        "thinking": "Core algorithm design steps",
+        "signature": "sig_sum_1",
+    }
+
+    # 2. Omitted thinking block: thinking is empty string ""
+    resp_omit = {
+        "id": "msg_omit_02",
+        "content": [
+            {"type": "thinking", "thinking": "", "signature": "sig_omit_2"},
+            {"type": "text", "text": "Fast response"},
+        ],
+    }
+    res_omit = parser.parse(resp_omit)
+    assert res_omit.thinking is None  # Omitted thinking text should not expose empty string
+    assert len(res_omit.thought_blocks) == 1
+    assert res_omit.thought_blocks[0] == {
+        "type": "thinking",
+        "thinking": "",
+        "signature": "sig_omit_2",
+    }
+
+
+def test_anthropic_stream_reasoning_summary_and_signature_accumulation() -> None:
+    from evidor.agent.providers.anthropic.stream import AnthropicStreamHandler
+
+    handler = AnthropicStreamHandler(model="claude-3-7-sonnet")
+
+    events = [
+        {"type": "message_start", "message": {"id": "msg_str_01", "model": "claude-3-7-sonnet"}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "First reasoning step. "}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_summary_delta", "summary": "Second reasoning step."}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig_part1_"}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig_part2"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "Final answer."}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_stop"},
+    ]
+
+    chunks = []
+    for ev in events:
+        chunks.extend(list(handler.process_event(ev)))
+
+    finished_chunk = next(c for c in chunks if c.is_finished)
+    final_resp = finished_chunk.response
+    assert final_resp is not None
+    assert final_resp.text == "Final answer."
+    assert final_resp.thinking == "First reasoning step. Second reasoning step."
+    assert len(final_resp.thought_blocks) == 1
+    assert final_resp.thought_blocks[0] == {
+        "type": "thinking",
+        "thinking": "First reasoning step. Second reasoning step.",
+        "signature": "sig_part1_sig_part2",
+    }
+
+
 # ==============================================================================
 # GeminiProvider Thinking Tests
 # ==============================================================================

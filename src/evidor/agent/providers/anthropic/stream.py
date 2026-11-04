@@ -53,8 +53,8 @@ class AnthropicStreamHandler:
                 name = _get_field(cb, "name") or "unknown_tool"
                 self.block_id_map[idx] = str(call_id)
                 self.tool_acc.start_call(str(call_id), str(name))
-            elif cb_type == "thinking":
-                th_text = _get_field(cb, "thinking") or ""
+            elif cb_type in ("thinking", "thought"):
+                th_text = _get_field(cb, "thinking") or _get_field(cb, "summary") or ""
                 self.block_thinking_map[idx] = {
                     "type": "thinking",
                     "parts": [str(th_text)] if th_text else [],
@@ -85,8 +85,17 @@ class AnthropicStreamHandler:
                     if txt:
                         self.accumulated_text.append(str(txt))
                         yield StreamChunk(text=str(txt), raw_event=event)
-                elif delta_type == "thinking_delta" or hasattr(delta, "thinking"):
-                    th = _get_field(delta, "thinking", "") or ""
+                elif (
+                    delta_type in (
+                        "thinking_delta",
+                        "thinking_summary_delta",
+                        "reasoning_delta",
+                        "reasoning_summary_delta",
+                    )
+                    or hasattr(delta, "thinking")
+                    or hasattr(delta, "summary")
+                ):
+                    th = _get_field(delta, "thinking", "") or _get_field(delta, "summary", "") or ""
                     if th:
                         self.text_thinking_parts.append(str(th))
                         if idx in self.block_thinking_map and "parts" in self.block_thinking_map[idx]:
@@ -101,7 +110,9 @@ class AnthropicStreamHandler:
                 elif delta_type == "signature_delta" or hasattr(delta, "signature"):
                     sig = _get_field(delta, "signature", "") or ""
                     if sig and idx in self.block_thinking_map:
-                        self.block_thinking_map[idx]["signature"] = str(sig)
+                        self.block_thinking_map[idx]["signature"] = (
+                            self.block_thinking_map[idx].get("signature", "") + str(sig)
+                        )
                 elif delta_type == "input_json_delta" or hasattr(delta, "partial_json"):
                     call_id = self.block_id_map.get(idx, f"call_{idx}")
                     pj = _get_field(delta, "partial_json", "") or ""
