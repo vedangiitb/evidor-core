@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.11.1-dev.1 (2026-11-04)
+
+### Bug Fixes
+
+- **anthropic**: Fixing reasoning mode issues
+  ([`405c681`](https://github.com/vedangiitb/evidor-core/commit/405c68150ea149f0bb693a1fb23bcd5151267211))
+
+- **gemini**: Removing redundant fields in parsing
+  ([`555be1d`](https://github.com/vedangiitb/evidor-core/commit/555be1dfd2e0f79cc5c27c3c9c6cf342f5ca1029))
+
+
 ## v1.11.0 (2026-11-03)
 
 

@@ -152,11 +152,11 @@ class GeminiResponseParser:
                     return val
             return default
 
-        pt = _get_field("total_input_tokens", "input_tokens", "prompt_tokens")
-        ct = _get_field("total_output_tokens", "output_tokens", "completion_tokens")
+        pt = _get_field("total_input_tokens")
+        ct = _get_field("total_output_tokens")
         tt = _get_field("total_tokens")
-        cached = _get_field("total_cached_tokens", "cached_tokens", default=0) or 0
-        reasoning = _get_field("total_thought_tokens", "thought_tokens", "reasoning_tokens", default=0) or 0
+        cached = _get_field("total_cached_tokens", default=0) or 0
+        reasoning = _get_field("total_thought_tokens", default=0) or 0
 
         if not (isinstance(pt, int) or isinstance(ct, int) or isinstance(tt, int)):
             return None

@@ -467,10 +467,17 @@ p_openai_cfg = OpenAIProvider(
     thinking=ThinkingConfig(effort="high", summary="auto"),
 )
 
-# 2. Anthropic: Configure extended budget tokens (budget_tokens >= 1024; auto-bumps max_tokens if needed)
-p_anthropic_cfg = AnthropicProvider(
+# 2. Anthropic: Configure adaptive thinking with reasoning summary, or manual budget tokens
+# Adaptive thinking with reasoning summary:
+p_anthropic_adaptive = AnthropicProvider(
     model="claude-3-7-sonnet-20250219",
-    thinking=ThinkingConfig(budget_tokens=4096),
+    thinking=ThinkingConfig(effort="high", summary="auto"),
+)
+
+# Extended manual budget tokens (budget_tokens >= 1024; auto-bumps max_tokens if needed):
+p_anthropic_budget = AnthropicProvider(
+    model="claude-3-7-sonnet-20250219",
+    thinking=ThinkingConfig(budget_tokens=4096, summary="omitted"),
 )
 
 # 3. Gemini: Configure thinking level and summaries (or thinking budget for earlier models)
@@ -490,9 +497,9 @@ p_gemini_budget = GeminiProvider(
 
 | Field | Type | Description & Provider Mapping |
 | :--- | :--- | :--- |
-| `effort` | `str \| None` | Reasoning intensity. Passed through directly without client-side mapping or gating to ensure forward compatibility with new provider levels (e.g., `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`). Supported by OpenAI (`reasoning.effort`), Gemini (`thinking_level`), and Anthropic (`effort`). If an unexpected effort level is passed, the provider API handles it directly. |
+| `effort` | `str \| None` | Reasoning intensity. Passed through directly without client-side mapping or gating to ensure forward compatibility with new provider levels (e.g., `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`). Supported by OpenAI (`reasoning.effort`), Gemini (`thinking_level`), and Anthropic (`output_config.effort` with adaptive thinking). If an unexpected effort level is passed, the provider API handles it directly. |
 | `budget_tokens` | `int \| None` | Maximum reasoning token budget where supported. Supported by Anthropic (`thinking={"type": "enabled", "budget_tokens": ...}`) and Gemini (`thinking_budget`). |
-| `summary` | `str \| None` | Whether and how to expose reasoning summaries. Supported by OpenAI (`reasoning.summary`) and Gemini (`thinking_summaries`).<br>**Note on Gemini**: Gemini natively supports `"auto"` and `"none"`. When targeting Gemini, you should specify `"auto"` or `"none"`. As a fallback, Evidor automatically maps other non-`none` strings (e.g. `"concise"`, `"detailed"`) to `"auto"`. |
+| `summary` | `str \| None` | Whether and how to expose reasoning summaries. Supported across all three providers:<br>• **Anthropic**: Controls reasoning exposure via Claude's `thinking.display` parameter (`"summarized"` vs `"omitted"`). Values such as `"auto"`, `"summarized"`, `"concise"`, or `"detailed"` set `display: "summarized"`, populating `response.thinking` with a human-readable summary. Values like `"none"` or `"omitted"` set `display: "omitted"`, omitting thinking text to minimize time-to-first-token while preserving cryptographic signatures in `thought_blocks` for multi-turn replay.<br>• **OpenAI**: Configures `reasoning.summary`.<br>• **Gemini**: Configures `thinking_summaries` (`"auto"` or `"none"`). As a fallback, Evidor automatically maps other non-`none` strings (e.g. `"concise"`, `"detailed"`) to `"auto"`. |
 
 > [!NOTE]
 > **No Boolean or Standalone Integer Shorthands**: Shorthands like `thinking=False` or `thinking=4096` are intentionally not supported to avoid ambiguity. To run without thinking, simply omit the parameter or pass `thinking=None`. To configure a token budget, use `ThinkingConfig(budget_tokens=4096)`.
@@ -519,7 +526,7 @@ if response.usage and response.usage.reasoning_tokens:
 
 #### Multi-Turn Tool Calling & Cryptographic Signatures
 
-Reasoning models from Anthropic and Gemini output thought blocks alongside cryptographic signatures (such as Anthropic's `signature` field or Gemini's thought parts). In multi-turn tool loops, these signatures must be preserved and replayed in subsequent conversation turns to avoid API verification errors. Evidor automatically captures and replays them in `agent.messages` and `thought_blocks` without requiring any manual handling.
+Reasoning models from Anthropic and Gemini output thought blocks alongside cryptographic signatures (such as Anthropic's `signature` field or Gemini's thought parts). In multi-turn tool loops, these signatures must be preserved and replayed in subsequent conversation turns to avoid API verification errors. Evidor automatically captures and replays them in `agent.messages` and `thought_blocks` without requiring any manual handling. Furthermore, Evidor normalizes and sanitizes thought blocks across providers (e.g. converting between Gemini's and Anthropic's signature representations and stripping non-standard fields) so history can be transferred or replayed seamlessly without schema violations.
 
 ## Tools & Function Calling
 
